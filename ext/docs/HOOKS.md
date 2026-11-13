@@ -38,6 +38,9 @@
 | H1-C | 不可变插件源身份 | 身份投影 | `pkg/jsplugin/registry.go` | LoadedPlugin.SourceSHA256 / CompilePlugin | 2026-11-13 | 编译时记录原始源字节SHA256，版本标签不代替制品身份；不自动批准或激活插件 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | 共用插件hook源制品拒绝点 | 准入型（仅源身份） | `pkg/jsplugin/engine.go` | Compile / Engine.SourceSHA256 / Engine.call | 2026-11-13 | Engine保存不可变原始源摘要，所有Call路径在slot/runtime/JS执行之前调用core.PluginHooks；默认noop，不含config/model/target授权 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Provider实际配置执行前准入 | 准入型 | `relay/channel/providerplugin/adaptor.go` | bind / checkExecution / prepareKey / renew | 2026-11-13 | actual RelayInfo/已绑定a.config与fresh行双投影，credential refresh/key exchange/convert前及prepared复用重新检查；不覆盖后台credential服务或opaque最终正文 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task实际提交hook前后准入 | 准入型 | `relay/channel/task/jsplugin/adaptor.go` | checkSubmitAdmission / ValidateRequestAndSetAction / buildSubmit / DoRequest / applyChannelContext | 2026-11-13 | 实际已选配置在auth准备/build hook前复核并用于submission hook，descriptor模型变化后与cached复用再验；不改后台poll延续 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task attempt与价格前准入 | 准入型 | `relay/relay_task.go` | RelayTaskSubmit | 2026-11-13 | late TaskAttempt前、validation前后复核；拒绝先于新预扣，不改资金生命周期 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task提交签名配置冻结 | 准入桥接 | `relay/channel/task/jsplugin/credential.go` | signTaskRequest | 2026-11-13 | 已准submission签名用同一冻结info有效配置，不再从另一个cache快照取值；poll原路径不变 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -80,4 +83,7 @@ relay/websocket.go
 pkg/jsplugin/registry.go
 pkg/jsplugin/engine.go
 relay/channel/providerplugin/adaptor.go
+relay/channel/task/jsplugin/adaptor.go
+relay/relay_task.go
+relay/channel/task/jsplugin/credential.go
 ```

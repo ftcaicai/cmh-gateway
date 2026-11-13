@@ -202,6 +202,9 @@ func ApplyOriginTaskAffinity(c *gin.Context, info *relaycommon.RelayInfo) *dto.T
 // 共享控制器编排负责未落库退款、最终额度预留、落库和结算。
 func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitResult, *dto.TaskError) {
 	info.InitChannelMeta(c)
+	if apiErr := CheckRequestAdmission(c, info); apiErr != nil {
+		return nil, &dto.TaskError{Code: "model_admission_denied", Message: "request rejected", StatusCode: http.StatusForbidden, LocalError: true, NoRetry: true}
+	}
 
 	// The attempt's late request plugins see the client body before it is
 	// validated and priced; a changed body is decoded again.
@@ -242,6 +245,9 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 			return nil, service.TaskErrorWrapperLocal(err, "model_mapping_failed", http.StatusBadRequest)
 		}
 	}
+	if apiErr := CheckRequestAdmission(c, info); apiErr != nil {
+		return nil, &dto.TaskError{Code: "model_admission_denied", Message: "request rejected", StatusCode: http.StatusForbidden, LocalError: true, NoRetry: true}
+	}
 	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
 		return nil, taskErr
 	}
@@ -258,6 +264,9 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		if err := helper.ModelMappedHelper(c, info, nil); err != nil {
 			return nil, service.TaskErrorWrapperLocal(err, "model_mapping_failed", http.StatusBadRequest)
 		}
+	}
+	if apiErr := CheckRequestAdmission(c, info); apiErr != nil {
+		return nil, &dto.TaskError{Code: "model_admission_denied", Message: "request rejected", StatusCode: http.StatusForbidden, LocalError: true, NoRetry: true}
 	}
 
 	// 4. 价格计算：基础模型价格。重试可能换了插件或渠道，每次尝试都重新定价，

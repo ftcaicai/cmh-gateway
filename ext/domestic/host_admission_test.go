@@ -24,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	"github.com/QuantumNous/new-api/relay/channel/providerplugin"
+	taskjsplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -371,6 +372,136 @@ export function refresh(ctx) { utils.fetch({url:ctx.baseUrl+"/refresh",method:"P
 	require.NoError(t, err)
 	core.Models = bothGate
 	require.NotNil(t, relay.CheckRequestAdmission(c, info), "even independently approved fresh config cannot replace frozen selected config")
+}
+
+func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
+	t.Helper()
+	previousRegistry := jsplugin.DefaultRegistry
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
+	var lookups, submissions atomic.Int32
+	var signedTier string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/lookup" {
+			lookups.Add(1)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		signedTier = r.Header.Get("X-Tier")
+		submissions.Add(1)
+		_, _ = w.Write([]byte(`{"id":"local-task"}`))
+	}))
+	defer upstream.Close()
+	service.InitHttpClient()
+	const source = `export const meta={apiVersion:1,key:"cmh-task-admission",name:"Task admission",version:"1.0.0",author:{name:"Test"},models:["public-task"],fetchMode:"per_task",channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"approved"}}}};
+export function buildSubmitRequest(ctx){utils.fetch({url:ctx.baseUrl+"/lookup"});if(ctx.config.tier!=="approved")throw new Error("wrong actual config");return {url:ctx.baseUrl+"/submit",method:"POST",rewriteModel:ctx.requestBody.rewrite||ctx.upstreamModel,body:{model:ctx.upstreamModel}};}
+export function parseSubmitResponse(){return {taskId:"local-task"};}
+export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
+export function signRequest(ctx){if(ctx.config.tier!=="approved")throw new Error("wrong signer config");return {headers:{"X-Tier":ctx.config.tier}};}
+export function parseTaskResult(){return {status:"SUCCESS"};}`
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	base := upstream.URL
+	binding := `{"task_plugin_key":"cmh-task-admission"}`
+	stored := model.Channel{Id: 95003, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Models: "public-task", Group: "default", Key: "fixture", BaseURL: &base, Setting: &binding, OtherSettings: `{"plugin_config":{"tier":"approved"}}`}
+	core.Models = noop
+	require.NoError(t, model.DB.Create(&stored).Error)
+	require.NoError(t, stored.AddAbilities(model.DB))
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id = ?", stored.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id = ?", stored.Id).Delete(&model.Channel{}).Error)
+		model.InitChannelCache()
+	}()
+	identity, err := model.PluginExecutorIdentity(&stored, plugin, registry.Generation().Number, "task", "/v1/tasks/cmh-task-admission")
+	require.NoError(t, err)
+	public, err := New([]string{"public-task"}, []string{"61"})
+	require.NoError(t, err)
+	upstreamPolicy, err := New([]string{"public-task"}, nil)
+	require.NoError(t, err)
+	gate, err := NewGate(public, upstreamPolicy, []core.ExecutorIdentity{identity})
+	require.NoError(t, err)
+	core.Models = gate
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/cmh-task-admission", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	c.Set("expected_task_plugin_key", plugin.Meta.Key)
+	c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Plugin: plugin, Generation: registry.Generation()})
+	service.GetChannelConstraints(c).AddFilter(hostdto.ChannelFilter{Kind: hostdto.FilterTaskPluginIdentity, TaskPluginKey: plugin.Meta.Key, RequestPath: c.Request.URL.Path})
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, &stored, "public-task"))
+	c.Set("task_request", map[string]any{"prompt": "local"})
+	c.Set("task_action", "generate")
+	probe := &admissionBillingProbe{}
+	info := &relaycommon.RelayInfo{OriginModelName: "public-task", UsingGroup: "default", Billing: probe, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+	info.InitChannelMeta(c)
+	info.UpstreamModelName = "public-task"
+	bad := *info
+	badMeta := *info.ChannelMeta
+	bad.ChannelMeta = &badMeta
+	bad.ChannelOtherSettings.PluginConfig = common.RawMessage(`{"tier":"unapproved"}`)
+	badAdaptor := taskjsplugin.New(plugin)
+	badAdaptor.Init(&bad)
+	deniedTask := badAdaptor.ValidateRequestAndSetAction(c, &bad)
+	require.NotNil(t, deniedTask)
+	assert.True(t, deniedTask.NoRetry)
+	assert.Equal(t, http.StatusForbidden, deniedTask.StatusCode)
+	assert.Zero(t, lookups.Load())
+	assert.Zero(t, submissions.Load())
+	assert.Zero(t, probe.reserve)
+	// Deliberately stale channel cache must not replace the checked runtime config.
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("settings", `{"plugin_config":{"tier":"stale-cache"}}`).Error)
+	model.InitChannelCache()
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("settings", stored.OtherSettings).Error)
+	adaptor := taskjsplugin.New(plugin)
+	adaptor.Init(info)
+	require.Nil(t, adaptor.ValidateRequestAndSetAction(c, info))
+	assert.Equal(t, int32(1), lookups.Load())
+	body, err := adaptor.BuildRequestBody(c, info)
+	require.NoError(t, err)
+	response, err := adaptor.DoRequest(c, info, body)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, int32(1), submissions.Load())
+	assert.Equal(t, "approved", signedTier, "actual signRequest must not read deliberately stale cache config")
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	_, err = adaptor.BuildRequestBody(c, info)
+	require.Error(t, err, "cached descriptor body reuse must revalidate current status")
+	_, err = adaptor.DoRequest(c, info, strings.NewReader(`{"model":"public-task"}`))
+	require.Error(t, err, "cached final task dispatch must not bypass fresh admission")
+	assert.Equal(t, int32(1), submissions.Load())
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("status", common.ChannelStatusEnabled).Error)
+	cachedSettings := info.ChannelOtherSettings
+	updatedStored := stored
+	updatedStored.OtherSettings = `{"plugin_config":{"tier":"updated-approved"}}`
+	updatedIdentity, err := model.PluginExecutorIdentity(&updatedStored, plugin, uint64(identity.Generation), "task", c.Request.URL.Path)
+	require.NoError(t, err)
+	bothConfigs, err := NewGate(public, upstreamPolicy, []core.ExecutorIdentity{identity, updatedIdentity})
+	require.NoError(t, err)
+	core.Models = bothConfigs
+	info.ChannelOtherSettings.PluginConfig = common.RawMessage(`{"tier":"updated-approved"}`)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("settings", updatedStored.OtherSettings).Error)
+	_, err = adaptor.BuildRequestBody(c, info)
+	require.Error(t, err, "old cached descriptor cannot inherit a separately approved new building config")
+	_, err = adaptor.DoRequest(c, info, strings.NewReader(`{"model":"public-task"}`))
+	require.Error(t, err)
+	assert.Equal(t, int32(1), submissions.Load())
+	info.ChannelOtherSettings = cachedSettings
+	core.Models = gate
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("settings", stored.OtherSettings).Error)
+	c.Set("task_request", map[string]any{"prompt": "local", "rewrite": "unapproved-task"})
+	changed := *info
+	changedMeta := *info.ChannelMeta
+	changed.ChannelMeta = &changedMeta
+	changedAdaptor := taskjsplugin.New(plugin)
+	changedAdaptor.Init(&changed)
+	require.NotNil(t, changedAdaptor.ValidateRequestAndSetAction(c, &changed), "descriptor rewrite must be rejected before reserve or submission")
+	assert.Equal(t, int32(2), lookups.Load(), "approved build hook may do read-only lookup before returning a denied descriptor")
+	assert.Equal(t, int32(1), submissions.Load())
+	assert.Zero(t, probe.reserve)
+	assert.Zero(t, probe.settle)
+	assert.Zero(t, probe.refund)
 }
 
 func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, noop core.ModelGate) {
@@ -980,6 +1111,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
 	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
 	runHostBoundProviderAdmission(t, gate, oldGate)
+	runHostTaskDriverAdmission(t, gate, oldGate)
 	runHostAdmissionSockets(t, channels[1], gate, oldGate)
 	runHostAdmissionWrites(t, gate, oldGate)
 	owners, err := model.GetPreferredModelOwnerChannelTypes([]string{"gpt-4o-mini"}, []string{"default"})

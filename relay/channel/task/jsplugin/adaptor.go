@@ -25,6 +25,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -135,6 +136,9 @@ const maxTaskPluginPersistedJSONBytes = 1 << 20
 type TaskAdaptor struct {
 	plugin         *pluginruntime.LoadedPlugin
 	info           *relaycommon.RelayInfo
+	admittedSubmit bool
+	submitExecutor core.ExecutorIdentity
+	submitModel    core.ModelIdentity
 	submit         *requestDescriptor
 	routeRequest   *pluginruntime.RouteRequestContext
 	requestHeaders map[string]string
@@ -160,9 +164,14 @@ type TaskAdaptor struct {
 }
 
 func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{plugin: plugin} }
-func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo)   { a.info = info }
+func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
+	a.info, a.admittedSubmit = info, false
+}
 
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	if err := a.checkSubmitAdmission(c, info); err != nil {
+		return &dto.TaskError{Code: "model_admission_denied", Message: "request rejected", StatusCode: http.StatusForbidden, LocalError: true, NoRetry: true}
+	}
 	if pinnedValue, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint); exists {
 		if pinned, ok := pinnedValue.(pluginruntime.PinnedEndpoint); ok && pinned.Plugin == a.plugin {
 			if protocolValue, present := c.Get(pluginruntime.ContextKeyProtocolRequest); present {
@@ -236,6 +245,9 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 		}
 	}
 	if _, err := a.buildSubmit(c, info); err != nil {
+		if errors.Is(err, model.ErrChannelAdmissionDenied) {
+			return &dto.TaskError{Code: "model_admission_denied", Message: "request rejected", StatusCode: http.StatusForbidden, LocalError: true, NoRetry: true}
+		}
 		// utils.fetch failures in the build hook name the host fetched: the
 		// channel base URL or one of the plugin's allowed hosts, which an
 		// installed plugin may point at private hosts.
@@ -577,6 +589,9 @@ func encodeFilePlaceholder(placeholder map[string]any, form *multipart.Form, lim
 }
 
 func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, body io.Reader) (*http.Response, error) {
+	if err := a.checkSubmitAdmission(c, info); err != nil {
+		return nil, err
+	}
 	wasStream := info.IsStream
 	info.IsStream = false
 	defer func() { info.IsStream = wasStream }()
@@ -1589,6 +1604,10 @@ func (a *TaskAdaptor) applyChannelContext(ctx map[string]any, channelType int) {
 	if a.info == nil || !a.info.HasChannelMeta() || a.info.ChannelId == 0 || channelType == constant.ChannelTypeNewAPI {
 		return
 	}
+	if a.admittedSubmit && core.ModelAdmissionEnabled() && channelType == constant.ChannelTypeTaskPlugin {
+		ctx["config"] = pluginruntime.RawJSON(a.plugin.ChannelConfigFor(a.info.ChannelOtherSettings.PluginConfig))
+		return
+	}
 	channel, err := model.CacheGetChannel(a.info.ChannelId)
 	if err != nil {
 		return
@@ -1721,7 +1740,75 @@ func (a *TaskAdaptor) requestDescriptor(ctx context.Context, hook string, args .
 	return descriptor, nil
 }
 
+// checkSubmitAdmission precedes auth preparation as well as the submit hook.
+// It applies only to new submissions; persisted task polling keeps its contract.
+func (a *TaskAdaptor) checkSubmitAdmission(c *gin.Context, info *relaycommon.RelayInfo) error {
+	if !core.ModelAdmissionEnabled() {
+		return nil
+	}
+	if c == nil || c.Request == nil || c.Request.URL == nil || info == nil || a.info != info || info.ChannelMeta == nil ||
+		info.ChannelId != common.GetContextKeyInt(c, constant.ContextKeyChannelId) || info.ChannelType != common.GetContextKeyInt(c, constant.ContextKeyChannelType) || info.OriginModelName != common.GetContextKeyString(c, constant.ContextKeyOriginalModel) {
+		return model.ErrChannelAdmissionDenied
+	}
+	if plan, exists := c.Get("request_plugin_plan"); exists && plan != nil {
+		return model.ErrChannelAdmissionDenied
+	}
+	value, _ := c.Get(pluginruntime.ContextKeyPinnedPlugin)
+	pinned, ok := value.(pluginruntime.PinnedPlugin)
+	if !ok || pinned.Plugin == nil || pinned.Plugin != a.plugin {
+		return model.ErrChannelAdmissionDenied
+	}
+	if _, credential := pluginruntime.ParseCredential(info.ApiKey); credential {
+		current, found := pluginruntime.DefaultRegistry.Generation().Get(a.plugin.Meta.Key)
+		if !found || current != a.plugin {
+			return model.ErrChannelAdmissionDenied
+		}
+	}
+	channelOther, exists := c.Get("cmh_plugin_channel_other")
+	other, ok := channelOther.(string)
+	group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	if group == "auto" {
+		group = common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+	}
+	if !exists || !ok || info.UsingGroup != group && info.UsingGroup != "auto" {
+		return model.ErrChannelAdmissionDenied
+	}
+	selected := &model.Channel{Id: info.ChannelId, Type: info.ChannelType, Status: common.ChannelStatusEnabled,
+		Models: info.OriginModelName, Group: group, BaseURL: &info.ChannelBaseUrl, Other: other}
+	values := []any{info.ChannelSetting, info.ChannelOtherSettings, info.ParamOverride, info.HeadersOverride}
+	fields := []**string{&selected.Setting, nil, &selected.ParamOverride, &selected.HeaderOverride}
+	for i, value := range values {
+		encoded, err := common.Marshal(value)
+		if err != nil {
+			return model.ErrChannelAdmissionDenied
+		}
+		raw := string(encoded)
+		if i == 1 {
+			selected.OtherSettings = raw
+		} else {
+			*fields[i] = &raw
+		}
+	}
+	mapping := common.GetContextKeyString(c, constant.ContextKeyChannelModelMapping)
+	selected.ModelMapping = &mapping
+	if err := model.CheckPluginExecution(c.Request.Context(), selected, pinned, info.OriginModelName, info.UpstreamModelName, "task", c.Request.URL.Path); err != nil {
+		return err
+	}
+	actual, err := model.ChannelPluginAdmission(selected, info.OriginModelName, core.AdmissionDispatch, pinned, "task", c.Request.URL.Path)
+	if err != nil || a.submit != nil && (actual.Executor != a.submitExecutor || actual.Model != a.submitModel) {
+		return model.ErrChannelAdmissionDenied
+	}
+	if a.submit == nil {
+		a.submitExecutor, a.submitModel = actual.Executor, actual.Model
+	}
+	return nil
+}
+
 func (a *TaskAdaptor) buildSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*requestDescriptor, error) {
+	if err := a.checkSubmitAdmission(c, info); err != nil {
+		return nil, err
+	}
+	a.admittedSubmit = core.ModelAdmissionEnabled()
 	if a.submit != nil {
 		return a.submit, nil
 	}
@@ -1790,6 +1877,9 @@ func (a *TaskAdaptor) buildSubmit(c *gin.Context, info *relaycommon.RelayInfo) (
 	}
 	if descriptor.RewriteModel != "" {
 		info.UpstreamModelName = descriptor.RewriteModel
+	}
+	if err := a.checkSubmitAdmission(c, info); err != nil {
+		return nil, err
 	}
 	a.submit = &descriptor
 	method := strings.ToUpper(strings.TrimSpace(descriptor.Method))
