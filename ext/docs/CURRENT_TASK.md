@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近业务已推 `944fea0c9`：main/develop一致，CI差异门禁两次success（43426313999 / 43426305414）。负责人随后明确批准累计48文件/6000行收口，独立rules PR #1已合并 `eac5ebaa0` 并同步main/develop。PR创建完整CI43439381396与合并后43440243739均最终success（Ubuntu root/relaykit/tokenkit vet/build/make test、官方frontend typecheck/test），差异门禁也通过；合并时frontend仍pending，默认merge未强制等待，因此不声称分支保护已认证。全局Models/PluginHooks/Executors仍noop。
+- 最近已推 `e738cbf7e`：main/develop一致，差异门禁两次success（43441610529 / 43441578548），本轮reply/report执行组待提交。负责人已批准48文件/6000行，独立rules PR#1合并eac5ebaa0；PR创建及合并后完整Ubuntu CI均通过，见 `acceptance/p2/H1-closeout-approval.md`。默认merge未强制等待frontend完成，不声称分支保护已认证。全局Models/PluginHooks/Executors仍noop。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -23,7 +23,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1-C本轮Plan.Run整stage预验：新增value-only ExecutorGate/fulltuple Gate桥，实际Engine+原Instance配置/role/path/stage hash；先全部scope预验再任一hook，host Outcome.Failed不被optional吞。真实2optional实例localfetch：second未准first也0网络；全准2；Path/config变0；sameplan late仍拒；publicIngress SkipRetry传播；nilbody原unchecked0hook。相关tests/vet/fullbuildexit0，独立只读review无本stage阻断缺陷，证据 `acceptance/p2/H1-C-stage-preflight.md`。不含reply/report/taskreport或全pipeline/modeltarget，所有Gate不安装。
+3. H1-C本轮reply/report执行组：共享公开RequestExecutorIdentity保留stage v1字节合同；reply每batch整组先验，hoststop不被optional吞；reportJob消费时全target先验，ordinary/task共用worker，无task_report源改动。公共Reply deniedsecond fetch0/不释放成功正文、全准fetch2；真实SSE后batch撤销无额外fetch/文本；同步真实JS worker普通/taskrecord分支全准2、未准/消费时撤销/role/path/config变0，旧job不替换registry新源。相关tests/vet/buildexit0，独立只读review无本范围阻断问题。证据 `acceptance/p2/H1-C-reply-report.md`，不称TaskReport重建排队全E2E/原子中途撤销/完整modeltarget认证，Gate未安装。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -33,7 +33,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前32官方文件/2463行，新H1累计硬限48/6000（负责人明确批准，PR#1落实），剩16文件/3537行；逐文件登记和80%复核保留。隔离脚本实测48文件/6000行允许、49文件/6001行及未登记拒绝。不是目录豁免或验收保证；分支保护未认证。
+- 门禁目前35官方文件/2626行，H1硬限48/6000，剩13文件/3374行；逐文件登记/80%复核保留，既有官方report测试文件同样登记计数。48/49文件、6000/6001行隔离回归已过，不是目录豁免/验收保证；分支保护未认证。
 
 ## 临时资源与作业
 
@@ -41,7 +41,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续H1-C收口：Plan stage已接，下一批复用同一原配置/角色/路径executor投影接reply.go390 CallReply、report.go376 CallReport及task_report target，host veto不能被optional吞，网络计数在拒绝前直接观察。然后provider chain.go114 sendStep/279 openWebSocket、最终URL/opaquebody模型/redirect/fetch、背景credential与既有任务冻结延续；candidate generation/affinity和Save目录/type60未闭合。新48/6000预算已批准，不再停旧限；不安装部分Gate，资金仍单独同事务RFC。
+- 接续H1-C收口：request stage/reply/report actualexecutor组已接但model/channel/目的地还非完整chain授权。下一批provider chain.go sendStep/openWebSocket重用已导出host实际运行检查，最终URL/opaquebody模型/redirect/fetch需可信源+目的地关系，不假设任意JS可通用解读；然后背景credential与既有任务冻结延续、candidate generation/affinity、Save目录/type60。TaskReport消费的currenttarget受worker审批但持久源冻结仍缺。新48/6000预算已批准，不重复问；不安装部分Gate，资金仍单独同事务RFC。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 

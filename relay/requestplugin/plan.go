@@ -299,6 +299,25 @@ type Outcome struct {
 	Failed   *Failure
 }
 
+// RequestExecutorIdentity binds the actual loaded code and original frozen
+// instance configuration to its host role, path and stage. The digest may cover
+// private settings; only the non-secret identity leaves this function.
+func RequestExecutorIdentity(plugin *jsplugin.LoadedPlugin, instance *request_plugin_setting.Instance, role, path, stage string) (core.ExecutorIdentity, error) {
+	if plugin == nil || plugin.Engine == nil || instance == nil || plugin.Meta.Key != instance.Plugin || plugin.SourceSHA256() == "" || plugin.SourceSHA256() != plugin.Engine.SourceSHA256() {
+		return core.ExecutorIdentity{}, errors.New("request rejected")
+	}
+	envelope := struct {
+		Version           int
+		Role, Path, Stage string
+		Instance          request_plugin_setting.Instance
+	}{1, role, path, stage, *instance}
+	encoded, err := common.Marshal(envelope)
+	if err != nil {
+		return core.ExecutorIdentity{}, errors.New("request rejected")
+	}
+	return core.ExecutorIdentity{Kind: "plugin", Key: instance.Plugin, SourceSHA256: plugin.Engine.SourceSHA256(), ConfigFingerprint: fmt.Sprintf("%x", sha256.Sum256(encoded))}, nil
+}
+
 // Run runs call.Stage on the instances in scope. It stops at the first
 // rejection or failure of an instance whose plugin is not optional.
 func (p *Plan) Run(ctx context.Context, call Call) Outcome {
@@ -309,20 +328,7 @@ func (p *Plan) Run(ctx context.Context, call Call) Outcome {
 			if call.Stage == StageIngress && call.Late && p.ingressRan[instance.ID] {
 				continue
 			}
-			plugin := p.plugins[instance.Plugin]
-			if plugin == nil || plugin.Engine == nil || plugin.Meta.Key != instance.Plugin || plugin.SourceSHA256() != plugin.Engine.SourceSHA256() {
-				outcome.Failed = &Failure{Instance: instance.ID, Class: "execution_admission", Detail: "request rejected"}
-				return outcome
-			}
-			// Keep the original configuration, including private keyword lists,
-			// inside a digest; never expose it through the admission boundary.
-			envelope := struct {
-				Version           int
-				Role, Path, Stage string
-				Instance          request_plugin_setting.Instance
-			}{1, "request_stage", call.Path, call.Stage, *instance}
-			encoded, err := common.Marshal(envelope)
-			executor := core.ExecutorIdentity{Kind: "plugin", Key: instance.Plugin, SourceSHA256: plugin.Engine.SourceSHA256(), ConfigFingerprint: fmt.Sprintf("%x", sha256.Sum256(encoded))}
+			executor, err := RequestExecutorIdentity(p.plugins[instance.Plugin], instance, "request_stage", call.Path, call.Stage)
 			if err != nil || core.Executors.CheckExecutor(ctx, executor) != nil {
 				outcome.Failed = &Failure{Instance: instance.ID, Class: "execution_admission", Detail: "request rejected"}
 				return outcome

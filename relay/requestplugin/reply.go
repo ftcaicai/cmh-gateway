@@ -17,6 +17,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -254,6 +255,25 @@ func (r *replyCheck) markUnchecked() {
 // adds what the last one released to each output's out. An ended output's
 // call is final. It returns false when an instance stopped the answer.
 func (r *replyCheck) run(batch []*replyOutput) bool {
+	if core.ExecutorAdmissionEnabled() && slices.ContainsFunc(batch, func(output *replyOutput) bool { return output.pending != "" || output.ended }) {
+		for _, target := range r.targets {
+			if target.skipped {
+				continue
+			}
+			executor, err := RequestExecutorIdentity(target.plugin, target.instance, "request_reply", r.call.Path, StageReply)
+			if err == nil && core.Executors.CheckExecutor(r.ctx, executor) == nil {
+				continue
+			}
+			target.action, target.errClass, target.detail = "fail", "execution_admission", "request rejected"
+			target.rejected = string(types.ErrorCodeRequestPluginFailed)
+			stop := &replyStop{instance: target.instance.ID, code: string(types.ErrorCodeRequestPluginFailed), failed: true, class: "execution_admission", detail: "request rejected", text: map[int]string{}}
+			for _, output := range batch {
+				stop.text[output.index] = output.pending
+			}
+			r.stop = stop
+			return false
+		}
+	}
 	inputs := make([]string, len(batch))
 	for i, output := range batch {
 		inputs[i], output.pending, output.fed = output.pending, "", output.received

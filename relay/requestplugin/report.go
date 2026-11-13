@@ -16,6 +16,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -342,6 +343,15 @@ func (job *reportJob) run() {
 			common.SysError(common.LogText("request plugin report panicked: %v", recovered))
 		}
 	}()
+	if core.ExecutorAdmissionEnabled() {
+		for _, target := range job.targets {
+			executor, err := RequestExecutorIdentity(target.plugin, target.instance, "request_report", job.tctx.Path, jsplugin.ReportHook)
+			if err != nil || core.Executors.CheckExecutor(context.Background(), executor) != nil {
+				logger.LogWarn(context.Background(), common.LogText("request plugin instance %s (%s) report failed: %s", target.instance.ID, target.instance.Plugin, "execution_admission"))
+				return
+			}
+		}
+	}
 	record := job.record
 	if record.RequestPlugins == nil {
 		record.RequestPlugins = []relaycommon.RequestPluginRecord{}

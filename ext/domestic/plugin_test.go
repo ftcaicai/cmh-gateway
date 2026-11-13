@@ -23,6 +23,8 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/requestplugin"
 	kittypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -420,6 +422,107 @@ type executorCapture struct{ seen []core.ExecutorIdentity }
 func (p *executorCapture) CheckExecutor(_ context.Context, executor core.ExecutorIdentity) error {
 	p.seen = append(p.seen, executor)
 	return nil
+}
+
+func TestReplyExecutorPreflight(t *testing.T) {
+	previousRegistry, previousExecutors := jsplugin.DefaultRegistry, core.Executors
+	previousInstances, err := common.Marshal(request_plugin_setting.GetInstances())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		jsplugin.DefaultRegistry = previousRegistry
+		core.Executors = previousExecutors
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(previousInstances)}))
+	})
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	var fetches atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	service.InitHttpClient()
+	require.NoError(t, i18n.Init())
+	const source = `export const meta={apiVersion:1,key:"cmh-reply-gate",name:"Reply gate",version:"1.0.0",author:{name:"Test"},optional:true,configSchema:{type:"object",properties:{url:{type:"string",title:{en:"Service URL",zh:"服务地址"},format:"url"}}}};
+export function reply(ctx,outputs){utils.fetch({url:ctx.config.url});return {action:"continue"};}`
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	instances := []request_plugin_setting.Instance{{ID: "reply-first", Name: "First", Plugin: plugin.Meta.Key, Enabled: true, Global: true, Config: common.RawMessage(fmt.Sprintf(`{"url":%q}`, upstream.URL))}, {ID: "reply-second", Name: "Second", Plugin: plugin.Meta.Key, Enabled: true, Global: true, Config: common.RawMessage(fmt.Sprintf(`{"url":%q}`, upstream.URL))}}
+	encoded, err := common.Marshal(instances)
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(encoded)}))
+	instances = request_plugin_setting.GetInstances()
+	var approvals []core.ExecutorIdentity
+	for i := range instances {
+		identity, err := requestplugin.RequestExecutorIdentity(plugin, &instances[i], "request_reply", "/v1/chat/completions", "reply")
+		require.NoError(t, err)
+		approvals = append(approvals, identity)
+	}
+	public, upstreamPolicy, _, _ := admissionFixture(t)
+	firstOnly, err := NewGate(public, upstreamPolicy, approvals[:1])
+	require.NoError(t, err)
+	all, err := NewGate(public, upstreamPolicy, approvals)
+	require.NoError(t, err)
+	answer := []byte(`{"id":"local","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"local answer"},"finish_reason":"stop"}]}`)
+	for _, scenario := range []struct {
+		name       string
+		gate       core.ExecutorGate
+		wantFetch  int32
+		wantStatus int
+	}{{"denied optional second", firstOnly, 0, 500}, {"allowed", all, 2, 200}} {
+		t.Run(scenario.name, func(t *testing.T) {
+			core.Executors = scenario.gate
+			fetches.Store(0)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"public-chat","messages":[]}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, "public-chat")
+			_, _, apiErr := requestplugin.Ingress(c, kittypes.RelayFormatOpenAI)
+			require.Nil(t, apiErr)
+			info := &relaycommon.RelayInfo{OriginModelName: "public-chat", RelayMode: relayconstant.RelayModeChatCompletions, RelayFormat: kittypes.RelayFormatOpenAI, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 1, ChannelType: 1, UpstreamModelName: "approved-target"}}
+			finish := requestplugin.Reply(c, kittypes.RelayFormatOpenAI, info)
+			c.Writer.Header().Set("Content-Type", "application/json")
+			c.Writer.WriteHeader(http.StatusOK)
+			_, err := c.Writer.Write(answer)
+			require.NoError(t, err)
+			finish()
+			assert.Equal(t, scenario.wantStatus, w.Code)
+			assert.Equal(t, scenario.wantFetch, fetches.Load())
+			if scenario.wantStatus == 500 {
+				assert.NotContains(t, w.Body.String(), "local answer", "unapproved optional target must not release a successful answer")
+			} else {
+				assert.JSONEq(t, string(answer), w.Body.String())
+			}
+		})
+	}
+	t.Run("stream revocation between batches", func(t *testing.T) {
+		core.Executors = all
+		fetches.Store(0)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"public-chat","messages":[],"stream":true}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+		common.SetContextKey(c, constant.ContextKeyOriginalModel, "public-chat")
+		_, _, apiErr := requestplugin.Ingress(c, kittypes.RelayFormatOpenAI)
+		require.Nil(t, apiErr)
+		info := &relaycommon.RelayInfo{OriginModelName: "public-chat", IsStream: true, RelayMode: relayconstant.RelayModeChatCompletions, RelayFormat: kittypes.RelayFormatOpenAI, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 1, ChannelType: 1, UpstreamModelName: "approved-target"}}
+		finish := requestplugin.Reply(c, kittypes.RelayFormatOpenAI, info)
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		_, err := c.Writer.Write([]byte("data: {\"id\":\"local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n"))
+		require.NoError(t, err)
+		require.Equal(t, int32(2), fetches.Load())
+		core.Executors = firstOnly
+		_, _ = c.Writer.Write([]byte("data: {\"id\":\"local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"revoked text must never be released in this stream batch\"}}]}\n\n"))
+		finish()
+		assert.Equal(t, int32(2), fetches.Load(), "revoked second batch must stop before either hook fetches")
+		assert.Contains(t, w.Body.String(), "first")
+		assert.NotContains(t, w.Body.String(), "revoked text must never")
+		assert.Contains(t, w.Body.String(), "request_plugin_failed")
+	})
 }
 
 func TestParamNormalizePluginHostContract(t *testing.T) {

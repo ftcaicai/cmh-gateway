@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -16,11 +17,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -29,6 +32,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
 
@@ -774,6 +778,129 @@ func reportContext(t *testing.T, body string, started time.Time) (*gin.Context, 
 	common.SetContextKey(c, constant.ContextKeyOriginalModel, "gpt")
 	common.SetContextKey(c, constant.ContextKeyRequestStartTime, started)
 	return c, recorder
+}
+
+type reportExecutorApproval struct {
+	approved map[core.ExecutorIdentity]bool
+}
+
+func (gate *reportExecutorApproval) CheckExecutor(_ context.Context, executor core.ExecutorIdentity) error {
+	if gate.approved[executor] {
+		return nil
+	}
+	return errors.New("private executor policy detail")
+}
+
+func TestReportExecutorPreflight(t *testing.T) {
+	previousGate, previousRegistry := core.Executors, jsplugin.DefaultRegistry
+	t.Cleanup(func() { core.Executors, jsplugin.DefaultRegistry = previousGate, previousRegistry })
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	var fetches atomic.Int32
+	received := make(chan string, 8)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		fetches.Add(1)
+		received <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	service.InitHttpClient()
+	const source = `export const meta = {apiVersion:1,key:"rp-report-executor",name:"Report executor",version:"1.0.0",author:{name:"Test"},optional:true,
+configSchema:{type:"object",properties:{url:{type:"string",title:{en:"Service URL"},format:"url"},marker:{type:"string",title:{en:"Marker"}}}}};
+export function report(ctx,record) {utils.fetch({url:ctx.config.url,method:"POST",body:JSON.stringify({marker:ctx.config.marker,task:record.task ? record.task.id : null})});}`
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	firstConfig, err := common.Marshal(map[string]any{"url": server.URL, "marker": "first"})
+	require.NoError(t, err)
+	secondConfig, err := common.Marshal(map[string]any{"url": server.URL, "marker": "second"})
+	require.NoError(t, err)
+	first := request_plugin_setting.Instance{ID: "first", Name: "First", Plugin: plugin.Meta.Key, Enabled: true, Global: true, Config: firstConfig}
+	second := request_plugin_setting.Instance{ID: "second", Name: "Second", Plugin: plugin.Meta.Key, Enabled: true, Global: true, Config: secondConfig}
+	const path = "/v1/chat/completions"
+	firstIdentity, err := RequestExecutorIdentity(plugin, &first, "request_report", path, jsplugin.ReportHook)
+	require.NoError(t, err)
+	secondIdentity, err := RequestExecutorIdentity(plugin, &second, "request_report", path, jsplugin.ReportHook)
+	require.NoError(t, err)
+	assert.NotEqual(t, firstIdentity.ConfigFingerprint, secondIdentity.ConfigFingerprint)
+	gate := &reportExecutorApproval{}
+	core.Executors = gate
+	for _, task := range []bool{false, true} {
+		name := "request record"
+		if task {
+			name = "task record shared worker"
+		}
+		t.Run(name, func(t *testing.T) {
+			job := &reportJob{targets: []reportTarget{{plugin: plugin, instance: &first}, {plugin: plugin, instance: &second}}, tctx: jsplugin.TransformContext{Path: path, Format: "openai", Model: "gpt"}}
+			if task {
+				job.record.Task = &reportTask{ID: "task-local", Status: "SUCCESS"}
+				job.taskData = []byte(`{"text":"local result"}`)
+			}
+			fetches.Store(0)
+			gate.approved = map[core.ExecutorIdentity]bool{firstIdentity: true}
+			job.run()
+			assert.Zero(t, fetches.Load(), "second optional report denial must precede the first target's network")
+			assert.Empty(t, received)
+			gate.approved[secondIdentity] = true
+			job.run()
+			require.Equal(t, int32(2), fetches.Load(), "both approved real hooks must fetch")
+			for _, marker := range []string{"first", "second"} {
+				message := <-received
+				assert.Equal(t, marker, gjson.Get(message, "marker").String())
+				if task {
+					assert.Equal(t, "task-local", gjson.Get(message, "task").String())
+				} else {
+					assert.Equal(t, gjson.Null, gjson.Get(message, "task").Type)
+				}
+			}
+			// Queue-time authority must not survive revocation before consumption.
+			queued := *job
+			gate.approved = nil
+			fetches.Store(0)
+			queued.run()
+			assert.Zero(t, fetches.Load(), "worker must consult current approval, not an earlier enqueue decision")
+			assert.Empty(t, received)
+		})
+	}
+	// A queued job keeps its actual old artifact, not a newer registry owner.
+	job := &reportJob{targets: []reportTarget{{plugin: plugin, instance: &first}, {plugin: plugin, instance: &second}}, tctx: jsplugin.TransformContext{Path: path, Format: "openai", Model: "gpt"}}
+	replacement, err := registry.Register(source+"\nexport const replacement=true;", jsplugin.Options{})
+	require.NoError(t, err)
+	require.NotEqual(t, plugin.SourceSHA256(), replacement.SourceSHA256())
+	gate.approved = map[core.ExecutorIdentity]bool{firstIdentity: true, secondIdentity: true}
+	fetches.Store(0)
+	job.run()
+	require.Equal(t, int32(2), fetches.Load(), "retained old approved artifact must not be substituted from the registry")
+	<-received
+	<-received
+	stageIdentity, err := RequestExecutorIdentity(plugin, &first, "request_stage", path, StageIngress)
+	require.NoError(t, err)
+	gate.approved = map[core.ExecutorIdentity]bool{stageIdentity: true, secondIdentity: true}
+	fetches.Store(0)
+	job.run()
+	assert.Zero(t, fetches.Load(), "stage role approval must not authorize a report hook")
+	assert.Empty(t, received)
+	gate.approved = map[core.ExecutorIdentity]bool{firstIdentity: true, secondIdentity: true}
+	for _, alter := range []func(*reportJob){
+		func(changed *reportJob) { changed.tctx.Path = "/v1/responses" },
+		func(changed *reportJob) {
+			instance := second
+			instance.Config = firstConfig
+			changed.targets = []reportTarget{job.targets[0], {plugin: plugin, instance: &instance}}
+		},
+	} {
+		changed := *job
+		alter(&changed)
+		fetches.Store(0)
+		changed.run()
+		assert.Zero(t, fetches.Load(), "path or original config changes invalidate the report approval before every hook")
+		assert.Empty(t, received)
+	}
 }
 
 // A finished request reaches the report hooks of the channel's instances in
