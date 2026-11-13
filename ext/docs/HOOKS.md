@@ -32,6 +32,9 @@
 | H1-B | 分发与凭据选择前准入 | 准入型 | `middleware/distributor.go` | Distribute / SetupContextForSelectedChannel | 2026-11-13 | 公开名覆盖pin分支；选中渠道DB刷新及实际执行者复核在Key取用前；Setup错误不再忽略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | 估价与预扣前准入 | 准入型 | `relay/request_billing.go` | CheckRequestAdmission / PrepareRequestBilling | 2026-11-13 | 当前持久化身份复核，拒绝发生在token估算/免费跳过/预扣前；不改资金生命周期 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | 重试追加预留前准入 | 准入型 | `controller/relay.go` | Relay重试循环getChannel后 | 2026-11-13 | 以本次选择身份快照复核，先于PrepareTieredBillingForSelectedGroup，保留原退款策略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-B | Responses长连接事件准入 | 准入型 | `relay/responses_websocket.go` | runCall / restoreConnectionContext / checkResponsesWSModelAccess | 2026-11-13 | 每create在ingress前复核、首次选中快照复用、锁定连接DB状态与冻结映射一致检查，重试topup前复核 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-B | Realtime每事件准入 | 准入型 | `relay/channel/openai/relay_realtime.go` | CheckRealtimeAdmission / OpenaiRealtimeHandler | 2026-11-13 | 约束固定握手模型、原始event模型字段，在plugin前与patch后计量/转发前复核；不改usage逻辑 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-B | Realtime握手前准入 | 准入型 | `relay/websocket.go` | WssHelper初始化ChannelMeta后、DoRequest前 | 2026-11-13 | 实际握手逻辑目标必须先通过固定模型准入，不能联网后才拒绝映射不一致 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -68,4 +71,7 @@ controller/channel_upstream_update.go
 middleware/distributor.go
 relay/request_billing.go
 controller/relay.go
+relay/responses_websocket.go
+relay/channel/openai/relay_realtime.go
+relay/websocket.go
 ```

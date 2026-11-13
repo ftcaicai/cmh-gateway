@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
 	appdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	appmodel "github.com/QuantumNous/new-api/model"
@@ -227,6 +228,7 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 	request.Body = io.NopCloser(bytes.NewReader(message))
 	request.ContentLength = int64(len(message))
 	request.Header.Set("Content-Type", "application/json")
+	requestDenied := false
 	apiErr = s.runner(request, requestID, func(c *gin.Context) *types.NewAPIError {
 		if parseErr != nil {
 			return newResponsesWSInvalidRequestError(parseErr)
@@ -234,10 +236,11 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		c.Request.Body = io.NopCloser(bytes.NewReader(create.Body))
 		c.Request.ContentLength = int64(len(create.Body))
 		callErr := s.runCall(c, state, create)
+		requestDenied = core.ModelAdmissionEnabled() && callErr != nil && callErr.StatusCode == http.StatusForbidden
 		upstreamURLs = common.UpstreamAddresses(c)
 		return callErr
 	})
-	if apiErr != nil && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+	if !requestDenied && apiErr != nil && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
 		state.closeCode = websocket.ClosePolicyViolation
 	}
 }
@@ -280,8 +283,33 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	}
 	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, modelName)
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
-	// As on HTTP, the request plugins' ingress reads the create before the
-	// model access and channel checks; a changed body is decoded again.
+	var candidate *appmodel.Channel
+	var retry *service.RetryParam
+	if core.ModelAdmissionEnabled() {
+		if apiErr = checkResponsesWSModelAccess(c, modelName); apiErr != nil {
+			return apiErr
+		}
+		service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
+		if s.lockedChannelID != 0 {
+			if apiErr = s.restoreConnectionContext(c, modelName); apiErr != nil {
+				return apiErr
+			}
+		} else {
+			retry = &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
+			candidate, apiErr = selectResponsesWSChannel(c, modelName, retry)
+			if apiErr != nil {
+				return apiErr
+			}
+		}
+		admissionInfo := &relaycommon.RelayInfo{OriginModelName: modelName, ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelId: common.GetContextKeyInt(c, appconstant.ContextKeyChannelId), ChannelType: common.GetContextKeyInt(c, appconstant.ContextKeyChannelType),
+		}}
+		if apiErr = CheckRequestAdmission(c, admissionInfo); apiErr != nil {
+			return apiErr
+		}
+	}
+	// With admission inactive, keep the original ingress-before-selection order.
+	// An active gate must resolve execution identity before ingress can fetch.
 	changed, ingressSteps, ingressRecord, ingressErr := requestplugin.SocketIngress(c, types.RelayFormatOpenAIResponses)
 	if ingressErr != nil {
 		ingress := &relaycommon.RelayInfo{}
@@ -294,14 +322,18 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			return apiErr
 		}
 	}
-	if apiErr = checkResponsesWSModelAccess(c, modelName); apiErr != nil {
-		return apiErr
+	if !core.ModelAdmissionEnabled() {
+		if apiErr = checkResponsesWSModelAccess(c, modelName); apiErr != nil {
+			return apiErr
+		}
+		service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
 	}
-	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
 
 	if s.lockedChannelID != 0 {
-		if apiErr = s.restoreConnectionContext(c, modelName); apiErr != nil {
-			return apiErr
+		if !core.ModelAdmissionEnabled() {
+			if apiErr = s.restoreConnectionContext(c, modelName); apiErr != nil {
+				return apiErr
+			}
 		}
 		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
 		info.IsStream = true
@@ -322,12 +354,27 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 		}
 	} else {
-		retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
+		if retry == nil {
+			retry = &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
+		}
 		for ; retry.GetRetry() <= common.RetryTimes; retry.IncreaseRetry() {
-			var channel *appmodel.Channel
-			channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
-			if apiErr != nil {
-				return apiErr
+			channel := candidate
+			candidate = nil
+			if channel == nil {
+				channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
+				if apiErr != nil {
+					return apiErr
+				}
+			}
+			if core.ModelAdmissionEnabled() {
+				admissionInfo := relaycommon.RelayInfo{OriginModelName: modelName}
+				if info != nil {
+					admissionInfo = *info
+				}
+				admissionInfo.ChannelMeta = &relaycommon.ChannelMeta{ChannelId: channel.Id, ChannelType: channel.Type}
+				if apiErr = CheckRequestAdmission(c, &admissionInfo); apiErr != nil {
+					return apiErr
+				}
 			}
 			service.AppendUsedChannel(c, channel.Id)
 			if info == nil {
@@ -650,11 +697,46 @@ func responsesWSErrorEndsRequest(event responsesWSErrorEvent, streamID, response
 }
 
 func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model string) *types.NewAPIError {
-	// The channel type is not rechecked: a locked channel keeps its type, and
-	// the FilterResponsesWebSocket rules were applied when it was selected.
-	channel, err := appmodel.CacheGetChannel(s.lockedChannelID)
-	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetSetting().ResponsesWebSocketEnabled {
+	// Active admission needs current persisted status and identity; the default
+	// path retains the existing cache behavior.
+	var channel *appmodel.Channel
+	var err error
+	if core.ModelAdmissionEnabled() {
+		if appmodel.DB == nil {
+			return types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeInvalidRequest, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		channel, err = appmodel.GetChannelById(s.lockedChannelID, true)
+	} else {
+		channel, err = appmodel.CacheGetChannel(s.lockedChannelID)
+	}
+	var setting dto.ChannelSettings
+	if core.ModelAdmissionEnabled() {
+		var other dto.ChannelOtherSettings
+		if channel != nil && channel.OtherSettings != "" && common.UnmarshalJsonStr(channel.OtherSettings, &other) != nil {
+			return types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeInvalidRequest, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		if channel != nil && channel.Setting != nil && *channel.Setting != "" {
+			if common.UnmarshalJsonStr(*channel.Setting, &setting) != nil {
+				return types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeInvalidRequest, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+			}
+		}
+	} else if channel != nil {
+		setting = channel.GetSetting()
+	}
+	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !setting.ResponsesWebSocketEnabled {
 		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	if core.ModelAdmissionEnabled() {
+		group := common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup)
+		if group == "auto" && slices.Contains(service.GetRequestAutoGroups(c, common.GetContextKeyString(c, appconstant.ContextKeyUserGroup)), s.lockedGroup) {
+			group = s.lockedGroup
+			common.SetContextKey(c, appconstant.ContextKeyAutoGroup, group)
+		}
+		if channel.Type != s.lockedContext[appconstant.ContextKeyChannelType] || group != s.lockedGroup ||
+			!slices.Contains(strings.Split(channel.Group, ","), group) ||
+			appmodel.ChannelModelAdmission(channel, model, core.AdmissionAttempt).Model.Upstream == "" {
+			return types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeInvalidRequest, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
 	}
 	keyEnabled := channel.Key == s.lockedKey
 	if channel.ChannelInfo.IsMultiKey {
@@ -671,7 +753,7 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 		!reflect.DeepEqual(channel.GetHeaderOverride(), s.lockedContext[appconstant.ContextKeyChannelHeaderOverride]) {
 		return types.NewErrorWithStatusCode(errors.New("upstream connection settings changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
-	if previous, ok := s.lockedContext[appconstant.ContextKeyChannelSetting].(dto.ChannelSettings); ok && previous.Proxy != channel.GetSetting().Proxy {
+	if previous, ok := s.lockedContext[appconstant.ContextKeyChannelSetting].(dto.ChannelSettings); ok && previous.Proxy != setting.Proxy {
 		return types.NewErrorWithStatusCode(errors.New("upstream proxy changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
 	// An advanced custom connection was dialed through the route matched for
@@ -708,10 +790,14 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	for key, value := range s.lockedContext {
 		c.Set(string(key), value)
 	}
-	common.SetContextKey(c, appconstant.ContextKeyChannelSetting, channel.GetSetting())
+	common.SetContextKey(c, appconstant.ContextKeyChannelSetting, setting)
 	common.SetContextKey(c, appconstant.ContextKeyChannelOtherSetting, otherSettings)
 	common.SetContextKey(c, appconstant.ContextKeyChannelParamOverride, channel.GetParamOverride())
-	common.SetContextKey(c, appconstant.ContextKeyChannelModelMapping, channel.GetModelMapping())
+	// Never replace a dialed connection's model mapping for active admission:
+	// CheckRequestAdmission must compare this frozen context with the fresh row.
+	if !core.ModelAdmissionEnabled() {
+		common.SetContextKey(c, appconstant.ContextKeyChannelModelMapping, channel.GetModelMapping())
+	}
 	common.SetContextKey(c, appconstant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 	policy := service.RequestPolicy(c)
 	policy.BeginAttempt(channel, s.lockedGroup)
@@ -725,7 +811,7 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 func connectionOtherSettings(c *gin.Context, channel *appmodel.Channel) dto.ChannelOtherSettings {
 	otherSettings := channel.GetOtherSettings()
 	pinned, _ := common.GetContextKey(c, appconstant.ContextKeyProviderPlugin)
-	if plugin, ok := pinned.(jsplugin.PinnedPlugin); ok && channel.Type == appconstant.ChannelTypeTaskPlugin {
+	if plugin, ok := pinned.(jsplugin.PinnedPlugin); ok && plugin.Plugin != nil && channel.Type == appconstant.ChannelTypeTaskPlugin {
 		otherSettings.AdvancedCustom = plugin.Plugin.Meta.ChannelRelayConfig(plugin.Plugin.ChannelConfigFor(otherSettings.PluginConfig))
 	}
 	return otherSettings
@@ -1065,6 +1151,11 @@ func buildResponsesWSErrorPayload(eventID, streamID string, apiErr *types.NewAPI
 // pinned to a channel: the check is stricter there on purpose, because a
 // persistent connection keeps serving the model after the pin was resolved.
 func checkResponsesWSModelAccess(c *gin.Context, modelName string) *types.NewAPIError {
+	if core.ModelAdmissionEnabled() {
+		if err := core.Models.Check(c.Request.Context(), core.Admission{Phase: core.AdmissionPublic, Model: core.ModelIdentity{Public: modelName}}); err != nil {
+			return types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeInvalidRequest, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	}
 	if !common.GetContextKeyBool(c, appconstant.ContextKeyTokenModelLimitEnabled) {
 		return nil
 	}

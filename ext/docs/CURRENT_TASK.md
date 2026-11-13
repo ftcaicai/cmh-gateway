@@ -23,7 +23,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1-B本轮已接middleware/distributor公开名与Setup新鲜DB身份/Key前检查，修复忽略Setup错误；relay.CheckRequestAdmission在token估计/免费跳过/预扣前，controller重试在追加预留前检查本次选中快照。独立复核发现fresh DB不能授权stale context映射、既有任务读不应取决于token模型限制、已移除Model/Group的旧cache候选必须拒绝，均已修并集中三库回归。允许Setup发布测试Key；拒绝时reserve/settle/refund/estimate均0且DTO未变；已有task查询两token模式通行。证据 `acceptance/p2/H1-B-prebilling.md`。core.Models仍未安装，剩余WS每事件/实际plugin制品计划/最终目的地及完整retry E2E未完。
+3. H1-B本轮长连接接线：Responses每create在ingress前actual选路准入，锁定restore新鲜DB状态/冻结mapping，坏Setting/OtherSettings只读拒绝，event403可恢复；Realtime实际WssHelper在DoRequest前复核，handler每event plugin前/patch后计量发送前复核，独立转写模型另授权。集中fixture真实Responses client→gateway→localupstream：firstpass、坏JSON/新允许mapping重指/禁用均deny且upstream计数不增、恢复后reusepass；Realtime实际映射握手拒绝predial计数不增，raw事件/嵌套转写denied、普通instructionsallowed。最终真三库PASS9.023s，相关modules/tests/vet/fullbuildexit0，独立复核原三缺陷均闭合。证据 `acceptance/p2/H1-B-long-connections.md`。Realtime允许全双工loop仍未E2E，未知plugin报告/最终目的地仍未完，Gate未安装。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -33,7 +33,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前22官方文件/1656行，H1专项累计硬上限32/2500（已明确批准），逐文件白名单不变。剩10文件/844行，接近80%须先复核，不压缩代码漏路径。未核对分支保护，CI成功不代表强制阻断merge。
+- 门禁目前25官方文件/1946行，H1专项硬上限32/2500（已明确批准），逐文件白名单不变。剩7文件/554行，已近80%，下一批开始前先复核实际剩余闭合范围；不得压缩可读性/漏掉插件源、配置和最终目的地来凑预算。未核验分支保护。
 
 ## 临时资源与作业
 
@@ -41,7 +41,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续优先：Responses WS每response.create及复用connection restore路径，在ingress可能联网前/计费前复核；Realtime每事件；task/provider实际plugin源SHA/config计划与最终目的地。H1-B已有实际检查API可复用，但CheckRequestAdmission需要与真实context映射一致的选择快照，不能伪造或用freshDB授权旧context。当前未知plugin仍failclosed，不能提前激活Gate。另需确定性本地stub完整retry撤销E2E，已计费失败允许退款，不能要求零退款掩盖资金泄漏。
+- 接续优先：H1-C task/provider/requestplugin实际不可变源SHA+有效配置指纹、driver在network-capable hook前准入、最终模型/物理目的地、报告与后台既有任务冻结能力；完整真实失败后retry撤销E2E。预算近80%先重新测量规划，不把未知执行者长期全部拒绝当完整插件支持。长连接已接，但Realtime mapped alias目前明确在predial拒绝而非修复映射（默认路径不改），需要能力矩阵说明。P1资金仍独立同事务RFC，不冒用H1批准。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 

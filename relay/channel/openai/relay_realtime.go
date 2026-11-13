@@ -1,11 +1,21 @@
 package openai
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relay/requestplugin"
@@ -17,6 +27,120 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
+
+// CheckRealtimeAdmission checks the fixed handshake identity against current
+// channel authority without remapping or changing session/accounting state.
+// A nil message checks the handshake; event model fields must name that exact
+// fixed upstream identity, not a public alias requiring another mapping.
+func CheckRealtimeAdmission(c *gin.Context, info *relaycommon.RelayInfo, message []byte) *types.NewAPIError {
+	if !core.ModelAdmissionEnabled() {
+		return nil
+	}
+	rejected := types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeInvalidRequest, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	if c == nil || info == nil || info.ChannelMeta == nil || info.OriginModelName == "" || info.UpstreamModelName == "" || info.ChannelId <= 0 || model.DB == nil {
+		return rejected
+	}
+	if info.ChannelId != common.GetContextKeyInt(c, constant.ContextKeyChannelId) ||
+		info.ChannelType != common.GetContextKeyInt(c, constant.ContextKeyChannelType) ||
+		info.OriginModelName != common.GetContextKeyString(c, constant.ContextKeyOriginalModel) {
+		return rejected
+	}
+	channel, err := model.GetChannelById(info.ChannelId, false)
+	if err != nil || channel == nil || channel.Id != info.ChannelId || channel.Type != info.ChannelType || channel.Status != common.ChannelStatusEnabled {
+		return rejected
+	}
+	group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	if group == "auto" {
+		group = common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+	}
+	if group == "" || !slices.Contains(strings.Split(channel.Group, ","), group) || info.UsingGroup != "" && info.UsingGroup != "auto" && info.UsingGroup != group {
+		return rejected
+	}
+	admission := model.ChannelModelAdmission(channel, info.OriginModelName, core.AdmissionDispatch, service.GetChannelConstraints(c).Filters...)
+	var selectedMapping map[string]string
+	if raw := common.GetContextKeyString(c, constant.ContextKeyChannelModelMapping); raw != "" && raw != "{}" {
+		if common.UnmarshalJsonStr(raw, &selectedMapping) != nil {
+			return rejected
+		}
+	}
+	selectedUpstream, err := model.ResolveChannelModel(info.OriginModelName, selectedMapping)
+	// Realtime handshakes need not run ModelMappedHelper: a fresh mapped row
+	// cannot authorize a socket actually opened with the original model.
+	if err != nil || selectedUpstream != admission.Model.Upstream || selectedUpstream != info.UpstreamModelName {
+		return rejected
+	}
+	taskValue, taskPinned := c.Get(jsplugin.ContextKeyPinnedPlugin)
+	providerValue, providerPinned := common.GetContextKey(c, constant.ContextKeyProviderPlugin)
+	planValue, requestPlan := c.Get("request_plugin_plan")
+	if taskPinned && taskValue != nil || providerPinned && providerValue != nil || requestPlan && planValue != nil || len(info.ChannelSetting.RequestPlugins) > 0 {
+		// A retained plan may outlive a settings change; current settings alone
+		// cannot prove this session executes builtin-only work.
+		admission.Executor = core.ExecutorIdentity{}
+	}
+	var ctx context.Context = c
+	if c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	if message != nil {
+		var event struct {
+			Type     string                     `json:"type"`
+			Session  map[string]json.RawMessage `json:"session"`
+			Response map[string]json.RawMessage `json:"response"`
+		}
+		if common.Unmarshal(message, &event) != nil {
+			return rejected
+		}
+		var members map[string]json.RawMessage
+		switch event.Type {
+		case dto.RealtimeEventTypeSessionUpdate:
+			members = event.Session
+		case dto.RealtimeEventTypeResponseCreate:
+			members = event.Response
+		}
+		if event.Type == dto.RealtimeEventTypeSessionUpdate {
+			// Transcription chooses another model, not the fixed realtime model.
+			// Authorize that explicit target separately under the same channel and
+			// executor policy; never let it inherit the main socket's approval.
+			var nested struct {
+				Session struct {
+					Legacy struct {
+						Model string `json:"model"`
+					} `json:"input_audio_transcription"`
+					Audio struct {
+						Input struct {
+							Transcription struct {
+								Model string `json:"model"`
+							} `json:"transcription"`
+						} `json:"input"`
+					} `json:"audio"`
+				} `json:"session"`
+			}
+			if common.Unmarshal(message, &nested) != nil {
+				return rejected
+			}
+			for _, target := range []string{nested.Session.Legacy.Model, nested.Session.Audio.Input.Transcription.Model} {
+				if target == "" {
+					continue
+				}
+				transcription := admission
+				transcription.Model = core.ModelIdentity{Public: target, Upstream: target}
+				if core.Models.Check(ctx, transcription) != nil {
+					return rejected
+				}
+			}
+		}
+		if raw, present := members["model"]; present {
+			var name string
+			if common.Unmarshal(raw, &name) != nil || name != info.UpstreamModelName {
+				return rejected
+			}
+		}
+	}
+	if core.Models.Check(ctx, admission) != nil {
+		return rejected
+	}
+	return nil
+}
 
 func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.NewAPIError, *dto.RealtimeUsage) {
 	if info == nil || info.ClientWs == nil || info.TargetWs == nil {
@@ -49,6 +173,29 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 		targetWriteMu.Lock()
 		defer targetWriteMu.Unlock()
 		return helper.WssString(c, targetConn, string(message))
+	}
+	if apiErr := CheckRealtimeAdmission(c, info, nil); apiErr != nil {
+		return apiErr, nil
+	}
+	admissionDenied := func(message []byte) bool {
+		if CheckRealtimeAdmission(c, info, message) == nil {
+			return false
+		}
+		var event struct {
+			EventID string `json:"event_id"`
+		}
+		_ = common.Unmarshal(message, &event)
+		response, _ := common.Marshal(gin.H{
+			"type": "error", "event_id": "event_" + common.GetUUID(),
+			"error": gin.H{"type": "invalid_request_error", "code": "request_rejected", "message": "request rejected", "event_id": event.EventID},
+		})
+		if err := writeClient(response); err != nil {
+			select {
+			case errChan <- fmt.Errorf("error writing to client: %v", err):
+			default:
+			}
+		}
+		return true
 	}
 	plugins := requestplugin.NewRealtime(c, info, func(message []byte) {
 		if err := writeClient(message); err != nil {
@@ -90,6 +237,9 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					return
 				}
 
+				if admissionDenied(message) {
+					continue
+				}
 				realtimeEvent := &dto.RealtimeEvent{}
 				err = common.Unmarshal(message, realtimeEvent)
 				if err != nil {
@@ -110,6 +260,9 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					}
 				}
 
+				if admissionDenied(message) {
+					continue
+				}
 				if realtimeEvent.Type == dto.RealtimeEventTypeSessionUpdate {
 					if realtimeEvent.Session != nil {
 						if realtimeEvent.Session.Tools != nil {

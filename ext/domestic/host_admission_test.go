@@ -3,12 +3,15 @@ package domestic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -18,10 +21,16 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay"
+	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
+	kittypes "github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -200,6 +209,170 @@ func runHostAdmissionRequestBoundary(t *testing.T, channels []model.Channel, gat
 	}
 	core.Models = noop
 	assert.Nil(t, relay.CheckRequestAdmission(nil, nil), "default boundary must not create new context or DB dependencies")
+	core.Models = gate
+}
+
+func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, noop core.ModelGate) {
+	t.Helper()
+	defer func() { core.Models = gate }()
+	oldPrices := ratio_setting.ModelPrice2JSONString()
+	oldCountToken := constant.CountToken
+	constant.CountToken = false
+	oldFreePreconsume := operation_setting.GetQuotaSetting().EnableFreeModelPreConsume
+	operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = false
+	defer func() { operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = oldFreePreconsume }()
+	defer func() { constant.CountToken = oldCountToken }()
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"public-chat":0}`))
+	defer func() { require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(oldPrices)) }()
+	var upstreamCreates, upstreamDials atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		upstreamDials.Add(1)
+		defer ws.Close()
+		for {
+			_, message, err := ws.ReadMessage()
+			if err != nil {
+				return
+			}
+			var create struct{ Type, Model string }
+			if common.Unmarshal(message, &create) != nil {
+				return
+			}
+			index := upstreamCreates.Add(1)
+			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_cmh_local_%d","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, index)
+			if ws.WriteMessage(websocket.TextMessage, []byte(terminal)) != nil {
+				return
+			}
+		}
+	}))
+	defer upstream.Close()
+	oldSetting, oldBase := channel.Setting, channel.BaseURL
+	setting := `{"responses_websocket_enabled":true}`
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{"setting": setting, "base_url": upstream.URL}).Error)
+	defer func() {
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{"setting": oldSetting, "base_url": oldBase, "status": common.ChannelStatusEnabled}).Error)
+		model.InitChannelCache()
+	}()
+	model.InitChannelCache()
+	done := make(chan struct{})
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		client, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer client.Close()
+		defer close(done)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = r
+		runner := func(request *http.Request, requestID string, handle func(*gin.Context) *kittypes.NewAPIError) *kittypes.NewAPIError {
+			turn, _ := gin.CreateTestContext(httptest.NewRecorder())
+			turn.Request = request
+			common.SetContextKey(turn, constant.ContextKeyUsingGroup, "default")
+			common.SetContextKey(turn, constant.ContextKeyUserGroup, "default")
+			common.SetContextKey(turn, constant.ContextKeyTokenGroup, "default")
+			common.SetContextKey(turn, constant.ContextKeyUserId, 1)
+			common.SetContextKey(turn, common.RequestIdKey, requestID)
+			service.GetChannelConstraints(turn).AddPin(hostdto.ChannelPin{ChannelId: channel.Id, Source: hostdto.PinSourceToken, Rank: hostdto.PinRankToken, RetryMode: hostdto.PinRetrySingleAttempt})
+			return handle(turn)
+		}
+		_ = relay.ResponsesWebSocketHelper(c, client, runner)
+	}))
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http"), nil)
+	require.NoError(t, err)
+	defer func() {
+		_ = client.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("local WebSocket session did not stop")
+		}
+		gateway.Close()
+	}()
+	create := func() map[string]any {
+		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"public-chat","input":"local fixture"}`)))
+		require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, wire, err := client.ReadMessage()
+		require.NoError(t, err)
+		var event map[string]any
+		require.NoError(t, common.Unmarshal(wire, &event))
+		return event
+	}
+	event := create()
+	require.Equal(t, "response.completed", event["type"], "local fixture response: %v", event)
+	assert.Equal(t, int32(1), upstreamCreates.Load())
+	brokenSetting := `{"responses_websocket_enabled":`
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("setting", brokenSetting).Error)
+	event = create()
+	assert.Equal(t, "error", event["type"])
+	storedMalformed, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	require.NotNil(t, storedMalformed.Setting)
+	assert.Equal(t, brokenSetting, *storedMalformed.Setting, "denied restore is read-only")
+	assert.Equal(t, int32(1), upstreamCreates.Load())
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("setting", setting).Error)
+	brokenOther := `{"advanced_custom":`
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("settings", brokenOther).Error)
+	event = create()
+	assert.Equal(t, "error", event["type"])
+	storedMalformed, err = model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, brokenOther, storedMalformed.OtherSettings)
+	assert.Equal(t, int32(1), upstreamCreates.Load())
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("settings", channel.OtherSettings).Error)
+	originalMapping := channel.GetModelMapping()
+	otherUpstream, err := New([]string{"approved-target,another-approved-target"}, nil)
+	require.NoError(t, err)
+	publicPolicy, err := New([]string{"public-chat,gpt-4o-mini,denied-only"}, []string{"1,14,61"})
+	require.NoError(t, err)
+	broaderGate, err := NewGate(publicPolicy, otherUpstream, nil)
+	require.NoError(t, err)
+	core.Models = broaderGate
+	changedMapping := `{"public-chat":"another-approved-target"}`
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("model_mapping", changedMapping).Error)
+	event = create()
+	assert.Equal(t, "error", event["type"])
+	assert.Equal(t, int32(1), upstreamCreates.Load(), "reused socket cannot change its frozen target when DB maps to a different allowed model")
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("model_mapping", originalMapping).Error)
+	core.Models = gate
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	event = create()
+	assert.Equal(t, "error", event["type"])
+	assert.Equal(t, int32(1), upstreamCreates.Load(), "revoked second create cannot reach upstream")
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusEnabled).Error)
+	event = create()
+	assert.Equal(t, "response.completed", event["type"], "a denied create does not poison the reusable session")
+	assert.Equal(t, int32(2), upstreamCreates.Load())
+	// The realtime helper must inspect model fields omitted from typed DTOs,
+	// without rewriting or accounting for rejected events.
+	fresh, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/realtime?model=public-chat", nil)
+	common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
+	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, "public-chat")
+	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, fresh.GetModelMapping())
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	info := &relaycommon.RelayInfo{OriginModelName: "public-chat", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id, ChannelType: channel.Type, UpstreamModelName: "approved-target"}}
+	require.Nil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"response.create"}`)))
+	require.NotNil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"session.update","session":{"model":"unapproved-target"}}`)))
+	require.NotNil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"response.create","response":{"model":"unapproved-target"}}`)))
+	require.NotNil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"session.update","session":{"input_audio_transcription":{"model":"unapproved-transcriber"}}}`)))
+	require.NotNil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"session.update","session":{"audio":{"input":{"transcription":{"model":"unapproved-transcriber"}}}}}`)))
+	require.Nil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"session.update","session":{"instructions":"ordinary update"}}`)))
+	// WssHelper initializes the actual handshake identity from context before
+	// dialing. This mapped public alias must be rejected before a new handshake,
+	// rather than dial the original alias and only reject in the event handler.
+	beforeDials := upstreamDials.Load()
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, fresh, "public-chat"))
+	handshakeInfo := relaycommon.GenRelayInfoWs(c, nil)
+	require.NotNil(t, relay.WssHelper(c, handshakeInfo))
+	assert.Equal(t, beforeDials, upstreamDials.Load())
+	core.Models = noop
+	require.Nil(t, openai.CheckRealtimeAdmission(nil, nil, nil))
 	core.Models = gate
 }
 
@@ -645,6 +818,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeAnthropic))
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
 	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
+	runHostAdmissionSockets(t, channels[1], gate, oldGate)
 	runHostAdmissionWrites(t, gate, oldGate)
 	owners, err := model.GetPreferredModelOwnerChannelTypes([]string{"gpt-4o-mini"}, []string{"default"})
 	require.NoError(t, err)
