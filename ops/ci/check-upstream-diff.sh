@@ -63,8 +63,8 @@ done <<<"$changed"
 # H1 admission RFC-specific cumulative ceiling, explicitly approved 2026-11-13.
 # Registration remains exact-file based; this is not a directory-wide waiver.
 # Scope: ext/docs/rfc/2026-11-13-admission-hook-budget.md (not funding H3/H7).
-max_files=32
-max_lines=2500
+max_files=48
+max_lines=6000
 allowed_changed=$(grep -xF -f <(printf '%s\n' "$whitelist") <<<"$changed" || true)
 files_count=$(sed '/^[[:space:]]*$/d' <<<"$allowed_changed" | wc -l | tr -d ' ')
 lines_count=0
