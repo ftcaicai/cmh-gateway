@@ -53,6 +53,7 @@
 | H1-C | Task内容目标回归 | 测试 | `controller/task_generic_test.go` | TestTaskContentDestinationAdmission | 2026-11-14 | 真实loopback初始拒绝0、批准Range媒体以及第二redirect目标单独审批 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task延续引用持久化 | 值投影 | `model/task.go` | TaskExecutionSnapshot.Continuation | 2026-11-14 | existing private JSON只保存non-secret ref/digest，不新增表列或复制源/配置 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task已存档引用投影 | 值投影 | `service/task_plugin_audit.go` | TaskExecutionSnapshotFromContext | 2026-11-14 | 只有Save成功contextref才随既有controller插入TaskPrivate Execution，失败清空 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task-bound延续解析 | 值投影/准入 | `relay/relay_adaptor.go` | GetTaskAdaptorForTask | 2026-11-14 | 按持久task/user/channel/ref加载档案与未发布恢复，ref存在时不回退当前Registry；purpose限定poll/content | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -110,4 +111,5 @@ controller/video_proxy.go
 controller/task_generic_test.go
 model/task.go
 service/task_plugin_audit.go
+relay/relay_adaptor.go
 ```

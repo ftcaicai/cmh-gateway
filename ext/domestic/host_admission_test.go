@@ -28,6 +28,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	"github.com/QuantumNous/new-api/relay/channel/providerplugin"
 	taskjsplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
@@ -534,6 +535,17 @@ func (f *failingContinuationStore) Save(context.Context, core.ContinuationBindin
 	return core.ContinuationRef{}, core.ErrContinuationUnavailable
 }
 
+type cancellingContinuationStore struct {
+	core.ContinuationStore
+	cancel context.CancelFunc
+}
+
+func (s *cancellingContinuationStore) Load(ctx context.Context, b core.ContinuationBinding, r core.ContinuationRef, p core.ContinuationPurpose) (core.ContinuationArtifact, error) {
+	a, err := s.ContinuationStore.Load(ctx, b, r, p)
+	s.cancel()
+	return a, err
+}
+
 func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
 	t.Helper()
 	previousDestinations := core.Destinations
@@ -555,6 +567,10 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 		if r.URL.Path == "/lookup" {
 			lookups.Add(1)
 			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		if r.URL.Path == "/query" {
+			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
 			return
 		}
 		signedTier = r.Header.Get("X-Tier")
@@ -674,13 +690,61 @@ export function parseTaskResult(){return {status:"SUCCESS"};}`
 	archived, err := archive.Load(t.Context(), bindingArchive, *snapshot.Continuation, core.ContinuationPoll)
 	require.NoError(t, err)
 	assert.Equal(t, []byte(source), archived.Source)
-	persisted := &model.Task{TaskID: info.PublicTaskID, UserId: info.UserId, ChannelId: info.ChannelId, PrivateData: model.TaskPrivateData{Execution: snapshot}}
+	persisted := &model.Task{Platform: constant.TaskPlatform(plugin.Meta.Key), Properties: model.Properties{OriginModelName: info.OriginModelName, UpstreamModelName: info.UpstreamModelName}, TaskID: info.PublicTaskID, UserId: info.UserId, ChannelId: info.ChannelId, PrivateData: model.TaskPrivateData{Execution: snapshot}}
 	require.NoError(t, model.DB.Create(persisted).Error)
 	defer func() { require.NoError(t, model.DB.Where("id = ?", persisted.ID).Delete(&model.Task{}).Error) }()
 	var reloaded model.Task
 	require.NoError(t, model.DB.First(&reloaded, persisted.ID).Error)
 	require.NotNil(t, reloaded.PrivateData.Execution)
 	assert.Equal(t, snapshot.Continuation, reloaded.PrivateData.Execution.Continuation)
+	queryHash, err := core.DestinationAddress(base + "/query")
+	require.NoError(t, err)
+	queryTarget := core.DestinationAdmission{Kind: "task_query", Method: "GET", AddressSHA256: queryHash, HostSHA256: core.DestinationHost(baseURL.Host), Executor: capability, Hook: "buildQueryRequest"}
+	queryPolicy, err := NewDestinationPolicy([]core.DestinationAdmission{queryTarget})
+	require.NoError(t, err)
+	core.Destinations = queryPolicy
+	reloaded.PrivateData.UpstreamTaskID = "archived-upstream"
+	cancelCtx, cancelResolve := context.WithCancel(t.Context())
+	core.TaskContinuations = &cancellingContinuationStore{ContinuationStore: archive, cancel: cancelResolve}
+	_, err = relay.GetTaskAdaptorForTask(cancelCtx, &reloaded, core.ContinuationPoll)
+	require.ErrorIs(t, err, context.Canceled)
+	core.TaskContinuations = archive
+	resolved, err := relay.GetTaskAdaptorForTask(t.Context(), &reloaded, core.ContinuationPoll)
+	require.NoError(t, err)
+	queryResponse, err := resolved.FetchTask(base, "fixture", &reloaded, "")
+	require.NoError(t, err)
+	require.NoError(t, queryResponse.Body.Close())
+	for _, alter := range []func(*model.Task){func(task *model.Task) { task.TaskID = "different-task" }, func(task *model.Task) { task.UserId++ }, func(task *model.Task) { task.ChannelId++ }, func(task *model.Task) { task.Properties.OriginModelName = "different-model" }} {
+		other := reloaded
+		alter(&other)
+		_, err := relay.GetTaskAdaptorForTask(t.Context(), &other, core.ContinuationPoll)
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		_, err = resolved.FetchTask(base, "fixture", &other, "")
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	}
+	if artifacts, ok := resolved.(relaychannel.TaskArtifactProvider); ok {
+		_, err = artifacts.ListArtifacts(&reloaded)
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	}
+	upstreamChanged := reloaded
+	upstreamChanged.PrivateData.UpstreamTaskID = "other-upstream-job"
+	_, err = resolved.FetchTask(base, "fixture", &upstreamChanged, "")
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	accountChanged := reloaded
+	accountChanged.PrivateData.CredentialAccount = "other-account"
+	_, err = resolved.FetchTask(base, "fixture", &accountChanged, "")
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	_, err = relay.GetTaskAdaptorForTask(t.Context(), &reloaded, core.ContinuationPurpose("submit"))
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	contentOnly, err := relay.GetTaskAdaptorForTask(t.Context(), &reloaded, core.ContinuationContent)
+	require.NoError(t, err)
+	_, err = contentOnly.FetchTask(base, "fixture", &reloaded, "")
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	core.TaskContinuations = nil
+	_, err = relay.GetTaskAdaptorForTask(t.Context(), &reloaded, core.ContinuationPoll)
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	core.TaskContinuations = archive
+	core.Destinations = fetchOnly
 	encodedTask, err := common.Marshal(reloaded.PrivateData)
 	require.NoError(t, err)
 	assert.NotContains(t, string(encodedTask), "export function")

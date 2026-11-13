@@ -1,10 +1,13 @@
 package relay
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
+	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	_ "github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -194,6 +197,50 @@ func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
 		return nil
 	}
 	return jspluginadaptor.New(plugin)
+}
+
+// GetTaskAdaptorForTask restores only the artifact bound to this persisted task.
+// A present reference never falls back to the current registry on storage failure.
+// Poll scheduling, credential selection and financial recovery remain the caller's.
+func GetTaskAdaptorForTask(ctx context.Context, task *model.Task, purpose core.ContinuationPurpose) (channel.TaskAdaptor, error) {
+	if ctx == nil || task == nil || (purpose != core.ContinuationPoll && purpose != core.ContinuationContent) {
+		return nil, core.ErrContinuationUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	execution := task.PrivateData.Execution
+	if execution == nil || execution.Continuation == nil {
+		if core.TaskContinuations != nil && execution != nil && execution.TaskPlugin != nil {
+			return nil, core.ErrContinuationUnavailable
+		}
+		return GetTaskAdaptor(task.Platform), nil
+	}
+	store := core.TaskContinuations
+	if store == nil || task.TaskID == "" || task.UserId <= 0 || task.ChannelId <= 0 {
+		return nil, core.ErrContinuationUnavailable
+	}
+	artifact, err := store.Load(ctx, core.ContinuationBinding{TaskID: task.TaskID, UserID: task.UserId, ChannelID: task.ChannelId}, *execution.Continuation, purpose)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, core.ErrContinuationUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if string(task.Platform) != artifact.PluginKey || execution.TaskPlugin != nil && execution.TaskPlugin.Key != artifact.PluginKey {
+		return nil, core.ErrContinuationUnavailable
+	}
+	adaptor, err := jspluginadaptor.RestoreContinuationArtifact(artifact)
+	if err != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	if err = adaptor.BindContinuationTask(task, purpose); err != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	return adaptor, nil
 }
 
 // getTaskAdaptorForRequest preserves the exact plugin object pinned by the

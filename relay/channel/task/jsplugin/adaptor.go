@@ -134,16 +134,21 @@ const maxTaskArtifacts = 64
 const maxTaskPluginPersistedJSONBytes = 1 << 20
 
 type TaskAdaptor struct {
-	plugin         *pluginruntime.LoadedPlugin
-	info           *relaycommon.RelayInfo
-	continuation   *taskContinuationRuntime
-	admittedSubmit bool
-	submitExecutor core.ExecutorIdentity
-	submitModel    core.ModelIdentity
-	submit         *requestDescriptor
-	routeRequest   *pluginruntime.RouteRequestContext
-	requestHeaders map[string]string
-	files          []map[string]any
+	plugin                 *pluginruntime.LoadedPlugin
+	info                   *relaycommon.RelayInfo
+	continuation           *taskContinuationRuntime
+	continuationTask       *core.ContinuationBinding
+	continuationPurpose    core.ContinuationPurpose
+	continuationRef        core.ContinuationRef
+	continuationAccount    string
+	continuationUpstreamID string
+	admittedSubmit         bool
+	submitExecutor         core.ExecutorIdentity
+	submitModel            core.ModelIdentity
+	submit                 *requestDescriptor
+	routeRequest           *pluginruntime.RouteRequestContext
+	requestHeaders         map[string]string
+	files                  []map[string]any
 	// hookRequestBody is hookRequestSource as hooks receive it.
 	hookRequestSource map[string]any
 	hookRequestBody   any
@@ -230,6 +235,51 @@ func RestoreContinuationArtifact(artifact core.ContinuationArtifact) (*TaskAdapt
 	}
 	info := &relaycommon.RelayInfo{OriginModelName: runtime.PublicModel, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: runtime.ChannelID, ChannelType: runtime.ChannelType, ChannelBaseUrl: runtime.BaseURL, ChannelSetting: runtime.Setting, ChannelOtherSettings: runtime.OtherSettings, HeadersOverride: runtime.HeadersOverride, ParamOverride: runtime.ParamOverride, UpstreamModelName: runtime.UpstreamModel}}
 	return &TaskAdaptor{plugin: plugin, info: info, continuation: &runtime}, nil
+}
+
+// BindContinuationTask restricts a restored artifact to one persisted task and
+// one continuation purpose. Binding cannot be replaced by a later caller.
+func (a *TaskAdaptor) BindContinuationTask(task *model.Task, purpose core.ContinuationPurpose) error {
+	if a == nil || a.continuation == nil || a.continuationTask != nil || task == nil || task.TaskID == "" || task.UserId <= 0 || task.ChannelId != a.continuation.ChannelID || (purpose != core.ContinuationPoll && purpose != core.ContinuationContent) || string(task.Platform) != a.plugin.Meta.Key || task.PrivateData.Execution == nil || task.PrivateData.Execution.Continuation == nil {
+		return core.ErrContinuationUnavailable
+	}
+	upstream := task.Properties.UpstreamModelName
+	if upstream == "" {
+		upstream = task.Properties.OriginModelName
+	}
+	frozenUpstream := a.continuation.UpstreamModel
+	if frozenUpstream == "" {
+		frozenUpstream = a.continuation.PublicModel
+	}
+	ref := *task.PrivateData.Execution.Continuation
+	if task.Properties.OriginModelName == "" || task.Properties.OriginModelName != a.continuation.PublicModel || upstream != frozenUpstream || ref.ID == "" || ref.Digest == "" || task.PrivateData.Execution.TaskPlugin != nil && task.PrivateData.Execution.TaskPlugin.Key != a.plugin.Meta.Key {
+		return core.ErrContinuationUnavailable
+	}
+	a.continuationTask = &core.ContinuationBinding{TaskID: task.TaskID, UserID: task.UserId, ChannelID: task.ChannelId}
+	a.continuationUpstreamID = task.GetUpstreamTaskID()
+	a.continuationPurpose, a.continuationRef, a.continuationAccount = purpose, ref, task.PrivateData.CredentialAccount
+	return nil
+}
+
+func (a *TaskAdaptor) checkContinuationTask(task *model.Task, purpose core.ContinuationPurpose) error {
+	if a.continuationTask == nil {
+		return nil
+	}
+	if task == nil || a.continuationPurpose != purpose || *a.continuationTask != (core.ContinuationBinding{TaskID: task.TaskID, UserID: task.UserId, ChannelID: task.ChannelId}) || string(task.Platform) != a.plugin.Meta.Key || task.PrivateData.CredentialAccount != a.continuationAccount || task.GetUpstreamTaskID() != a.continuationUpstreamID || task.PrivateData.Execution == nil || task.PrivateData.Execution.Continuation == nil || *task.PrivateData.Execution.Continuation != a.continuationRef {
+		return core.ErrContinuationUnavailable
+	}
+	upstream := task.Properties.UpstreamModelName
+	if upstream == "" {
+		upstream = task.Properties.OriginModelName
+	}
+	frozenUpstream := a.continuation.UpstreamModel
+	if frozenUpstream == "" {
+		frozenUpstream = a.continuation.PublicModel
+	}
+	if task.Properties.OriginModelName != a.continuation.PublicModel || upstream != frozenUpstream || task.PrivateData.Execution.TaskPlugin != nil && task.PrivateData.Execution.TaskPlugin.Key != a.plugin.Meta.Key {
+		return core.ErrContinuationUnavailable
+	}
+	return nil
 }
 
 func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{plugin: plugin} }
@@ -401,6 +451,9 @@ func (a *TaskAdaptor) AdjustBillingOnSubmit(info *relaycommon.RelayInfo, taskDat
 }
 
 func (a *TaskAdaptor) AdjustBillingOnComplete(task *model.Task, result *relaycommon.TaskInfo) int {
+	if a.checkContinuationTask(task, core.ContinuationPoll) != nil {
+		return 0
+	}
 	if !a.hasHook(context.Background(), "extractUsageOnComplete") {
 		return 0
 	}
@@ -916,6 +969,14 @@ func (a *TaskAdaptor) GetChannelName() string { return a.plugin.Meta.Name }
 func (a *TaskAdaptor) FetchMode() string      { return a.plugin.Meta.FetchMode }
 
 func (a *TaskAdaptor) FetchBatchTasks(baseURL, key string, tasks []*model.Task, proxy string) (*http.Response, error) {
+	if a.continuationTask != nil && len(tasks) == 0 {
+		return nil, core.ErrContinuationUnavailable
+	}
+	for _, task := range tasks {
+		if err := a.checkContinuationTask(task, core.ContinuationPoll); err != nil {
+			return nil, err
+		}
+	}
 	if a.continuation != nil && (baseURL != a.continuation.BaseURL || proxy != a.continuation.Setting.Proxy) {
 		return nil, core.ErrContinuationUnavailable
 	}
@@ -950,6 +1011,9 @@ func (a *TaskAdaptor) FetchBatchTasks(baseURL, key string, tasks []*model.Task, 
 }
 
 func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy string) (*http.Response, error) {
+	if err := a.checkContinuationTask(task, core.ContinuationPoll); err != nil {
+		return nil, err
+	}
 	if a.continuation != nil && (baseURL != a.continuation.BaseURL || proxy != a.continuation.Setting.Proxy) {
 		return nil, core.ErrContinuationUnavailable
 	}
@@ -1154,6 +1218,14 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor r
 }
 
 func (a *TaskAdaptor) ParseBatchResult(tasks []*model.Task, resp *http.Response, body []byte) (map[string]*service.BatchTaskResult, error) {
+	if a.continuationTask != nil && len(tasks) == 0 {
+		return nil, core.ErrContinuationUnavailable
+	}
+	for _, task := range tasks {
+		if err := a.checkContinuationTask(task, core.ContinuationPoll); err != nil {
+			return nil, err
+		}
+	}
 	started := time.Now()
 	input := any(string(body))
 	var decoded any
@@ -1244,6 +1316,9 @@ func (a *TaskAdaptor) ParseBatchResult(tasks []*model.Task, resp *http.Response,
 }
 
 func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, body []byte) (*relaycommon.TaskInfo, error) {
+	if err := a.checkContinuationTask(task, core.ContinuationPoll); err != nil {
+		return nil, err
+	}
 	started := time.Now()
 	input := any(string(body))
 	var decoded any
@@ -1333,6 +1408,9 @@ func (a *TaskAdaptor) applyCompletionUsageFacts(result *relaycommon.TaskInfo, fa
 }
 
 func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
+	if err := a.checkContinuationTask(task, core.ContinuationContent); err != nil {
+		return nil, err
+	}
 	if task == nil {
 		return nil, fmt.Errorf("task is required")
 	}
@@ -1380,6 +1458,9 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 }
 
 func (a *TaskAdaptor) ListArtifacts(task *model.Task) ([]channel.TaskArtifact, error) {
+	if err := a.checkContinuationTask(task, core.ContinuationContent); err != nil {
+		return nil, err
+	}
 	if !a.hasHook(context.Background(), "listArtifacts") {
 		return nil, nil
 	}
@@ -1424,6 +1505,9 @@ func RendererArtifacts(plugin *pluginruntime.LoadedPlugin, task *model.Task, con
 }
 
 func (a *TaskAdaptor) BuildContentRequest(ctx context.Context, task *model.Task, artifactKey string, clientRequest channel.TaskArtifactClientRequest) (*channel.TaskContentRequest, error) {
+	if err := a.checkContinuationTask(task, core.ContinuationContent); err != nil {
+		return nil, err
+	}
 	if !a.hasHook(context.Background(), "buildContentRequest") {
 		return nil, nil
 	}
