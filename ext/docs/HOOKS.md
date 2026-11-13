@@ -24,7 +24,7 @@
 
 | 编号 | 名称 | 形态 | 预计文件 |
 |---|---|---|---|
-| H1 | `ModelGate` | 观察 | `middleware/distributor.go`、`controller/channel.go`、`model/pricing.go` |
+| H1 | `ModelGate` | 准入型（专项已批准，core/domestic纯合同先行，官方接线待验） | 按 `rfc/2026-11-13-admission-hook-budget.md` A/B/C逐项登记；未接线文件不进入当前白名单 |
 | H3 | `FundingHooks` | 接管 | `service/billing_session.go` |
 | H4 | `PricingResolver` | 观察 | `relay/helper/price.go` |
 | H6 | `Migrator` | 观察 | `model/main.go` |

@@ -15,7 +15,7 @@ import "github.com/gin-gonic/gin"
 
 // Reserved hook identifiers. Keep in sync with ext/docs/HOOKS.md.
 const (
-	HookModelGate        = "H1" // observing
+	HookModelGate        = "H1" // admission/veto
 	HookTenantResolver   = "H2" // observing
 	HookFundingHooks     = "H3" // takeover
 	HookPricingResolver  = "H4" // observing

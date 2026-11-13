@@ -60,8 +60,11 @@ done <<<"$changed"
 
 # ---- hook budget ------------------------------------------------------------
 # Hard limits from ext/AGENTS.md §3.2.
-max_files=10
-max_lines=150
+# H1 admission RFC-specific cumulative ceiling, explicitly approved 2026-11-13.
+# Registration remains exact-file based; this is not a directory-wide waiver.
+# Scope: ext/docs/rfc/2026-11-13-admission-hook-budget.md (not funding H3/H7).
+max_files=32
+max_lines=2500
 allowed_changed=$(grep -xF -f <(printf '%s\n' "$whitelist") <<<"$changed" || true)
 files_count=$(sed '/^[[:space:]]*$/d' <<<"$allowed_changed" | wc -l | tr -d ' ')
 lines_count=0
@@ -114,6 +117,9 @@ if [[ -n "$main_ext_imports" ]]; then
   echo "::error::main.go may only blank-import ext (and import ext/core):"
   sed 's/^/  - /' <<<"$main_ext_imports"
   status=1
+fi
+if (( files_count * 100 >= max_files * 80 || lines_count * 100 >= max_lines * 80 )); then
+  echo "::warning::H1 admission budget is at least 80% used; review registered scope before adding more changes."
 fi
 if (( status == 0 )); then
   echo "OK: official zone untouched except registered hooks."

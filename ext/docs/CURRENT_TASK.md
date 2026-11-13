@@ -15,17 +15,17 @@
 
 ## 当前需要的用户决策（不是逐小节确认）
 
-R3最小前端例外已批准并完成5项真实Chrome表单验收；R4既有官方测试精确清单修复也已批准，加入有效自有icon后 `go test -p 2 ./plugins ./ext/...` 全通过。当前官方预算9文件/110行，剩1文件/40行；不能暗示后续完整H1/资金扩展能自动放进预算。
+R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明确批准累计32文件/2500增删行、准入型多调用点与无业务core导入，规则v0.8；不授权资金重构。下轮直接按RFC A/B/C实施，不再重复征求相同预算。
 
-资金/白名单原设计仍待RFC完善，不能提前宣称150行预算可行。
+资金同事务方案仍单独设计复核；H1审批不等于H3/H7审批或三库测试通过。
 
 ## 下一动作
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1完整准入设计已汇总 `rfc/2026-11-13-admission-hook-budget.md`：20生产文件候选、累计约29文件，现1文件/40行剩余不足；提议RFC专项累计32文件/2500行并明确准入型多调用与core import例外，**待用户批准未实施**。
+3. 用户已明确批准H1专项累计32文件/2500增删行、准入型多调用与无业务core接口导入；宪法v0.8已单独提交，RFC状态已更新。`ext/core/admission.go`与`ext/domestic/gate.go`纯值合同/不可变策略最终plugins+ext测试、vet、门禁全部exit0；未注册core.Models，不宣称live防线完成。下一轮从RFC A的候选/目录权威入口开始实做，补齐公开/上游/实际执行者投影，逐文件登记，不重复要求预算确认。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
-4. P2后续H1需完整旁路覆盖、模型公开名/最终上游/实际插件身份分开；150行/10文件预算未证实，不能增文件白名单把实现绕过去。
+5. P2后续H1需完整旁路覆盖、模型公开名/最终上游/实际插件身份分开；审批32/2500不是覆盖完成，必须stub网络/预扣计数和三库验证。当前PATH无Docker/Podman/MySQL/PostgreSQL程序或相关服务，后续可准备独立本地引擎但不可借用生产DSN。
 
 ## 命令与环境
 
@@ -33,7 +33,7 @@ R3最小前端例外已批准并完成5项真实Chrome表单验收；R4既有官
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前9官方文件/110行，exit0；剩1文件/40行。未核对分支保护，CI成功不代表强制阻断merge。
+- 门禁目前9官方文件/110行，H1专项累计硬上限32/2500（已明确批准），逐文件白名单不变。未核对分支保护，CI成功不代表强制阻断merge。
 
 ## 临时资源与作业
 
