@@ -18,6 +18,7 @@
 | R3 | 跨应用登录成功 | 前端桥接 | `web/src/features/auth/hooks/use-auth-redirect.ts` | 24–27、67–70 | 2026-11-13 | 成功完成官方登录后使用同一安全导航选项 | `rfc/2026-11-13-cross-app-login-return.md` | ftcaicai |
 | R3 | 已登录回跳 | 前端桥接 | `web/src/routes/(auth)/sign-in.tsx` | 22、43–46 | 2026-11-13 | 回源确认登录后的 beforeLoad 使用同一安全导航选项 | `rfc/2026-11-13-cross-app-login-return.md` | ftcaicai |
 | R3 | 桥接边界回归 | 测试 | `web/src/features/auth/lib/auth-redirect.test.ts` | 23–27、67–92 | 2026-11-13 | 复用既有测试文件验证路径边界及不安全回跳；计入官方文件与行数预算 | `rfc/2026-11-13-cross-app-login-return.md` | ftcaicai |
+| R4 | 自有插件工厂清单 | 测试 | `plugins/builtin_plugins_test.go` | requestPluginHooks 字典中的 cmh-param-normalize 条目 | 2026-11-13 | 保留精确目录集合断言并验证自有 outbound 工厂插件 | `rfc/2026-11-13-plugin-factory-inventory.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -40,4 +41,5 @@ web/src/features/auth/lib/auth-redirect.ts
 web/src/features/auth/hooks/use-auth-redirect.ts
 web/src/routes/(auth)/sign-in.tsx
 web/src/features/auth/lib/auth-redirect.test.ts
+plugins/builtin_plugins_test.go
 ```

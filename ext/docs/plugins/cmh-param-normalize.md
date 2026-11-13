@@ -50,6 +50,8 @@ The hook runs before channel parameter overrides: those overrides can reintroduc
 
 Normal host failures remain fail-closed: the plugin does not declare `optional: true`. Explicit rejections stop the request without trying another channel. Deployment requires a separate authorized upload/version activation and a disabled-by-default instance, followed by exact channel/model configuration and explicit switch enablement. No such deployment is part of this change.
 
+The directory ships a neutral `icon.svg` validated by the official factory-plugin tests. The user-approved R4 inventory change adds the exact plugin/stage entry to the existing official test map; all assertions remain intact. `go test -p 2 ./plugins ./ext/... -count=1` passes after adding the icon. This verifies factory loading and contract compatibility, not an enabled runtime instance.
+
 ## Offline verification
 
 From the repository root, using a built gateway CLI:

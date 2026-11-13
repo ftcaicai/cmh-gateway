@@ -1,4 +1,6 @@
-# RFC（回归修复提案，待批准）：自有插件的工厂目录清单
+# RFC（已批准）：自有插件的工厂目录清单
+
+负责人已明确选择“允许最小测试清单修复（推荐）”；仅批准R4登记的既有文件精确清单项，不改embed/registry生产逻辑，不删除或放松断言。
 
 ## 证据
 
@@ -16,4 +18,8 @@
 
 ## 验收
 
-`go test -p 2 ./plugins -count=1`全通过；`go test ./ext/domestic`宿主fixture通过；不删断言、不skip、不allow-failure。修订插件说明区分“工厂随制品嵌入/可发现”与“请求实例启用/作用范围”。其他全仓Windows文件句柄/HTTP2文案失败另行复核，不与本项混淆。
+实际 `go test -p 2 ./plugins ./ext/... -count=1` 最终exit0，plugins6.151s，全部ext通过。首次清单项修正后发现官方工厂还要求有效icon，测试在builtin_plugins_test.go:234失败；已在自有插件目录新增无脚本/外链的中性icon.svg，保留图标断言后完整重跑通过。
+
+实际gofmt为对齐map列宽，R4既有测试文件产生7增6删（13行），不是预算估计的1行；总预算9/10文件、110/150行，未放宽限制。
+
+原验收要求：`go test -p 2 ./plugins -count=1`全通过；`go test ./ext/domestic`宿主fixture通过；不删断言、不skip、不allow-failure。修订插件说明区分“工厂随制品嵌入/可发现”与“请求实例启用/作用范围”。其他全仓Windows文件句柄/HTTP2文案失败另行复核，不与本项混淆。
