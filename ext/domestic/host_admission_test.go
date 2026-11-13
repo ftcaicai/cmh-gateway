@@ -1664,10 +1664,62 @@ export function parseTaskResult(){return {status:"IN_PROGRESS"};}`
 	actual, err := model.ChannelPluginAdmission(&channel, "published-task", core.AdmissionDispatch, jsplugin.PinnedPlugin{Plugin: plugin, Generation: registry.Generation()}, "task", "/v1/tasks/cmh-publication")
 	require.NoError(t, err)
 	assert.Error(t, publicationGate.Check(t.Context(), actual), "publication approval cannot authorize task dispatch")
+	pinnedGeneration := registry.Generation()
 	_, err = registry.RegisterFactory(source+"\nexport const revision=2;", jsplugin.Options{})
 	require.NoError(t, err)
 	assert.NotContains(t, model.GetGroupEnabledModels("default"), "published-task", "source replacement revokes exact publication match")
 	assert.Error(t, model.ValidateChannelAdmissionSnapshot(t.Context(), &channel))
+	core.Models = runtimeOnly
+	filter := hostdto.ChannelFilter{Kind: hostdto.FilterTaskPluginIdentity, TaskPluginKey: plugin.Meta.Key, RequestPath: "/v1/tasks/cmh-publication", PluginView: model.NewPluginCandidateView(pinnedGeneration)}
+	currentFilter := filter
+	currentFilter.PluginView = nil
+	ok, _ := model.ChannelSatisfiesFilters(&channel, "published-task", []hostdto.ChannelFilter{currentFilter})
+	assert.False(t, ok, "current source B has no runtime approval")
+	ok, _ = model.ChannelSatisfiesFilters(&channel, "published-task", []hostdto.ChannelFilter{filter})
+	assert.True(t, ok, "pinned source A must not be replaced by current generation")
+	conflict := filter
+	conflict.PluginView = model.NewPluginCandidateView(registry.Generation())
+	ok, _ = model.ChannelSatisfiesFilters(&channel, "published-task", []hostdto.ChannelFilter{filter, conflict})
+	assert.False(t, ok)
+	emptyViewFilter := filter
+	emptyViewFilter.PluginView = model.NewPluginCandidateView(jsplugin.NewRegistry().Generation())
+	ok, _ = model.ChannelSatisfiesFilters(&channel, "published-task", []hostdto.ChannelFilter{emptyViewFilter})
+	assert.False(t, ok)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/cmh-publication", nil)
+	ctx.Set("expected_task_plugin_key", plugin.Meta.Key)
+	ctx.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Plugin: plugin, Generation: pinnedGeneration})
+	common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "default")
+	service.GetChannelConstraints(ctx).AddFilter(filter)
+	require.Nil(t, middleware.SetupContextForSelectedChannel(ctx, &channel, "published-task"))
+	captured, _ := ctx.Get("cmh_candidate_generation")
+	assert.Same(t, pinnedGeneration, captured)
+	oldMemory := common.MemoryCacheEnabled
+	defer func() { common.MemoryCacheEnabled = oldMemory }()
+	for _, memory := range []bool{false, true} {
+		common.MemoryCacheEnabled = memory
+		model.InitChannelCache()
+		selected, err := model.GetRandomSatisfiedChannel("default", "published-task", 0, []hostdto.ChannelFilter{filter})
+		require.NoError(t, err)
+		require.NotNil(t, selected)
+		assert.Equal(t, channel.Id, selected.Id)
+	}
+	const providerSource = `export const meta={apiVersion:1,key:"cmh-view-provider",name:"View provider",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/chat/completions",upstream_path:"/chat"}]};`
+	providerPlugin, err := registry.RegisterFactory(providerSource, jsplugin.Options{})
+	require.NoError(t, err)
+	providerGeneration := registry.Generation()
+	providerSetting := `{"task_plugin_key":"cmh-view-provider"}`
+	providerChannel := channel
+	providerChannel.Setting = &providerSetting
+	providerFilter := hostdto.ChannelFilter{Kind: hostdto.FilterTaskPluginIdentity, RequestPath: "/v1/chat/completions", PluginView: model.NewPluginCandidateView(providerGeneration)}
+	_, err = registry.RegisterFactory(strings.Replace(providerSource, "/v1/chat/completions", "/v1/embeddings", 1), jsplugin.Options{})
+	require.NoError(t, err)
+	ok, _ = model.ChannelSatisfiesHostFilters(&providerChannel, "published-task", []hostdto.ChannelFilter{providerFilter})
+	assert.True(t, ok)
+	providerFilter.PluginView = nil
+	ok, _ = model.ChannelSatisfiesHostFilters(&providerChannel, "published-task", []hostdto.ChannelFilter{providerFilter})
+	assert.False(t, ok)
+	assert.NotEmpty(t, providerPlugin.SourceSHA256())
 }
 
 func runHostAdmissionCandidateAndCatalog(t *testing.T) {

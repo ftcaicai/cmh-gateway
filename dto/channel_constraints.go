@@ -1,5 +1,24 @@
 package dto
 
+import "github.com/QuantumNous/new-api/ext/core"
+
+// ChannelCandidateSnapshot carries host routing controls only, never a key.
+// Its configuration may be sensitive and must not be logged or exposed as JSON.
+type ChannelCandidateSnapshot struct {
+	ID, Type, Status                                                    int
+	Models, Group, BaseURL, Other                                       string
+	Setting, OtherSettings, ModelMapping, ParamOverride, HeaderOverride string
+	BaseURLPresent                                                      bool
+}
+
+// PluginCandidateView is a host-owned pinned generation, without a dependency
+// on the plugin runtime package. Generation identity is not operator approval.
+type PluginCandidateView interface {
+	Admission(ChannelCandidateSnapshot, string, core.AdmissionPhase, ChannelFilter) (core.Admission, error)
+	Matches(ChannelCandidateSnapshot, string, ChannelFilter) bool
+	SameGeneration(PluginCandidateView) bool
+}
+
 type ChannelPinSource string
 
 const (
@@ -51,6 +70,7 @@ type ChannelFilter struct {
 	// TaskPluginRelayOnly excludes endpoint candidates after an ordinary relay
 	// channel wins selection, so retries keep using the same protocol handler.
 	TaskPluginRelayOnly bool
+	PluginView          PluginCandidateView `json:"-"`
 }
 
 type ChannelConstraints struct {

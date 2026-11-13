@@ -32,6 +32,47 @@ type ModelRequest struct {
 	Group string `json:"group,omitempty"`
 }
 
+func bindPluginCandidateView(c *gin.Context, constraints *taskdto.ChannelConstraints) {
+	if c == nil || constraints == nil {
+		return
+	}
+	var generation *jsplugin.RoutingGeneration
+	if value, ok := c.Get(jsplugin.ContextKeyPinnedPlugin); ok {
+		if pinned, valid := value.(jsplugin.PinnedPlugin); valid {
+			generation = pinned.Generation
+		}
+	}
+	if generation == nil {
+		if value, ok := c.Get(jsplugin.ContextKeyPinnedEndpoint); ok {
+			if pinned, valid := value.(jsplugin.PinnedEndpoint); valid {
+				generation = pinned.Generation
+			}
+		}
+	}
+	if generation == nil {
+		if value, ok := c.Get(jsplugin.ContextKeyPinnedRoute); ok {
+			if pinned, valid := value.(jsplugin.PinnedRoute); valid {
+				generation = pinned.Generation
+			}
+		}
+	}
+	if generation == nil {
+		if value, ok := c.Get("cmh_candidate_generation"); ok {
+			generation, _ = value.(*jsplugin.RoutingGeneration)
+		}
+	}
+	if generation == nil {
+		generation = jsplugin.DefaultRegistry.Generation()
+	}
+	c.Set("cmh_candidate_generation", generation)
+	view := model.NewPluginCandidateView(generation)
+	for index := range constraints.Filters {
+		if constraints.Filters[index].PluginView == nil {
+			constraints.Filters[index].PluginView = view
+		}
+	}
+}
+
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		var channel *model.Channel
@@ -46,6 +87,7 @@ func Distribute() func(c *gin.Context) {
 			RequestPath: c.Request.URL.Path,
 		})
 		service.AppendTaskPluginIdentityFilter(c, c.GetString("expected_task_plugin_key"))
+		bindPluginCandidateView(c, constraints)
 		modelRequest, shouldSelectChannel, err := getModelRequest(c)
 		if err != nil {
 			abortWithOpenAiMessage(c, invalidRequestStatus(err), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
@@ -633,6 +675,7 @@ func getTaskOriginModelName(c *gin.Context) string {
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	bindPluginCandidateView(c, service.GetChannelConstraints(c))
 	c.Set("original_model", modelName) // for retry
 	expectedPlugin := c.GetString("expected_task_plugin_key")
 	if channel == nil {
@@ -738,6 +781,11 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	var providerPlugin any
 	if channel.Type == constant.ChannelTypeTaskPlugin && c.GetString("expected_task_plugin_key") == "" {
 		generation := jsplugin.DefaultRegistry.Generation()
+		if value, exists := c.Get("cmh_candidate_generation"); exists {
+			if captured, ok := value.(*jsplugin.RoutingGeneration); ok && captured != nil {
+				generation = captured
+			}
+		}
 		if plugin, ok := generation.Get(channel.GetSetting().TaskPluginKey); ok && plugin.Meta.HasProviderPart() {
 			providerPlugin = jsplugin.PinnedPlugin{Generation: generation, Plugin: plugin}
 			otherSettings.AdvancedCustom = plugin.Meta.ChannelRelayConfig(plugin.ChannelConfigFor(otherSettings.PluginConfig))

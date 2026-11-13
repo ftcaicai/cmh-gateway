@@ -29,7 +29,7 @@
 | H1-A | 凭据恢复启用预验 | 准入型 | `model/channel_plugin_credential.go` | UpdateChannelLocked / UpdateTaskPluginChannelLocked / UpdateScheduledChannelLocked | 2026-11-13 | callback后写前核对实际持久化快照，拒绝不得先发布Key/cache | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 控制器变更前准入 | 准入型 | `controller/channel.go` | AddChannel / UpdateChannel / normalizeChannel | 2026-11-13 | 规范化后、凭据检查与首次Key写之前预验；激活时Key+补丁+Ability通过UpdateWithAdmissionKey同事务 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 上游模型自动与手工应用 | 准入型 | `controller/channel_upstream_update.go` | updateChannelUpstreamModelSettings / checkAndPersistChannelUpstreamModelUpdates / applyChannelUpstreamModelUpdates | 2026-11-13 | 将选定模型delta应用于锁内当前行、持久化前准入；能力同步同事务，原noop路径保留 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
-| H1-B | 分发与凭据选择前准入 | 准入型 | `middleware/distributor.go` | Distribute / SetupContextForSelectedChannel | 2026-11-13 | 公开名覆盖pin分支；选中渠道DB刷新及实际执行者复核在Key取用前；Setup错误不再忽略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-B | 分发与凭据选择前准入 | 准入型 | `middleware/distributor.go` | Distribute / SetupContextForSelectedChannel / bindPluginCandidateView | 2026-11-13 | 公开名覆盖pin分支；选中渠道DB刷新及实际执行者复核在Key取用前；Setup错误不再忽略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | 估价与预扣前准入 | 准入型 | `relay/request_billing.go` | CheckRequestAdmission / PrepareRequestBilling | 2026-11-13 | 当前持久化身份复核，拒绝发生在token估算/免费跳过/预扣前；type61精确pinned源/角色/path/有效配置与冻结context比对，不用fresh配置授权旧context；不改资金生命周期 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | 重试追加预留前准入 | 准入型 | `controller/relay.go` | Relay重试循环getChannel后 | 2026-11-13 | 以本次选择身份快照复核，先于PrepareTieredBillingForSelectedGroup，保留原退款策略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | Responses长连接事件准入 | 准入型 | `relay/responses_websocket.go` | runCall / restoreConnectionContext / checkResponsesWSModelAccess | 2026-11-13 | 每create在ingress前复核、首次选中快照复用、锁定连接DB状态与冻结映射一致检查，重试topup前复核 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
@@ -58,6 +58,7 @@
 | H1-C | Task-aware factory启动桥 | 值投影 | `main.go` | service.GetTaskContinuationFunc | 2026-11-14 | 注入relay task-bound resolver与frozenchannel，当前channel只取绑定匹配的现有credentialKey；不安装Models/Store | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Archived内容读取恢复 | 值投影/准入 | `controller/task.go` | projectTaskArtifacts / initTaskArtifactAdaptor / taskHasPluginExecution / TaskArtifactContent | 2026-11-14 | ref任务按content用途加载旧源与当前account key，不fallback currentRegistry；缺档固定503 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task报告原源配置冻结 | 值投影/准入 | `relay/requestplugin/task_report.go` | TaskReport / freezeTaskReports / frozenTaskReportTargets / ReportTask | 2026-11-14 | 可选archive冻结实际source+originalInstance，private safe refs，整批恢复后queue；Frozen缺档/失败不回退当前settings | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Pinned候选typedview | 值DTO接口 | `dto/channel_constraints.go` | ChannelCandidateSnapshot / PluginCandidateView / ChannelFilter.PluginView | 2026-11-14 | key-free host snapshot+coreAdmission接口，真实generation保留于model私有wrapper，不引dto/jsplugin循环或name-number反查 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -119,4 +120,5 @@ relay/relay_adaptor.go
 service/task_polling.go
 controller/task.go
 relay/requestplugin/task_report.go
+dto/channel_constraints.go
 ```

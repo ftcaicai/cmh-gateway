@@ -76,6 +76,108 @@ func channelModelProjection(ch *Channel, public string, phase core.AdmissionPhas
 	return admission
 }
 
+// pluginCandidateView retains the actual generation object. Neither its number
+// nor a later registry lookup may substitute a different execution artifact.
+type pluginCandidateView struct {
+	generation *jsplugin.RoutingGeneration
+}
+
+func NewPluginCandidateView(generation *jsplugin.RoutingGeneration) dto.PluginCandidateView {
+	return &pluginCandidateView{generation: generation}
+}
+
+func (view *pluginCandidateView) SameGeneration(other dto.PluginCandidateView) bool {
+	candidate, ok := other.(*pluginCandidateView)
+	return ok && view != nil && candidate != nil && view.generation != nil && view.generation == candidate.generation
+}
+
+func candidateSnapshot(ch *Channel) dto.ChannelCandidateSnapshot {
+	return dto.ChannelCandidateSnapshot{
+		ID: ch.Id, Type: ch.Type, Status: ch.Status, Models: ch.Models, Group: ch.Group,
+		BaseURL: stringPointerValue(ch.BaseURL), BaseURLPresent: ch.BaseURL != nil, Other: ch.Other,
+		Setting: stringPointerValue(ch.Setting), OtherSettings: ch.OtherSettings,
+		ModelMapping: stringPointerValue(ch.ModelMapping), ParamOverride: stringPointerValue(ch.ParamOverride), HeaderOverride: stringPointerValue(ch.HeaderOverride),
+	}
+}
+
+func channelFromCandidate(snapshot dto.ChannelCandidateSnapshot) *Channel {
+	ch := &Channel{Id: snapshot.ID, Type: snapshot.Type, Status: snapshot.Status, Models: snapshot.Models, Group: snapshot.Group,
+		Other: snapshot.Other, Setting: &snapshot.Setting, OtherSettings: snapshot.OtherSettings,
+		ModelMapping: &snapshot.ModelMapping, ParamOverride: &snapshot.ParamOverride, HeaderOverride: &snapshot.HeaderOverride}
+	if snapshot.BaseURLPresent {
+		ch.BaseURL = &snapshot.BaseURL
+	}
+	return ch
+}
+
+func candidatePluginRole(setting kitdto.ChannelSettings, filter dto.ChannelFilter) string {
+	if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey == "" {
+		return "provider"
+	}
+	if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey == setting.TaskPluginKey ||
+		filter.Kind == dto.FilterTaskPluginEndpoint && !filter.TaskPluginRelayOnly && slices.Contains(filter.TaskPluginKeys, setting.TaskPluginKey) {
+		return "task"
+	}
+	return ""
+}
+
+func (view *pluginCandidateView) Admission(snapshot dto.ChannelCandidateSnapshot, public string, phase core.AdmissionPhase, filter dto.ChannelFilter) (core.Admission, error) {
+	ch := channelFromCandidate(snapshot)
+	admission := channelModelProjection(ch, public, phase)
+	if view == nil || view.generation == nil || ch.Type != constant.ChannelTypeTaskPlugin || (phase != core.AdmissionCandidate && phase != core.AdmissionAttempt) {
+		return admission, ErrChannelAdmissionDenied
+	}
+	var setting kitdto.ChannelSettings
+	if common.UnmarshalJsonStr(snapshot.Setting, &setting) != nil {
+		return admission, ErrChannelAdmissionDenied
+	}
+	role := candidatePluginRole(setting, filter)
+	loaded, found := view.generation.Get(setting.TaskPluginKey)
+	if !found || role == "" || filter.RequestPath == "" {
+		return admission, ErrChannelAdmissionDenied
+	}
+	return ChannelPluginAdmission(ch, public, phase, jsplugin.PinnedPlugin{Generation: view.generation, Plugin: loaded}, role, filter.RequestPath)
+}
+
+func (view *pluginCandidateView) Matches(snapshot dto.ChannelCandidateSnapshot, public string, filter dto.ChannelFilter) bool {
+	if view == nil || view.generation == nil || snapshot.Type != constant.ChannelTypeTaskPlugin {
+		return false
+	}
+	var setting kitdto.ChannelSettings
+	if common.UnmarshalJsonStr(snapshot.Setting, &setting) != nil {
+		return false
+	}
+	if _, found := view.generation.Get(setting.TaskPluginKey); !found {
+		return false
+	}
+	if snapshot.OtherSettings != "" {
+		var other kitdto.ChannelOtherSettings
+		if common.UnmarshalJsonStr(snapshot.OtherSettings, &other) != nil {
+			return false
+		}
+	}
+	filter.PluginView = nil
+	return channelMatchesFilterInGeneration(channelFromCandidate(snapshot), public, filter, view.generation)
+}
+
+// coherentCandidateView rejects mixed snapshots even when a later filter would
+// otherwise be ignored. Nil filters inherit a supplied view, never current code.
+func coherentCandidateView(filters []dto.ChannelFilter) (dto.PluginCandidateView, bool) {
+	var view dto.PluginCandidateView
+	for _, filter := range filters {
+		if filter.PluginView == nil {
+			continue
+		}
+		if view == nil {
+			view = filter.PluginView
+		}
+		if !view.SameGeneration(filter.PluginView) || !filter.PluginView.SameGeneration(view) {
+			return nil, false
+		}
+	}
+	return view, true
+}
+
 // ChannelModelAdmission projects an explicit executor role when the host has a
 // witness. Publication approval is distinct from permission to execute any route.
 func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase, filters ...dto.ChannelFilter) core.Admission {
@@ -85,22 +187,31 @@ func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase
 	}
 	upstream := admission.Model.Upstream
 	if ch.Type == constant.ChannelTypeTaskPlugin && phase != core.AdmissionChannelSave && len(filters) > 0 {
+		view, coherent := coherentCandidateView(filters)
+		if !coherent {
+			return admission
+		}
 		var setting kitdto.ChannelSettings
 		if ch.Setting != nil && common.UnmarshalJsonStr(*ch.Setting, &setting) == nil {
-			// Candidate filters carry no pinned generation. Use the current
-			// published source conservatively; an older pinned request may need
-			// a fresh selection after source replacement. Actual selected checks
-			// below use the exact pinned artifact, never this candidate witness.
+			if view != nil {
+				for _, filter := range filters {
+					if candidatePluginRole(setting, filter) == "" || filter.RequestPath == "" {
+						continue
+					}
+					projected, err := view.Admission(candidateSnapshot(ch), public, phase, filter)
+					if err == nil {
+						return projected
+					}
+					return admission
+				}
+				return admission
+			}
+			// No pinned view was supplied by this caller. Preserve the current
+			// generation projection; an explicit view must never fall back here.
 			generation := jsplugin.DefaultRegistry.Generation()
 			if loaded, ok := generation.Get(setting.TaskPluginKey); ok {
 				for _, filter := range filters {
-					role := ""
-					if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey == setting.TaskPluginKey || filter.Kind == dto.FilterTaskPluginEndpoint && !filter.TaskPluginRelayOnly && slices.Contains(filter.TaskPluginKeys, setting.TaskPluginKey) {
-						role = "task"
-					}
-					if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey == "" {
-						role = "provider"
-					}
+					role := candidatePluginRole(setting, filter)
 					if role != "" && filter.RequestPath != "" {
 						projected, err := ChannelPluginAdmission(ch, public, phase, jsplugin.PinnedPlugin{Generation: generation, Plugin: loaded}, role, filter.RequestPath)
 						if err == nil {
@@ -335,8 +446,15 @@ func ChannelSatisfiesHostFilters(ch *Channel, modelName string, filters []dto.Ch
 	if ch == nil {
 		return false, ""
 	}
+	view, coherent := coherentCandidateView(filters)
+	if ch.Type == constant.ChannelTypeTaskPlugin && !coherent {
+		return false, ""
+	}
 	for _, kind := range filterEvalOrder {
 		for _, filter := range filters {
+			if filter.PluginView == nil {
+				filter.PluginView = view
+			}
 			if filter.Kind != kind {
 				continue
 			}
@@ -358,14 +476,31 @@ func filterCandidateIDs(ids []int, modelName string, filters []dto.ChannelFilter
 		return ids, ""
 	}
 	kept = ids
-	if core.ModelAdmissionEnabled() {
+	view, coherent := coherentCandidateView(filters)
+	if view != nil && coherent {
+		filters = slices.Clone(filters)
+		for i := range filters {
+			if filters[i].PluginView == nil {
+				filters[i].PluginView = view
+			}
+		}
+	} else if !coherent {
 		kept = make([]int, 0, len(ids))
 		for _, id := range ids {
-			channel := channelsIDM[id]
-			if channel != nil && core.Models.Check(context.Background(), ChannelModelAdmission(channel, modelName, core.AdmissionCandidate, filters...)) == nil {
+			if ch := channelsIDM[id]; ch == nil || ch.Type != constant.ChannelTypeTaskPlugin {
 				kept = append(kept, id)
 			}
 		}
+	}
+	if core.ModelAdmissionEnabled() {
+		admitted := make([]int, 0, len(kept))
+		for _, id := range kept {
+			channel := channelsIDM[id]
+			if channel != nil && core.Models.Check(context.Background(), ChannelModelAdmission(channel, modelName, core.AdmissionCandidate, filters...)) == nil {
+				admitted = append(admitted, id)
+			}
+		}
+		kept = admitted
 	}
 	for _, kind := range filterEvalOrder {
 		kindFilters := filtersByKind(filters, kind)
@@ -413,6 +548,13 @@ func candidatePassesKindFilters(ch *Channel, exists bool, modelName string, kind
 }
 
 func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilter) bool {
+	if ch.Type == constant.ChannelTypeTaskPlugin && filter.PluginView != nil {
+		return filter.PluginView.Matches(candidateSnapshot(ch), modelName, filter)
+	}
+	return channelMatchesFilterInGeneration(ch, modelName, filter, nil)
+}
+
+func channelMatchesFilterInGeneration(ch *Channel, modelName string, filter dto.ChannelFilter, generation *jsplugin.RoutingGeneration) bool {
 	switch filter.Kind {
 	case dto.FilterRequestPath:
 		if filter.RequestPath == "" {
@@ -425,7 +567,7 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 		return config != nil && config.SupportsPathForModel(filter.RequestPath, modelName)
 	case dto.FilterTaskPluginIdentity:
 		if filter.TaskPluginKey == "" {
-			return ch.Type != constant.ChannelTypeTaskPlugin || providerChannelServes(ch, filter.RequestPath, modelName)
+			return ch.Type != constant.ChannelTypeTaskPlugin || providerChannelServesInGeneration(ch, filter.RequestPath, modelName, generation)
 		}
 		if ch.Type == constant.ChannelTypeTaskPlugin || ch.Type == constant.ChannelTypeNewAPI {
 			// A New API channel serves every plugin it is extended with; the
@@ -439,7 +581,7 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 		if ch.Type == constant.ChannelTypeTaskPlugin || ch.Type == constant.ChannelTypeNewAPI {
 			pluginChannel = slices.ContainsFunc(filter.TaskPluginKeys, ch.GetSetting().BindsTaskPlugin)
 		}
-		relayChannel := ch.Type != constant.ChannelTypeTaskPlugin || providerChannelServes(ch, filter.RequestPath, modelName)
+		relayChannel := ch.Type != constant.ChannelTypeTaskPlugin || providerChannelServesInGeneration(ch, filter.RequestPath, modelName, generation)
 		if filter.TaskPluginRelayOnly {
 			return relayChannel && !pluginChannel
 		}
@@ -460,7 +602,11 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 			route, ok := ch.GetOtherSettings().AdvancedCustom.MatchPathForModel("/v1/responses", modelName)
 			return ok && route.IsNative()
 		case constant.ChannelTypeTaskPlugin:
-			// The same rule on the relay routes of the channel's plugin.
+			// A supplied view checks its captured source, not a later registry.
+			if generation != nil {
+				plugin, ok := generation.Get(ch.GetSetting().TaskPluginKey)
+				return ok && plugin.Meta.ServesResponsesWebSocket(modelName)
+			}
 			plugin, ok := jsplugin.DefaultRegistry.Get(ch.GetSetting().TaskPluginKey)
 			return ok && plugin.Meta.ServesResponsesWebSocket(modelName)
 		default:
@@ -474,11 +620,17 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 // providerChannelServes reports a task plugin channel whose plugin relays
 // requestPath for modelName through its relay routes, as an Advanced Custom
 // channel with those routes would.
-func providerChannelServes(ch *Channel, requestPath, modelName string) bool {
+func providerChannelServesInGeneration(ch *Channel, requestPath, modelName string, generation *jsplugin.RoutingGeneration) bool {
 	if ch.Type != constant.ChannelTypeTaskPlugin || requestPath == "" {
 		return false
 	}
-	plugin, ok := jsplugin.DefaultRegistry.Get(ch.GetSetting().TaskPluginKey)
+	var plugin *jsplugin.LoadedPlugin
+	var ok bool
+	if generation != nil {
+		plugin, ok = generation.Get(ch.GetSetting().TaskPluginKey)
+	} else {
+		plugin, ok = jsplugin.DefaultRegistry.Get(ch.GetSetting().TaskPluginKey)
+	}
 	if !ok || !plugin.Meta.HasProviderPart() {
 		return false
 	}
