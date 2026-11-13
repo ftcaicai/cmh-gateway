@@ -65,6 +65,10 @@ func validDestination(admission core.DestinationAdmission) bool {
 			default:
 				return false
 			}
+		case "task_content":
+			if admission.Method != "GET" && admission.Method != "HEAD" && admission.Method != "POST" {
+				return false
+			}
 		case "relay_websocket":
 			if admission.Method != "GET" {
 				return false

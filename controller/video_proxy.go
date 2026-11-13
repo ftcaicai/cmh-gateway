@@ -18,6 +18,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -29,6 +30,7 @@ import (
 )
 
 var errTaskMediaRequestRejected = errors.New("task media request rejected")
+var errTaskContentDestinationRejected = errors.New("task content destination rejected")
 
 var taskMediaResponseHeaderTimeout = 60 * time.Second
 var taskMediaDataURLMaxEncodedBytes = 64 << 20
@@ -262,11 +264,18 @@ func proxyTaskMedia(c *gin.Context, task *model.Task, descriptor *relaychannel.T
 		req.Header.Set(name, value)
 	}
 
-	client = taskMediaRedirectClient(client, proxy, c, clientHeaders, descriptor.Credentialless)
+	checkDestination := func(request *http.Request) error { return checkTaskContentDestination(request, task, channel) }
+	if err := checkDestination(req); err != nil {
+		return &taskMediaProxyError{status: http.StatusForbidden, code: "artifact_request_rejected", message: "Artifact request was rejected", err: err}
+	}
+	client = taskMediaRedirectClient(client, proxy, c, clientHeaders, descriptor.Credentialless, checkDestination)
 	clientWithoutBodyTimeout := *client
 	clientWithoutBodyTimeout.Timeout = 0
 	resp, err := doTaskMediaRequest(&clientWithoutBodyTimeout, req, taskMediaResponseHeaderTimeout)
 	if err != nil {
+		if errors.Is(err, errTaskContentDestinationRejected) {
+			return &taskMediaProxyError{status: http.StatusForbidden, code: "artifact_request_rejected", message: "Artifact request was rejected", err: errTaskContentDestinationRejected}
+		}
 		if errors.Is(err, errTaskMediaRequestRejected) {
 			return &taskMediaProxyError{
 				status: http.StatusBadGateway, code: "artifact_request_rejected",
@@ -491,7 +500,37 @@ func applyTaskMediaRequestHeaders(destination http.Header, headers map[string]st
 	return nil
 }
 
-func taskMediaRedirectClient(base *http.Client, proxy string, c *gin.Context, clientHeaders map[string]string, credentialless bool) *http.Client {
+// checkTaskContentDestination binds transport identity to the persisted task,
+// not to current model publication. It does not attest a content plugin's source.
+func checkTaskContentDestination(request *http.Request, task *model.Task, channel *model.Channel) error {
+	if !core.DestinationAdmissionEnabled() {
+		return nil
+	}
+	if request == nil || request.URL == nil || task == nil || channel == nil || task.ChannelId <= 0 || channel.Id != task.ChannelId || channel.Type <= 0 || task.Properties.OriginModelName == "" {
+		return errTaskContentDestinationRejected
+	}
+	address, err := core.DestinationAddress(request.URL.String())
+	if err != nil {
+		return errTaskContentDestinationRejected
+	}
+	upstream := task.Properties.UpstreamModelName
+	if upstream == "" {
+		upstream = task.Properties.OriginModelName
+	}
+	host := request.Host
+	if host == "" {
+		host = request.URL.Host
+	}
+	admission := core.DestinationAdmission{Kind: "task_content", Method: request.Method, AddressSHA256: address, HostSHA256: core.DestinationHost(host),
+		Model:   core.ModelIdentity{Public: task.Properties.OriginModelName, Upstream: upstream},
+		Channel: core.ChannelIdentity{Known: true, ID: task.ChannelId, Type: channel.Type}}
+	if core.Destinations.CheckDestination(request.Context(), admission) != nil {
+		return errTaskContentDestinationRejected
+	}
+	return nil
+}
+
+func taskMediaRedirectClient(base *http.Client, proxy string, c *gin.Context, clientHeaders map[string]string, credentialless bool, destinationChecks ...func(*http.Request) error) *http.Client {
 	cloned := *base
 	cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
@@ -520,6 +559,11 @@ func taskMediaRedirectClient(base *http.Client, proxy string, c *gin.Context, cl
 		}
 		for name, value := range clientHeaders {
 			req.Header.Set(name, value)
+		}
+		for _, check := range destinationChecks {
+			if err := check(req); err != nil {
+				return errTaskContentDestinationRejected
+			}
 		}
 		return nil
 	}

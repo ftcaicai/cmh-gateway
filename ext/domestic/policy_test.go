@@ -344,6 +344,15 @@ func TestDestinationPolicyExactRelations(t *testing.T) {
 	fake.Executor = executor
 	_, err = NewDestinationPolicy([]core.DestinationAdmission{fake})
 	require.Error(t, err)
+	content := admission
+	content.Kind = "task_content"
+	content.Method = "GET"
+	contentPolicy, err := NewDestinationPolicy([]core.DestinationAdmission{content})
+	require.NoError(t, err)
+	assert.NoError(t, contentPolicy.CheckDestination(t.Context(), content))
+	content.Method = "DELETE"
+	_, err = NewDestinationPolicy([]core.DestinationAdmission{content})
+	require.Error(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	assert.ErrorIs(t, policy.CheckDestination(ctx, admission), context.Canceled)

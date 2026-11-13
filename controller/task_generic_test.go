@@ -3,17 +3,20 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
@@ -508,6 +511,129 @@ func TestProjectedTaskArtifactValidationRejectsAmbiguousIdentity(t *testing.T) {
 		_, err := validateProjectedTaskArtifacts(artifacts)
 		assert.ErrorIs(t, err, errTaskArtifactPlugin)
 	}
+}
+
+type taskContentDestinationApproval struct {
+	approved map[core.DestinationAdmission]bool
+	seen     []core.DestinationAdmission
+}
+
+func (gate *taskContentDestinationApproval) CheckDestination(_ context.Context, admission core.DestinationAdmission) error {
+	gate.seen = append(gate.seen, admission)
+	if gate.approved[admission] {
+		return nil
+	}
+	return errors.New("private destination policy detail")
+}
+
+func TestTaskContentDestinationAdmission(t *testing.T) {
+	task := setupGenericTaskTest(t)
+	allowPrivateTaskMediaTest(t)
+	previousGate, previousMemoryCache := core.Destinations, common.MemoryCacheEnabled
+	gate := &taskContentDestinationApproval{}
+	core.Destinations, common.MemoryCacheEnabled = gate, false
+	t.Cleanup(func() { core.Destinations, common.MemoryCacheEnabled = previousGate, previousMemoryCache })
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", task.ChannelId).Update("type", constant.ChannelTypeOpenAI).Error)
+	task.Properties = model.Properties{OriginModelName: "previously-published-task", UpstreamModelName: "persisted-upstream"}
+	require.NoError(t, model.DB.Save(task).Error)
+
+	var initialCalls, redirectedCalls atomic.Int32
+	var receivedRange string
+	next := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedCalls.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("redirected-media"))
+	}))
+	defer next.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		initialCalls.Add(1)
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, next.URL+"/media", http.StatusFound)
+			return
+		}
+		receivedRange = r.Header.Get("Range")
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Range", "bytes 0-3/10")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer upstream.Close()
+	approve := func(raw string) core.DestinationAdmission {
+		digest, err := core.DestinationAddress(raw)
+		require.NoError(t, err)
+		parsed, err := url.Parse(raw)
+		require.NoError(t, err)
+		upstreamModel := task.Properties.UpstreamModelName
+		if upstreamModel == "" {
+			upstreamModel = task.Properties.OriginModelName
+		}
+		return core.DestinationAdmission{Kind: "task_content", Method: http.MethodGet,
+			AddressSHA256: digest, HostSHA256: core.DestinationHost(parsed.Host),
+			Channel: core.ChannelIdentity{Known: true, ID: task.ChannelId, Type: constant.ChannelTypeOpenAI},
+			Model:   core.ModelIdentity{Public: task.Properties.OriginModelName, Upstream: upstreamModel}}
+	}
+	proxy := func(raw, rangeHeader string) (*httptest.ResponseRecorder, error) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.TaskID+"/artifacts/video/content", nil)
+		if rangeHeader != "" {
+			c.Request.Header.Set("Range", rangeHeader)
+		}
+		err := proxyTaskMedia(c, task, &relaychannel.TaskContentRequest{URL: raw, Method: http.MethodGet, Credentialless: true})
+		return recorder, err
+	}
+
+	t.Run("initial deny then approved range", func(t *testing.T) {
+		gate.approved, gate.seen = nil, nil
+		_, err := proxy(upstream.URL+"/media", "bytes=0-3")
+		require.Error(t, err)
+		assert.Zero(t, initialCalls.Load(), "unapproved initial target must fail before HTTP dispatch")
+		require.Len(t, gate.seen, 1)
+		assert.Equal(t, approve(upstream.URL+"/media"), gate.seen[0], "content identity must come from the persisted task and channel, not current publication")
+		assert.NotContains(t, err.Error(), "private destination policy detail")
+
+		gate.approved = map[core.DestinationAdmission]bool{approve(upstream.URL + "/media"): true}
+		recorder, err := proxy(upstream.URL+"/media", "bytes=0-3")
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), initialCalls.Load())
+		assert.Equal(t, http.StatusPartialContent, recorder.Code)
+		assert.Equal(t, "data", recorder.Body.String())
+		assert.Equal(t, "bytes=0-3", receivedRange)
+		assert.Equal(t, "bytes 0-3/10", recorder.Header().Get("Content-Range"))
+		assert.Equal(t, "private, no-store", recorder.Header().Get("Cache-Control"))
+	})
+
+	t.Run("each followed redirect needs approval", func(t *testing.T) {
+		first := approve(upstream.URL + "/redirect")
+		second := approve(next.URL + "/media")
+		gate.approved, gate.seen = map[core.DestinationAdmission]bool{first: true}, nil
+		_, err := proxy(upstream.URL+"/redirect", "")
+		require.Error(t, err)
+		assert.Zero(t, redirectedCalls.Load(), "initial approval cannot authorize the redirect destination")
+		require.Len(t, gate.seen, 2)
+		assert.Equal(t, first, gate.seen[0])
+		assert.Equal(t, second, gate.seen[1])
+
+		gate.approved[second] = true
+		recorder, err := proxy(upstream.URL+"/redirect", "")
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), redirectedCalls.Load())
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.Equal(t, "redirected-media", recorder.Body.String())
+	})
+
+	t.Run("persisted origin fallback", func(t *testing.T) {
+		task.Properties.UpstreamModelName = ""
+		gate.approved, gate.seen = nil, nil
+		_, err := proxy(upstream.URL+"/media", "bytes=0-3")
+		require.Error(t, err)
+		require.Len(t, gate.seen, 1)
+		assert.Equal(t, task.Properties.OriginModelName, gate.seen[0].Model.Upstream)
+		gate.approved = map[core.DestinationAdmission]bool{approve(upstream.URL + "/media"): true}
+		_, err = proxy(upstream.URL+"/media", "bytes=0-3")
+		require.NoError(t, err)
+	})
 }
 
 func TestProxyTaskMediaForwardsRangeAndFiltersResponseHeaders(t *testing.T) {
