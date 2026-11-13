@@ -1,0 +1,27 @@
+# Official-zone diff gate. Registered in ext/docs/HOOKS.md (R2); rules in ext/AGENTS.md §2.7.
+# Fails any PR or push that changes official files not listed in the HOOKS.md whitelist.
+name: cmh-upstream-diff
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop, 'sync/**']
+
+permissions:
+  contents: read
+
+jobs:
+  official-zone-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream tags for baseline resolution
+        run: |
+          git remote add upstream https://github.com/QuantumNous/new-api.git
+          git fetch upstream --tags --quiet
+
+      - name: Official-zone diff check
+        run: bash ops/ci/check-upstream-diff.sh

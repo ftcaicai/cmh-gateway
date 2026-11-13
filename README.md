@@ -1,3 +1,9 @@
+<!-- cmh-gateway:begin -->
+> **本仓库是 [QuantumNous/new-api](https://github.com/QuantumNous/new-api) 的 fork。** 官方代码只读；我们的全部扩展在 `ext/`、`plugins/tasks/cmh-*/`、`web-cmh/`、`brandweb/`、`ops/`。**协作者与 AI 助手开工前必读 [`ext/AGENTS.md`](ext/AGENTS.md)。** 以下为官方 README 原文。
+>
+> **This repository is a fork of [QuantumNous/new-api](https://github.com/QuantumNous/new-api).** Official code is read-only; all our extensions live under `ext/`, `plugins/tasks/cmh-*/`, `web-cmh/`, `brandweb/`, `ops/`. **Read [`ext/AGENTS.md`](ext/AGENTS.md) before contributing.** The official README follows.
+<!-- cmh-gateway:end -->
+
 <div align="center">
 
 ![new-api](/web/public/logo.png)
