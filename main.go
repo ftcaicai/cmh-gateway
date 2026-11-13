@@ -183,6 +183,30 @@ func main() {
 		}
 		return a
 	}
+	service.GetTaskContinuationFunc = func(ctx context.Context, task *model.Task) (service.TaskPollingAdaptor, *model.Channel, error) {
+		adaptor, err := relay.GetTaskAdaptorForTask(ctx, task, extcore.ContinuationPoll)
+		if err != nil || adaptor == nil {
+			return nil, nil, extcore.ErrContinuationUnavailable
+		}
+		provider, ok := adaptor.(interface {
+			ContinuationChannel() (*model.Channel, error)
+		})
+		if !ok {
+			return nil, nil, extcore.ErrContinuationUnavailable
+		}
+		frozen, err := provider.ContinuationChannel()
+		if err != nil || frozen == nil || frozen.Id != task.ChannelId || frozen.Type != constant.ChannelTypeTaskPlugin {
+			return nil, nil, extcore.ErrContinuationUnavailable
+		}
+		current, err := model.CacheGetChannel(task.ChannelId)
+		if err != nil || current == nil || current.Type != constant.ChannelTypeTaskPlugin || current.GetSetting().TaskPluginKey != frozen.GetSetting().TaskPluginKey {
+			return nil, nil, extcore.ErrContinuationUnavailable
+		}
+		// Only credentials stay live; publication/status and current source or
+		// configuration do not substitute for the task's frozen capability.
+		frozen.Key = current.Key
+		return adaptor, frozen, nil
+	}
 	service.ReportTaskFunc = requestplugin.ReportTask
 
 	// Register the periodic channel test, balance update, upstream model update,

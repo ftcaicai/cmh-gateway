@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
@@ -65,6 +66,10 @@ type BatchTaskResult struct {
 // GetTaskAdaptorFunc 由 main 包注入，用于获取指定平台的任务适配器。
 // 打破 service -> relay -> relay/channel -> service 的循环依赖。
 var GetTaskAdaptorFunc func(platform constant.TaskPlatform) TaskPollingAdaptor
+
+// GetTaskContinuationFunc is injected at startup. It returns a task-bound
+// adaptor and frozen transport controls with the task channel's current key.
+var GetTaskContinuationFunc func(context.Context, *model.Task) (TaskPollingAdaptor, *model.Channel, error)
 
 // ReportTaskFunc is injected by main: it hands a task that reached its final
 // state to the request plugins' report hooks (requestplugin.ReportTask).
@@ -243,6 +248,50 @@ func DispatchPlatformUpdate(ctx context.Context, platform constant.TaskPlatform,
 		// MJ 轮询由其自身处理，这里预留入口
 		return
 	}
+	// Archived tasks are resolved individually: a current batch factory must
+	// never combine different frozen artifacts or credential accounts. A missing
+	// continuation skips this pass only; the original timeout sweep still applies.
+	remainingChannels := make(map[int][]string, len(taskChannelM))
+	remainingTasks := make(map[string]*model.Task, len(taskM))
+	for channelID, upstreamIDs := range taskChannelM {
+		for _, upstreamID := range upstreamIDs {
+			if ctx.Err() != nil {
+				return
+			}
+			task := taskM[upstreamID]
+			if task == nil || task.PrivateData.Execution == nil || task.PrivateData.Execution.Continuation == nil {
+				remainingChannels[channelID] = append(remainingChannels[channelID], upstreamID)
+				remainingTasks[upstreamID] = task
+				continue
+			}
+			if GetTaskContinuationFunc == nil || task.ChannelId != channelID {
+				logger.LogWarn(ctx, "task continuation unavailable channel_id=%d task=%s", channelID, task.TaskID)
+				continue
+			}
+			adaptor, frozenChannel, err := GetTaskContinuationFunc(ctx, task)
+			if err != nil || adaptor == nil || frozenChannel == nil || frozenChannel.Id != task.ChannelId {
+				logger.LogWarn(ctx, "task continuation unavailable channel_id=%d task=%s", channelID, task.TaskID)
+				continue
+			}
+			var pollErr error
+			if batch, ok := adaptor.(BatchTaskPollingAdaptor); ok && batch.FetchMode() == "batch" {
+				pollErr = pollTaskBatch(ctx, batch, frozenChannel.Id, frozenChannel.GetBaseURL(), frozenChannel.Key, frozenChannel.GetSetting().Proxy, []*model.Task{task})
+			} else {
+				pollErr = updateVideoSingleTask(ctx, adaptor, frozenChannel, upstreamID, map[string]*model.Task{upstreamID: task})
+			}
+			if err := pollErr; err != nil {
+				if errors.Is(err, core.ErrContinuationUnavailable) {
+					logger.LogWarn(ctx, "task continuation unavailable channel_id=%d task=%s", channelID, task.TaskID)
+				} else {
+					logger.LogError(ctx, common.LogText("Failed to update video task %s: %s", upstreamID, err.Error()))
+				}
+			}
+		}
+	}
+	if len(remainingChannels) == 0 || GetTaskAdaptorFunc == nil {
+		return
+	}
+	taskChannelM, taskM = remainingChannels, remainingTasks
 	adaptor := GetTaskAdaptorFunc(platform)
 	if batchAdaptor, ok := adaptor.(BatchTaskPollingAdaptor); ok && batchAdaptor.FetchMode() == "batch" {
 		if err := UpdateBatchTasks(ctx, batchAdaptor, taskChannelM, taskM); err != nil {
@@ -350,6 +399,9 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 func pollTaskBatch(ctx context.Context, adaptor BatchTaskPollingAdaptor, channelId int, baseURL, key, proxy string, tasks []*model.Task) error {
 	resp, err := adaptor.FetchBatchTasks(baseURL, key, tasks, proxy)
 	if err != nil {
+		if errors.Is(err, core.ErrContinuationUnavailable) {
+			return err
+		}
 		common.SysLog(common.LogText("Get Task Do req error: %v", err))
 		return recordPollFailureForTasks(ctx, adaptor, tasks, pollClassTransport, 0, err.Error())
 	}
@@ -375,6 +427,9 @@ func pollTaskBatch(ctx context.Context, adaptor BatchTaskPollingAdaptor, channel
 	}
 	responseItems, err := adaptor.ParseBatchResult(tasks, resp, responseBody)
 	if err != nil {
+		if errors.Is(err, core.ErrContinuationUnavailable) {
+			return err
+		}
 		return recordPollFailureForTasks(ctx, adaptor, tasks, pollClassHookError, resp.StatusCode, err.Error())
 	}
 	batch := make(map[string]*model.Task, len(tasks))
@@ -577,6 +632,9 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	snap := task.Snapshot()
 	resp, err := adaptor.FetchTask(baseURL, key, task, proxy)
 	if err != nil {
+		if errors.Is(err, core.ErrContinuationUnavailable) {
+			return core.ErrContinuationUnavailable
+		}
 		return recordPollFailure(ctx, adaptor, task, snap.Status, pollClassTransport, 0, err.Error())
 	}
 	defer resp.Body.Close()
@@ -611,6 +669,9 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		taskResult.Reason = t.FailReason
 		task.Data = t.Data
 	} else if taskResult, err = adaptor.ParseTaskResult(task, resp, responseBody); err != nil {
+		if errors.Is(err, core.ErrContinuationUnavailable) {
+			return core.ErrContinuationUnavailable
+		}
 		return recordPollFailure(ctx, adaptor, task, snap.Status, pollClassHookError, resp.StatusCode, err.Error())
 	}
 

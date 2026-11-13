@@ -13,6 +13,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -79,6 +80,19 @@ func (a *TaskAdaptor) useFreshSubmitCredential(c *gin.Context, info *relaycommon
 // credential, whose answer could report the task missing. A key without
 // credentials is returned as it is.
 func (a *TaskAdaptor) taskCredentialLine(ctx context.Context, key string, task *model.Task) (string, error) {
+	if a.continuationTask != nil && a.continuationAccount != "" {
+		found := false
+		for line := range strings.SplitSeq(key, "\n") {
+			credential, ok := pluginruntime.ParseCredential(line)
+			if ok && credential.Plugin == a.plugin.Meta.Key && credential.AccountID == a.continuationAccount {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", core.ErrContinuationUnavailable
+		}
+	}
 	if a.channelType() != constant.ChannelTypeTaskPlugin || !strings.Contains(key, pluginruntime.CredentialType) {
 		return key, nil
 	}

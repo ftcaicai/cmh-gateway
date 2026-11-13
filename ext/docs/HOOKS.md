@@ -38,7 +38,7 @@
 | H1-C | 不可变插件源身份 | 身份投影 | `pkg/jsplugin/registry.go` | LoadedPlugin.SourceSHA256 / SourceBytes / CompilePlugin | 2026-11-13 | 编译时记录原始源字节SHA256，版本标签不代替制品身份；不自动批准或激活插件 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | 共用插件hook源制品拒绝点 | 准入型（仅源身份） | `pkg/jsplugin/engine.go` | Compile / Engine.SourceSHA256 / Engine.call | 2026-11-13 | Engine保存不可变原始源摘要，所有Call路径在slot/runtime/JS执行之前调用core.PluginHooks；默认noop，不含config/model/target授权 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Provider实际配置执行前准入 | 准入型 | `relay/channel/providerplugin/adaptor.go` | bind / checkExecution / prepareKey / renew | 2026-11-13 | actual RelayInfo/已绑定a.config与fresh行双投影，credential refresh/key exchange/convert前及prepared复用重新检查；不覆盖后台credential服务或opaque最终正文 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
-| H1-C | Task实际提交hook前后准入 | 准入型 | `relay/channel/task/jsplugin/adaptor.go` | checkSubmitAdmission / ValidateRequestAndSetAction / buildSubmit / DoRequest / applyChannelContext / checkQueryDestination / doFetchDescriptor / CaptureContinuationArtifact / RestoreContinuationArtifact | 2026-11-13 | 实际已选配置在auth准备/build hook前复核；另提供显式Capture/未发布Restore冻结type61 query/sign配置，冻结实例禁止newsubmit；持久任务自动解析未接 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task实际提交hook前后准入 | 准入型 | `relay/channel/task/jsplugin/adaptor.go` | checkSubmitAdmission / ValidateRequestAndSetAction / buildSubmit / DoRequest / applyChannelContext / checkQueryDestination / doFetchDescriptor / CaptureContinuationArtifact / RestoreContinuationArtifact / BindContinuationTask / ContinuationChannel | 2026-11-13 | 实际已选配置在auth准备/build hook前复核；另提供显式Capture/未发布Restore冻结type61 query/sign配置，冻结实例禁止newsubmit；持久任务自动解析未接 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task attempt与价格前准入 | 准入型 | `relay/relay_task.go` | RelayTaskSubmit | 2026-11-13 | late TaskAttempt前、validation前后复核；拒绝先于新预扣，不改资金生命周期 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task提交签名配置冻结 | 准入桥接 | `relay/channel/task/jsplugin/credential.go` | signTaskRequest | 2026-11-13 | 已准submission签名用同一冻结info有效配置，不再从另一个cache快照取值；poll原路径不变 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Request stage不可选制品预验 | 准入型 | `relay/requestplugin/plan.go` | Plan.Run | 2026-11-13 | 本stage全部实际scope实例源/原配置/实例角色路径审批先于任何hook/effect；host拒绝不被optional吞掉；仅stage不等于reply/report | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
@@ -54,6 +54,8 @@
 | H1-C | Task延续引用持久化 | 值投影 | `model/task.go` | TaskExecutionSnapshot.Continuation | 2026-11-14 | existing private JSON只保存non-secret ref/digest，不新增表列或复制源/配置 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task已存档引用投影 | 值投影 | `service/task_plugin_audit.go` | TaskExecutionSnapshotFromContext | 2026-11-14 | 只有Save成功contextref才随既有controller插入TaskPrivate Execution，失败清空 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task-bound延续解析 | 值投影/准入 | `relay/relay_adaptor.go` | GetTaskAdaptorForTask | 2026-11-14 | 按持久task/user/channel/ref加载档案与未发布恢复，ref存在时不回退当前Registry；purpose限定poll/content | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Archived任务轮询派发 | 准入/值投影 | `service/task_polling.go` | GetTaskContinuationFunc / DispatchPlatformUpdate / updateVideoSingleTask | 2026-11-14 | ref任务独立task-aware解析并复用原poll/CAS；Unavailable本次不计失败，不回当前factory；原timeout保持 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task-aware factory启动桥 | 值投影 | `main.go` | service.GetTaskContinuationFunc | 2026-11-14 | 注入relay task-bound resolver与frozenchannel，当前channel只取绑定匹配的现有credentialKey；不安装Models/Store | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -112,4 +114,5 @@ controller/task_generic_test.go
 model/task.go
 service/task_plugin_audit.go
 relay/relay_adaptor.go
+service/task_polling.go
 ```

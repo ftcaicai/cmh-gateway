@@ -584,7 +584,7 @@ export function buildSubmitRequest(ctx){utils.fetch({url:ctx.baseUrl+"/lookup"})
 export function parseSubmitResponse(){return {taskId:"local-task"};}
 export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
 export function signRequest(ctx){if(ctx.config.tier!=="approved")throw new Error("wrong signer config");return {headers:{"X-Tier":ctx.config.tier}};}
-export function parseTaskResult(){return {status:"SUCCESS"};}`
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}`
 	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
 	require.NoError(t, err)
 	base := upstream.URL
@@ -690,7 +690,7 @@ export function parseTaskResult(){return {status:"SUCCESS"};}`
 	archived, err := archive.Load(t.Context(), bindingArchive, *snapshot.Continuation, core.ContinuationPoll)
 	require.NoError(t, err)
 	assert.Equal(t, []byte(source), archived.Source)
-	persisted := &model.Task{Platform: constant.TaskPlatform(plugin.Meta.Key), Properties: model.Properties{OriginModelName: info.OriginModelName, UpstreamModelName: info.UpstreamModelName}, TaskID: info.PublicTaskID, UserId: info.UserId, ChannelId: info.ChannelId, PrivateData: model.TaskPrivateData{Execution: snapshot}}
+	persisted := &model.Task{Status: model.TaskStatusSubmitted, SubmitTime: time.Now().Unix(), Quota: 13, Platform: constant.TaskPlatform(plugin.Meta.Key), Properties: model.Properties{OriginModelName: info.OriginModelName, UpstreamModelName: info.UpstreamModelName}, TaskID: info.PublicTaskID, UserId: info.UserId, ChannelId: info.ChannelId, PrivateData: model.TaskPrivateData{Execution: snapshot}}
 	require.NoError(t, model.DB.Create(persisted).Error)
 	defer func() { require.NoError(t, model.DB.Where("id = ?", persisted.ID).Delete(&model.Task{}).Error) }()
 	var reloaded model.Task
@@ -744,6 +744,80 @@ export function parseTaskResult(){return {status:"SUCCESS"};}`
 	_, err = relay.GetTaskAdaptorForTask(t.Context(), &reloaded, core.ContinuationPoll)
 	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
 	core.TaskContinuations = archive
+	require.NoError(t, model.DB.Save(&reloaded).Error)
+	previousFactory, previousContinuationFactory := service.GetTaskAdaptorFunc, service.GetTaskContinuationFunc
+	defer func() {
+		service.GetTaskAdaptorFunc = previousFactory
+		service.GetTaskContinuationFunc = previousContinuationFactory
+	}()
+	service.GetTaskContinuationFunc = func(ctx context.Context, task *model.Task) (service.TaskPollingAdaptor, *model.Channel, error) {
+		adaptor, err := relay.GetTaskAdaptorForTask(ctx, task, core.ContinuationPoll)
+		if err != nil {
+			return nil, nil, err
+		}
+		frozen, err := adaptor.(*taskjsplugin.TaskAdaptor).ContinuationChannel()
+		if err != nil {
+			return nil, nil, err
+		}
+		frozen.Key = stored.Key
+		return adaptor, frozen, nil
+	}
+	var currentFactoryCalls int
+	service.GetTaskAdaptorFunc = func(constant.TaskPlatform) service.TaskPollingAdaptor { currentFactoryCalls++; return nil }
+	service.DispatchPlatformUpdate(t.Context(), reloaded.Platform, map[int][]string{stored.Id: {reloaded.GetUpstreamTaskID()}}, map[string]*model.Task{reloaded.GetUpstreamTaskID(): &reloaded})
+	var polled model.Task
+	require.NoError(t, model.DB.First(&polled, reloaded.ID).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), polled.Status)
+	assert.Equal(t, 13, polled.Quota)
+	assert.Zero(t, currentFactoryCalls, "archived task must never select current platform factory")
+	beforeFailure := polled.PrivateData.PollFailures
+	core.TaskContinuations = nil
+	service.DispatchPlatformUpdate(t.Context(), polled.Platform, map[int][]string{stored.Id: {polled.GetUpstreamTaskID()}}, map[string]*model.Task{polled.GetUpstreamTaskID(): &polled})
+	var unavailable model.Task
+	require.NoError(t, model.DB.First(&unavailable, polled.ID).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), unavailable.Status)
+	assert.Equal(t, beforeFailure, unavailable.PrivateData.PollFailures)
+	assert.Equal(t, 13, unavailable.Quota)
+	core.TaskContinuations = archive
+	accountTask := reloaded
+	accountTask.PrivateData.CredentialAccount = "submitted-account"
+	accountAdaptor, err := relay.GetTaskAdaptorForTask(t.Context(), &accountTask, core.ContinuationPoll)
+	require.NoError(t, err)
+	_, err = accountAdaptor.FetchTask(base, "fixture-static-key", &accountTask, "")
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	batchSource := strings.Replace(source, `fetchMode:"per_task"`, `fetchMode:"batch"`, 1)
+	batchSource = strings.Replace(batchSource, `export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}`, `export function buildBatchQueryRequest(ctx,tasks){return {url:ctx.baseUrl+"/query",method:"GET"};}
+export function parseBatchResult(ctx,body){return ctx.tasks.map(t=>({taskId:t.taskId,status:"IN_PROGRESS"}));}`, 1)
+	batchPlugin, err := jsplugin.CompilePlugin(batchSource, jsplugin.Options{})
+	require.NoError(t, err)
+	batchAdaptor := taskjsplugin.New(batchPlugin)
+	batchAdaptor.Init(info)
+	batchArtifact, err := batchAdaptor.CaptureContinuationArtifact(info)
+	require.NoError(t, err)
+	batchTask := reloaded
+	batchTask.ID = 0
+	batchTask.TaskID = "synthetic-archived-batch"
+	batchTask.Status = model.TaskStatusSubmitted
+	batchTask.PrivateData.Execution = &model.TaskExecutionSnapshot{TaskPlugin: &model.TaskPluginSnapshot{Key: batchPlugin.Meta.Key}}
+	batchRef, err := archive.Save(t.Context(), core.ContinuationBinding{TaskID: batchTask.TaskID, UserID: batchTask.UserId, ChannelID: batchTask.ChannelId}, batchArtifact)
+	require.NoError(t, err)
+	batchTask.PrivateData.Execution.Continuation = &batchRef
+	require.NoError(t, model.DB.Create(&batchTask).Error)
+	defer func() { require.NoError(t, model.DB.Where("id = ?", batchTask.ID).Delete(&model.Task{}).Error) }()
+	batchCapability, err := service.PluginFetchExecutor(batchPlugin, base, "", info.ChannelSetting)
+	require.NoError(t, err)
+	batchTarget := queryTarget
+	batchTarget.Executor = batchCapability
+	batchTarget.Hook = "buildBatchQueryRequest"
+	batchPolicy, err := NewDestinationPolicy([]core.DestinationAdmission{batchTarget})
+	require.NoError(t, err)
+	core.Destinations = batchPolicy
+	service.DispatchPlatformUpdate(t.Context(), batchTask.Platform, map[int][]string{stored.Id: {batchTask.GetUpstreamTaskID()}}, map[string]*model.Task{batchTask.GetUpstreamTaskID(): &batchTask})
+	var batchPolled model.Task
+	require.NoError(t, model.DB.First(&batchPolled, batchTask.ID).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), batchPolled.Status)
+	assert.Zero(t, batchPolled.PrivateData.PollFailures)
+	assert.Equal(t, 13, batchPolled.Quota)
 	core.Destinations = fetchOnly
 	encodedTask, err := common.Marshal(reloaded.PrivateData)
 	require.NoError(t, err)

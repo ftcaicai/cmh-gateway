@@ -282,6 +282,33 @@ func (a *TaskAdaptor) checkContinuationTask(task *model.Task, purpose core.Conti
 	return nil
 }
 
+// ContinuationChannel returns a fresh sensitive transport projection for a
+// bound task. Credentials remain in the existing channel/account store.
+func (a *TaskAdaptor) ContinuationChannel() (*model.Channel, error) {
+	if a == nil || a.continuation == nil || a.continuationTask == nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	runtime := a.continuation
+	setting, err := common.Marshal(runtime.Setting)
+	if err != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	other, err := common.Marshal(runtime.OtherSettings)
+	if err != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	headers, err := common.Marshal(runtime.HeadersOverride)
+	if err != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	params, err := common.Marshal(runtime.ParamOverride)
+	if err != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	base, settingText, headerText, paramText := runtime.BaseURL, string(setting), string(headers), string(params)
+	return &model.Channel{Id: runtime.ChannelID, Type: runtime.ChannelType, BaseURL: &base, Setting: &settingText, OtherSettings: string(other), HeaderOverride: &headerText, ParamOverride: &paramText}, nil
+}
+
 func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{plugin: plugin} }
 func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 	if a.continuation != nil {
