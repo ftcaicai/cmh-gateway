@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
@@ -93,7 +95,7 @@ func GetDashboardTaskArtifacts(c *gin.Context) {
 
 func writeTaskArtifacts(c *gin.Context, task *model.Task, dashboard bool) {
 	c.Header("Cache-Control", "private, no-store")
-	artifacts, err := projectTaskArtifacts(task)
+	artifacts, err := projectTaskArtifacts(task, c.Request.Context())
 	if err != nil {
 		writeTaskArtifactProjectionError(c, err)
 		return
@@ -164,11 +166,20 @@ func legacySunoAudioClips(data json.RawMessage) []map[string]any {
 	return clips
 }
 
-func projectTaskArtifacts(task *model.Task) ([]relaychannel.TaskArtifact, error) {
+func projectTaskArtifacts(task *model.Task, contexts ...context.Context) ([]relaychannel.TaskArtifact, error) {
 	if task == nil || task.Status != model.TaskStatusSuccess || !taskHasPluginExecution(task) || !task.ResultRetrievable() {
 		return []relaychannel.TaskArtifact{}, nil
 	}
-	adaptor := relay.GetTaskAdaptor(task.Platform)
+	var adaptor relaychannel.TaskAdaptor
+	if task.PrivateData.Execution.Continuation != nil {
+		var err error
+		adaptor, err = initTaskArtifactAdaptor(task, contexts...)
+		if err != nil {
+			return nil, errTaskArtifactPluginUnavailable
+		}
+	} else {
+		adaptor = relay.GetTaskAdaptor(task.Platform)
+	}
 	if adaptor == nil {
 		return nil, errTaskArtifactPluginUnavailable
 	}
@@ -178,9 +189,16 @@ func projectTaskArtifacts(task *model.Task) ([]relaychannel.TaskArtifact, error)
 	}
 	artifacts, err := provider.ListArtifacts(task)
 	if err != nil {
+		if task.PrivateData.Execution.Continuation != nil {
+			return nil, errTaskArtifactPluginUnavailable
+		}
 		return nil, fmt.Errorf("%w: %v", errTaskArtifactPlugin, err)
 	}
-	return validateProjectedTaskArtifacts(artifacts)
+	artifacts, err = validateProjectedTaskArtifacts(artifacts)
+	if err != nil && task.PrivateData.Execution.Continuation != nil {
+		return nil, errTaskArtifactPluginUnavailable
+	}
+	return artifacts, err
 }
 
 func validateProjectedTaskArtifacts(artifacts []relaychannel.TaskArtifact) ([]relaychannel.TaskArtifact, error) {
@@ -212,9 +230,33 @@ func validateProjectedTaskArtifacts(artifacts []relaychannel.TaskArtifact) ([]re
 	return artifacts, nil
 }
 
-func initTaskArtifactAdaptor(task *model.Task) (relaychannel.TaskAdaptor, error) {
+func initTaskArtifactAdaptor(task *model.Task, contexts ...context.Context) (relaychannel.TaskAdaptor, error) {
+	ctx := context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	if ctx.Err() != nil {
+		return nil, errTaskArtifactPluginUnavailable
+	}
 	if task == nil || !taskHasPluginExecution(task) {
 		return nil, errTaskArtifactPluginUnavailable
+	}
+	if task.PrivateData.Execution.Continuation != nil {
+		adaptor, err := relay.GetTaskAdaptorForTask(ctx, task, core.ContinuationContent)
+		if err != nil || adaptor == nil {
+			return nil, errTaskArtifactPluginUnavailable
+		}
+		provider, ok := adaptor.(interface {
+			AttachContinuationCredentials(context.Context, *model.Task, *model.Channel) error
+		})
+		if !ok {
+			return nil, errTaskArtifactPluginUnavailable
+		}
+		current, err := model.CacheGetChannel(task.ChannelId)
+		if err != nil || current == nil || provider.AttachContinuationCredentials(ctx, task, current) != nil {
+			return nil, errTaskArtifactPluginUnavailable
+		}
+		return adaptor, nil
 	}
 	channelModel, err := model.CacheGetChannel(task.ChannelId)
 	if err != nil {
@@ -246,10 +288,8 @@ func initTaskArtifactAdaptor(task *model.Task) (relaychannel.TaskAdaptor, error)
 }
 
 func taskHasPluginExecution(task *model.Task) bool {
-	return task != nil &&
-		task.PrivateData.Execution != nil &&
-		task.PrivateData.Execution.TaskPlugin != nil &&
-		strings.TrimSpace(task.PrivateData.Execution.TaskPlugin.Key) != ""
+	return task != nil && task.PrivateData.Execution != nil &&
+		(task.PrivateData.Execution.Continuation != nil || task.PrivateData.Execution.TaskPlugin != nil && strings.TrimSpace(task.PrivateData.Execution.TaskPlugin.Key) != "")
 }
 
 func legacyVideoAvailable(task *model.Task) bool {
@@ -289,7 +329,7 @@ func getTaskForArtifactRequest(c *gin.Context, taskID string) (*model.Task, bool
 }
 
 func writeTaskArtifactProjectionError(c *gin.Context, err error) {
-	if errors.Is(err, errTaskArtifactPluginUnavailable) {
+	if errors.Is(err, errTaskArtifactPluginUnavailable) || errors.Is(err, core.ErrContinuationUnavailable) {
 		writeTaskArtifactError(c, http.StatusServiceUnavailable, "artifact_plugin_unavailable", "Artifact preview plugin is unavailable")
 		return
 	}
@@ -350,7 +390,7 @@ func TaskArtifactContent(c *gin.Context) {
 		}
 		return
 	}
-	artifacts, err := projectTaskArtifacts(task)
+	artifacts, err := projectTaskArtifacts(task, c.Request.Context())
 	if err != nil {
 		writeTaskArtifactProjectionError(c, err)
 		return
@@ -372,7 +412,7 @@ func TaskArtifactContent(c *gin.Context) {
 		return
 	}
 
-	adaptor, err := initTaskArtifactAdaptor(task)
+	adaptor, err := initTaskArtifactAdaptor(task, c.Request.Context())
 	if err != nil {
 		writeTaskArtifactProjectionError(c, err)
 		return
@@ -388,6 +428,10 @@ func TaskArtifactContent(c *gin.Context) {
 	}
 	descriptor, err := provider.BuildContentRequest(c.Request.Context(), task, artifactKey, clientRequest)
 	if err != nil || descriptor == nil {
+		if task.PrivateData.Execution != nil && task.PrivateData.Execution.Continuation != nil {
+			writeTaskArtifactProjectionError(c, errTaskArtifactPluginUnavailable)
+			return
+		}
 		if err != nil {
 			logger.LogWarn(c.Request.Context(), fmt.Sprintf("Failed to resolve plugin %s content for task %s: %v", artifactKey, task.TaskID, err))
 		}

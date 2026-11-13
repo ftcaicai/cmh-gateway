@@ -134,21 +134,22 @@ const maxTaskArtifacts = 64
 const maxTaskPluginPersistedJSONBytes = 1 << 20
 
 type TaskAdaptor struct {
-	plugin                 *pluginruntime.LoadedPlugin
-	info                   *relaycommon.RelayInfo
-	continuation           *taskContinuationRuntime
-	continuationTask       *core.ContinuationBinding
-	continuationPurpose    core.ContinuationPurpose
-	continuationRef        core.ContinuationRef
-	continuationAccount    string
-	continuationUpstreamID string
-	admittedSubmit         bool
-	submitExecutor         core.ExecutorIdentity
-	submitModel            core.ModelIdentity
-	submit                 *requestDescriptor
-	routeRequest           *pluginruntime.RouteRequestContext
-	requestHeaders         map[string]string
-	files                  []map[string]any
+	plugin                    *pluginruntime.LoadedPlugin
+	info                      *relaycommon.RelayInfo
+	continuation              *taskContinuationRuntime
+	continuationTask          *core.ContinuationBinding
+	continuationPurpose       core.ContinuationPurpose
+	continuationRef           core.ContinuationRef
+	continuationAccount       string
+	continuationUpstreamID    string
+	continuationPrivateKeySHA string
+	admittedSubmit            bool
+	submitExecutor            core.ExecutorIdentity
+	submitModel               core.ModelIdentity
+	submit                    *requestDescriptor
+	routeRequest              *pluginruntime.RouteRequestContext
+	requestHeaders            map[string]string
+	files                     []map[string]any
 	// hookRequestBody is hookRequestSource as hooks receive it.
 	hookRequestSource map[string]any
 	hookRequestBody   any
@@ -256,6 +257,7 @@ func (a *TaskAdaptor) BindContinuationTask(task *model.Task, purpose core.Contin
 		return core.ErrContinuationUnavailable
 	}
 	a.continuationTask = &core.ContinuationBinding{TaskID: task.TaskID, UserID: task.UserId, ChannelID: task.ChannelId}
+	a.continuationPrivateKeySHA = bodySHA256([]byte(task.PrivateData.Key))
 	a.continuationUpstreamID = task.GetUpstreamTaskID()
 	a.continuationPurpose, a.continuationRef, a.continuationAccount = purpose, ref, task.PrivateData.CredentialAccount
 	return nil
@@ -265,7 +267,7 @@ func (a *TaskAdaptor) checkContinuationTask(task *model.Task, purpose core.Conti
 	if a.continuationTask == nil {
 		return nil
 	}
-	if task == nil || a.continuationPurpose != purpose || *a.continuationTask != (core.ContinuationBinding{TaskID: task.TaskID, UserID: task.UserId, ChannelID: task.ChannelId}) || string(task.Platform) != a.plugin.Meta.Key || task.PrivateData.CredentialAccount != a.continuationAccount || task.GetUpstreamTaskID() != a.continuationUpstreamID || task.PrivateData.Execution == nil || task.PrivateData.Execution.Continuation == nil || *task.PrivateData.Execution.Continuation != a.continuationRef {
+	if task == nil || a.continuationPurpose != purpose || *a.continuationTask != (core.ContinuationBinding{TaskID: task.TaskID, UserID: task.UserId, ChannelID: task.ChannelId}) || string(task.Platform) != a.plugin.Meta.Key || task.PrivateData.CredentialAccount != a.continuationAccount || bodySHA256([]byte(task.PrivateData.Key)) != a.continuationPrivateKeySHA || task.GetUpstreamTaskID() != a.continuationUpstreamID || task.PrivateData.Execution == nil || task.PrivateData.Execution.Continuation == nil || *task.PrivateData.Execution.Continuation != a.continuationRef {
 		return core.ErrContinuationUnavailable
 	}
 	upstream := task.Properties.UpstreamModelName
@@ -307,6 +309,30 @@ func (a *TaskAdaptor) ContinuationChannel() (*model.Channel, error) {
 	}
 	base, settingText, headerText, paramText := runtime.BaseURL, string(setting), string(headers), string(params)
 	return &model.Channel{Id: runtime.ChannelID, Type: runtime.ChannelType, BaseURL: &base, Setting: &settingText, OtherSettings: string(other), HeaderOverride: &headerText, ParamOverride: &paramText}, nil
+}
+
+// AttachContinuationCredentials supplies live credentials without replacing any
+// frozen transport/configuration. Account selection uses the existing boundary.
+func (a *TaskAdaptor) AttachContinuationCredentials(ctx context.Context, task *model.Task, current *model.Channel) error {
+	if a != nil && a.info != nil {
+		a.info.ApiKey = ""
+	}
+	if ctx == nil || ctx.Err() != nil {
+		return core.ErrContinuationUnavailable
+	}
+	if a == nil || a.continuationTask == nil || a.checkContinuationTask(task, core.ContinuationContent) != nil || current == nil || current.Id != a.continuation.ChannelID || current.Type != constant.ChannelTypeTaskPlugin || current.GetSetting().TaskPluginKey != a.plugin.Meta.Key {
+		return core.ErrContinuationUnavailable
+	}
+	key := current.Key
+	if task.PrivateData.Key != "" {
+		key = task.PrivateData.Key
+	}
+	line, err := a.taskCredentialLine(ctx, key, task)
+	if err != nil {
+		return core.ErrContinuationUnavailable
+	}
+	a.info.ApiKey = line
+	return nil
 }
 
 func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{plugin: plugin} }

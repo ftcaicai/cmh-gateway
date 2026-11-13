@@ -40,6 +40,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
@@ -560,7 +561,8 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 	registry := jsplugin.NewRegistry()
 	jsplugin.DefaultRegistry = registry
 	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
-	var lookups, submissions atomic.Int32
+	var lookups, submissions, mediaCalls atomic.Int32
+	var mediaRevision, mediaTier, mediaAuthorization string
 	var signedTier string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -571,6 +573,17 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 		}
 		if r.URL.Path == "/query" {
 			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
+			return
+		}
+		if r.URL.Path == "/media" {
+			mediaCalls.Add(1)
+			mediaRevision = r.Header.Get("X-Revision")
+			mediaTier = r.Header.Get("X-Tier")
+			mediaAuthorization = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Range", "bytes 0-3/10")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("data"))
 			return
 		}
 		signedTier = r.Header.Get("X-Tier")
@@ -584,7 +597,9 @@ export function buildSubmitRequest(ctx){utils.fetch({url:ctx.baseUrl+"/lookup"})
 export function parseSubmitResponse(){return {taskId:"local-task"};}
 export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
 export function signRequest(ctx){if(ctx.config.tier!=="approved")throw new Error("wrong signer config");return {headers:{"X-Tier":ctx.config.tier}};}
-export function parseTaskResult(){return {status:"IN_PROGRESS"};}`
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}
+export function listArtifacts(){return [{key:"video-main",type:"video"}];}
+export function buildContentRequest(ctx){return {url:ctx.baseUrl+"/media",method:"GET",headers:{"X-Revision":"A","Authorization":"Bearer "+ctx.apiKey}};}`
 	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
 	require.NoError(t, err)
 	base := upstream.URL
@@ -818,6 +833,86 @@ export function parseBatchResult(ctx,body){return ctx.tasks.map(t=>({taskId:t.ta
 	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), batchPolled.Status)
 	assert.Zero(t, batchPolled.PrivateData.PollFailures)
 	assert.Equal(t, 13, batchPolled.Quota)
+	var wrongTargetCalls atomic.Int32
+	wrongTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wrongTargetCalls.Add(1)
+		_, _ = w.Write([]byte("wrong-target"))
+	}))
+	defer wrongTarget.Close()
+	sourceB := strings.Replace(source, `key:"video-main",type:"video"`, `key:"different-current-artifact",type:"video"`, 1)
+	_, err = registry.RegisterFactory(sourceB, jsplugin.Options{})
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Updates(map[string]any{"base_url": wrongTarget.URL, "settings": `{"plugin_config":{"tier":"current-B"}}`, "key": "fixture-live-key"}).Error)
+	model.InitChannelCache()
+	reloaded.Status = model.TaskStatusSuccess
+	reloaded.PrivateData.ResultURL = wrongTarget.URL + "/fallback"
+	require.NoError(t, model.DB.Save(&reloaded).Error)
+	oldFetch := *system_setting.GetFetchSetting()
+	system_setting.GetFetchSetting().AllowPrivateIp = true
+	system_setting.GetFetchSetting().AllowedPorts = []string{"1-65535"}
+	defer func() { *system_setting.GetFetchSetting() = oldFetch }()
+	mediaHash, err := core.DestinationAddress(base + "/media")
+	require.NoError(t, err)
+	mediaTarget := core.DestinationAdmission{Kind: "task_content", Method: "GET", AddressSHA256: mediaHash, HostSHA256: core.DestinationHost(baseURL.Host), Model: core.ModelIdentity{Public: info.OriginModelName, Upstream: info.UpstreamModelName}, Channel: core.ChannelIdentity{Known: true, ID: stored.Id, Type: stored.Type}}
+	mediaPolicy, err := NewDestinationPolicy([]core.DestinationAdmission{mediaTarget})
+	require.NoError(t, err)
+	core.Destinations = mediaPolicy
+	contentCall := func(owner int, video bool) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("id", owner)
+		ctx.Set("role", common.RoleCommonUser)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/tasks/"+reloaded.TaskID+"/artifacts/video-main/content", nil)
+		ctx.Request.Header.Set("Range", "bytes=0-3")
+		if video {
+			ctx.Params = gin.Params{{Key: "task_id", Value: reloaded.TaskID}}
+			controller.VideoProxy(ctx)
+		} else {
+			ctx.Params = gin.Params{{Key: "key", Value: reloaded.TaskID}, {Key: "artifact_key", Value: "video-main"}}
+			controller.TaskArtifactContent(ctx)
+		}
+		return recorder
+	}
+	contentResponse := contentCall(info.UserId, false)
+	assert.Equal(t, http.StatusPartialContent, contentResponse.Code)
+	assert.Equal(t, "data", contentResponse.Body.String())
+	assert.Equal(t, "A", mediaRevision)
+	assert.Equal(t, "approved", mediaTier)
+	assert.Equal(t, "Bearer fixture-live-key", mediaAuthorization)
+	assert.Zero(t, wrongTargetCalls.Load())
+	beforeMedia := mediaCalls.Load()
+	foreign := contentCall(info.UserId+1, false)
+	assert.Equal(t, http.StatusNotFound, foreign.Code)
+	assert.Equal(t, beforeMedia, mediaCalls.Load())
+	privateKeyChanged := reloaded
+	privateKeyChanged.PrivateData.Key = "substitute-private-key"
+	boundContent, err := relay.GetTaskAdaptorForTask(t.Context(), &reloaded, core.ContinuationContent)
+	require.NoError(t, err)
+	attach := boundContent.(*taskjsplugin.TaskAdaptor)
+	require.ErrorIs(t, attach.AttachContinuationCredentials(t.Context(), &privateKeyChanged, &stored), core.ErrContinuationUnavailable)
+	cancelledResponse := httptest.NewRecorder()
+	cancelledContext, _ := gin.CreateTestContext(cancelledResponse)
+	cancelledContext.Set("id", info.UserId)
+	cancelledContext.Set("role", common.RoleCommonUser)
+	cancelledContext.Params = gin.Params{{Key: "key", Value: reloaded.TaskID}, {Key: "artifact_key", Value: "video-main"}}
+	cancelled, cancelNow := context.WithCancel(t.Context())
+	cancelNow()
+	cancelledContext.Request = httptest.NewRequest(http.MethodGet, "/artifact", nil).WithContext(cancelled)
+	beforeCancelled := mediaCalls.Load()
+	controller.TaskArtifactContent(cancelledContext)
+	assert.Equal(t, http.StatusServiceUnavailable, cancelledResponse.Code)
+	assert.Equal(t, beforeCancelled, mediaCalls.Load())
+	core.TaskContinuations = nil
+	missing := contentCall(info.UserId, false)
+	assert.Equal(t, http.StatusServiceUnavailable, missing.Code)
+	missingVideo := contentCall(info.UserId, true)
+	assert.Equal(t, http.StatusServiceUnavailable, missingVideo.Code)
+	assert.Zero(t, wrongTargetCalls.Load(), "archived VideoProxy cannot fallback to stored raw ResultURL")
+	core.TaskContinuations = archive
+	_, err = registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Updates(map[string]any{"base_url": base, "settings": stored.OtherSettings, "key": stored.Key}).Error)
+	model.InitChannelCache()
 	core.Destinations = fetchOnly
 	encodedTask, err := common.Marshal(reloaded.PrivateData)
 	require.NoError(t, err)

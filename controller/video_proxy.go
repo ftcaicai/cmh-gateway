@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/relay"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -89,13 +90,13 @@ func VideoProxy(c *gin.Context) {
 
 	var descriptor *relaychannel.TaskContentRequest
 	if taskHasPluginExecution(task) {
-		artifacts, projectionErr := projectTaskArtifacts(task)
+		artifacts, projectionErr := projectTaskArtifacts(task, c.Request.Context())
 		if projectionErr == nil {
 			for _, artifact := range artifacts {
 				if artifact.Type != "video" {
 					continue
 				}
-				adaptor, adaptorErr := initTaskArtifactAdaptor(task)
+				adaptor, adaptorErr := initTaskArtifactAdaptor(task, c.Request.Context())
 				if adaptorErr == nil {
 					if provider, ok := adaptor.(relaychannel.TaskContentRequestProvider); ok {
 						descriptor, adaptorErr = provider.BuildContentRequest(c.Request.Context(), task, artifact.Key, relaychannel.TaskArtifactClientRequest{
@@ -105,6 +106,10 @@ func VideoProxy(c *gin.Context) {
 					}
 				}
 				if adaptorErr != nil {
+					if task.PrivateData.Execution.Continuation != nil {
+						writeTaskArtifactProjectionError(c, errTaskArtifactPluginUnavailable)
+						return
+					}
 					logger.LogWarn(c.Request.Context(), common.LogText("Failed to resolve plugin video content for task %s: %v", taskID, adaptorErr))
 					descriptor = nil
 				}
@@ -115,6 +120,10 @@ func VideoProxy(c *gin.Context) {
 		}
 	}
 	if descriptor == nil {
+		if task.PrivateData.Execution != nil && task.PrivateData.Execution.Continuation != nil {
+			writeTaskArtifactProjectionError(c, errTaskArtifactPluginUnavailable)
+			return
+		}
 		resultURL := task.GetResultURL()
 		if isTaskMediaFallbackLoop(resultURL, task.TaskID) {
 			writeTaskMediaProxyError(c, &taskMediaProxyError{
@@ -212,8 +221,26 @@ func proxyTaskMedia(c *gin.Context, task *model.Task, descriptor *relaychannel.T
 		}
 	}
 
-	channel, err := model.CacheGetChannel(task.ChannelId)
-	if err != nil {
+	var channel *model.Channel
+	if task.PrivateData.Execution != nil && task.PrivateData.Execution.Continuation != nil {
+		adaptor, resolveErr := relay.GetTaskAdaptorForTask(c.Request.Context(), task, core.ContinuationContent)
+		if resolveErr != nil || adaptor == nil {
+			return &taskMediaProxyError{status: http.StatusServiceUnavailable, code: "artifact_plugin_unavailable", message: "Artifact content plugin is unavailable", err: core.ErrContinuationUnavailable}
+		}
+		provider, ok := adaptor.(interface {
+			ContinuationChannel() (*model.Channel, error)
+		})
+		if !ok {
+			return &taskMediaProxyError{status: http.StatusServiceUnavailable, code: "artifact_plugin_unavailable", message: "Artifact content plugin is unavailable", err: core.ErrContinuationUnavailable}
+		}
+		channel, err = provider.ContinuationChannel()
+	} else {
+		channel, err = model.CacheGetChannel(task.ChannelId)
+	}
+	if err != nil || channel == nil {
+		if channel == nil && err == nil {
+			err = core.ErrContinuationUnavailable
+		}
 		return &taskMediaProxyError{
 			status: http.StatusServiceUnavailable, code: "artifact_plugin_unavailable",
 			message: "Artifact channel is unavailable", err: err,
