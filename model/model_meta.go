@@ -1,12 +1,14 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 
 	"gorm.io/gorm"
 )
@@ -451,14 +453,10 @@ func GetPreferredModelOwnerChannelTypes(modelNames []string, groups []string) (m
 		return result, nil
 	}
 
-	type row struct {
-		Model       string
-		ChannelType int
-	}
-	var rows []row
+	var rows []AbilityWithChannel
 
 	query := DB.Table("abilities").
-		Select("abilities.model as model, channels.type as channel_type").
+		Select("abilities.*, channels.type as channel_type").
 		Joins("JOIN channels ON abilities.channel_id = channels.id").
 		Where("abilities.model IN ? AND abilities.enabled = ? AND channels.status = ?", modelNames, true, common.ChannelStatusEnabled).
 		Order("COALESCE(abilities.priority, 0) DESC").
@@ -474,9 +472,29 @@ func GetPreferredModelOwnerChannelTypes(modelNames []string, groups []string) (m
 		return nil, err
 	}
 
+	var channels map[int]*Channel
+	admissionActive := core.ModelAdmissionEnabled()
+	if admissionActive {
+		abilities := make([]Ability, 0, len(rows))
+		for _, r := range rows {
+			abilities = append(abilities, r.Ability)
+		}
+		var err error
+		channels, err = loadAbilityChannels(abilities)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, r := range rows {
 		if _, ok := result[r.Model]; ok {
 			continue
+		}
+		if admissionActive {
+			channel := channels[r.ChannelId]
+			if channel == nil || channel.Status != common.ChannelStatusEnabled || !core.Models.Visible(context.Background(), ChannelModelAdmission(channel, r.Model, core.AdmissionCandidate)) {
+				continue
+			}
+			r.ChannelType = channel.Type
 		}
 		result[r.Model] = r.ChannelType
 	}

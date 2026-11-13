@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"sync"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -82,15 +84,14 @@ var (
 )
 
 func GetPricing() []Pricing {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-		updatePricingLock.Lock()
-		defer updatePricingLock.Unlock()
-		// Double check after acquiring the lock
-		if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-			modelSupportEndpointsLock.Lock()
-			defer modelSupportEndpointsLock.Unlock()
-			updatePricing()
-		}
+	updatePricingLock.Lock()
+	defer updatePricingLock.Unlock()
+	// Active admission cannot reuse a publication witness after channel or
+	// policy changes. Keep the upstream one-minute cache for the default noop.
+	if core.ModelAdmissionEnabled() || time.Since(lastGetPricingTime) > time.Minute || len(pricingMap) == 0 {
+		modelSupportEndpointsLock.Lock()
+		defer modelSupportEndpointsLock.Unlock()
+		updatePricing()
 	}
 	return pricingMap
 }
@@ -106,16 +107,18 @@ func InvalidatePricingCache() {
 
 // GetVendors 返回当前定价接口使用到的供应商信息
 func GetVendors() []PricingVendor {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-		// 保证先刷新一次
-		GetPricing()
-	}
+	GetPricing()
+	updatePricingLock.Lock()
+	defer updatePricingLock.Unlock()
 	return vendorsList
 }
 
 func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
 	if model == "" {
 		return make([]constant.EndpointType, 0)
+	}
+	if core.ModelAdmissionEnabled() {
+		GetPricing()
 	}
 	modelSupportEndpointsLock.RLock()
 	defer modelSupportEndpointsLock.RUnlock()
@@ -215,24 +218,102 @@ func appendPricingEndpoint(endpoints []string, endpoint string) []string {
 }
 
 func updatePricing() {
-	//modelRatios := common.GetModelRatios()
+	admissionActive := core.ModelAdmissionEnabled()
+	if admissionActive {
+		// Both pricing locks are held by the caller. Clear every projection
+		// before querying so any failure publishes an empty view, never stale data.
+		pricingMap = make([]Pricing, 0)
+		vendorsList = make([]PricingVendor, 0)
+		supportedEndpointMap = make(map[string]common.EndpointInfo)
+		modelSupportEndpointTypes = make(map[string][]constant.EndpointType)
+		modelEnableGroupsLock.Lock()
+		modelEnableGroups = make(map[string][]string)
+		modelQuotaTypeMap = make(map[string]int)
+		modelEnableGroupsLock.Unlock()
+		lastGetPricingTime = time.Time{}
+	}
 	enableAbilities, err := GetAllEnableAbilityWithChannels()
 	if err != nil {
 		common.SysLog(common.LogText("GetAllEnableAbilityWithChannels error: %v", err))
 		return
 	}
+	var admittedChannels map[int]*Channel
+	if admissionActive {
+		abilities := make([]Ability, 0, len(enableAbilities))
+		for _, ability := range enableAbilities {
+			abilities = append(abilities, ability.Ability)
+		}
+		admittedChannels, err = loadAbilityChannels(abilities)
+		if err != nil {
+			common.SysLog(common.LogText("load pricing admission channels error: %v", err))
+			return
+		}
+		admitted := make([]AbilityWithChannel, 0, len(enableAbilities))
+		for _, ability := range enableAbilities {
+			channel := admittedChannels[ability.ChannelId]
+			if channel == nil || channel.Status != common.ChannelStatusEnabled || !core.Models.Visible(context.Background(), ChannelModelAdmission(channel, ability.Model, core.AdmissionCandidate)) {
+				continue
+			}
+			ability.ChannelType = channel.Type
+			admitted = append(admitted, ability)
+		}
+		enableAbilities = admitted
+	}
+	advancedCustomConfigs := make(map[int]*dto.AdvancedCustomConfig)
+	if admissionActive {
+		for _, ability := range enableAbilities {
+			if !pricingUsesRelayRoutes(ability.ChannelType) {
+				continue
+			}
+			channel := admittedChannels[ability.ChannelId]
+			if config := channelRelayConfig(channel); config != nil {
+				advancedCustomConfigs[channel.Id] = config
+			} else if channel.Type == constant.ChannelTypeAdvancedCustom {
+				var settings dto.ChannelOtherSettings
+				if channel.OtherSettings != "" {
+					if err := common.UnmarshalJsonStr(channel.OtherSettings, &settings); err != nil {
+						common.SysLog(common.LogText("load pricing channel settings error: channel_id=%d, error=%v", channel.Id, err))
+						return
+					}
+				}
+				advancedCustomConfigs[channel.Id] = settings.AdvancedCustom
+			}
+		}
+	}
 	// 预加载模型元数据与供应商一次，避免循环查询
 	var allMeta []Model
-	_ = DB.Find(&allMeta).Error
+	if err := DB.Find(&allMeta).Error; err != nil && admissionActive {
+		common.SysLog(common.LogText("load pricing model metadata error: %v", err))
+		return
+	}
 	names := make([]string, 0, len(enableAbilities))
 	for _, ability := range enableAbilities {
 		names = append(names, ability.Model)
 	}
 	metaMap := resolveModelMetadata(allMeta, names)
+	if admissionActive {
+		// The resolver also returns unrelated exact records. Only admitted,
+		// metadata-visible models may own endpoints or vendor relationships.
+		visibleMeta := make(map[string]*Model, len(names))
+		visibleAbilities := make([]AbilityWithChannel, 0, len(enableAbilities))
+		for _, ability := range enableAbilities {
+			if meta := metaMap[ability.Model]; meta != nil {
+				if meta.Status != 1 {
+					continue
+				}
+				visibleMeta[ability.Model] = meta
+			}
+			visibleAbilities = append(visibleAbilities, ability)
+		}
+		metaMap, enableAbilities = visibleMeta, visibleAbilities
+	}
 
 	// 预加载供应商
 	var vendors []Vendor
-	_ = DB.Find(&vendors).Error
+	if err := DB.Find(&vendors).Error; err != nil && admissionActive {
+		common.SysLog(common.LogText("load pricing vendors error: %v", err))
+		return
+	}
 	vendorMap := make(map[int]*Vendor)
 	for i := range vendors {
 		vendorMap[vendors[i].Id] = &vendors[i]
@@ -243,7 +324,16 @@ func updatePricing() {
 
 	// 构建对前端友好的供应商列表
 	vendorsList = make([]PricingVendor, 0, len(vendorMap))
+	referencedVendors := make(map[int]bool)
+	if admissionActive {
+		for _, meta := range metaMap {
+			referencedVendors[meta.VendorID] = true
+		}
+	}
 	for _, v := range vendorMap {
+		if admissionActive && !referencedVendors[v.Id] {
+			continue
+		}
 		vendorsList = append(vendorsList, PricingVendor{
 			ID:          v.Id,
 			Name:        v.Name,
@@ -276,7 +366,9 @@ func updatePricing() {
 
 	//这里使用切片而不是Set，因为一个模型可能支持多个端点类型，并且第一个端点是优先使用端点
 	modelSupportEndpointsStr := make(map[string][]string)
-	advancedCustomConfigs := loadPricingAdvancedCustomConfigs(enableAbilities)
+	if !admissionActive {
+		advancedCustomConfigs = loadPricingAdvancedCustomConfigs(enableAbilities)
+	}
 
 	// 先根据已有能力填充原生端点
 	for _, ability := range enableAbilities {
@@ -410,13 +502,22 @@ func updatePricing() {
 				pricing.BillingMode = billingMode
 				pricing.BillingExpr = expr
 			}
-		} else if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved && target.Declared != "" {
-			if tailMode := billing_setting.GetBillingMode(target.Declared); tailMode == "tiered_expr" {
-				if expr, ok := billing_setting.GetBillingExpr(target.Declared); ok && strings.TrimSpace(expr) != "" {
-					pricing.BillingMode = tailMode
-					pricing.BillingExpr = expr
+		} else if !admissionActive {
+			if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved && target.Declared != "" {
+				if tailMode := billing_setting.GetBillingMode(target.Declared); tailMode == "tiered_expr" {
+					if expr, ok := billing_setting.GetBillingExpr(target.Declared); ok && strings.TrimSpace(expr) != "" {
+						pricing.BillingMode = tailMode
+						pricing.BillingExpr = expr
+					}
 				}
 			}
+		}
+		// A builtin witness does not attest any plugin advertising the same
+		// model. Until the host proves the actual executor artifact, do not
+		// augment its public pricing with plugin-owned schemas or variants.
+		if admissionActive {
+			pricingMap = append(pricingMap, pricing)
+			continue
 		}
 		usageModel := model
 		plugin, ok := pluginGeneration.GetByModel(model)
@@ -496,5 +597,10 @@ func updatePricing() {
 
 // GetSupportedEndpointMap 返回全局端点到路径的映射
 func GetSupportedEndpointMap() map[string]common.EndpointInfo {
+	if core.ModelAdmissionEnabled() {
+		GetPricing()
+	}
+	modelSupportEndpointsLock.RLock()
+	defer modelSupportEndpointsLock.RUnlock()
 	return supportedEndpointMap
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -502,9 +503,72 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 	return channel, nil
 }
 
+// ErrChannelAdmissionDenied never includes channel configuration or policy details.
+var ErrChannelAdmissionDenied = errors.New("model admission denied")
+
+// ValidateChannelAdmissionSnapshot validates a complete effective channel, not a
+// PATCH. It is read-only and does not repair malformed settings or invent IDs.
+// Controllers may use it before earlier side effects; persistence checks again.
+func ValidateChannelAdmissionSnapshot(ctx context.Context, channel *Channel) error {
+	if !core.ModelAdmissionEnabled() {
+		return nil
+	}
+	if channel == nil {
+		return ErrChannelAdmissionDenied
+	}
+	return validateChannelAdmissionSnapshots(ctx, []Channel{*channel})
+}
+
+func validateChannelAdmissionSnapshots(ctx context.Context, channels []Channel) error {
+	if !core.ModelAdmissionEnabled() {
+		return nil
+	}
+	specs := make([]core.ChannelSpec, 0, len(channels))
+	for i := range channels {
+		channel := &channels[i]
+		spec := core.ChannelSpec{
+			Channel: core.ChannelIdentity{Known: true, ID: channel.Id, Type: channel.Type},
+			Enabled: channel.Status == common.ChannelStatusEnabled,
+		}
+		if spec.Enabled {
+			for j, public := range channel.GetModels() {
+				admission := ChannelModelAdmission(channel, public, core.AdmissionChannelSave)
+				spec.Models = append(spec.Models, admission.Model)
+				if j == 0 {
+					spec.Executor = admission.Executor
+				} else if spec.Executor != admission.Executor {
+					// ChannelSpec has one executor. Never attest a mixed plan as builtin.
+					spec.Executor = core.ExecutorIdentity{}
+				}
+			}
+		}
+		specs = append(specs, spec)
+	}
+	if err := core.Models.ValidateChannels(ctx, specs); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return ErrChannelAdmissionDenied
+	}
+	return nil
+}
+
 func BatchInsertChannels(channels []Channel) error {
 	if len(channels) == 0 {
 		return nil
+	}
+	if core.ModelAdmissionEnabled() {
+		// GORM supplies status=1 for an omitted status at Create, before writing.
+		// Validate that actual default without changing the caller's slice.
+		effective := slices.Clone(channels)
+		for i := range effective {
+			if effective[i].Status == 0 {
+				effective[i].Status = common.ChannelStatusEnabled
+			}
+		}
+		if err := validateChannelAdmissionSnapshots(context.Background(), effective); err != nil {
+			return err
+		}
 	}
 	tx := DB.Begin()
 	if tx.Error != nil {
@@ -606,6 +670,25 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
+	if core.ModelAdmissionEnabled() {
+		effective := *channel
+		if effective.Status == 0 {
+			effective.Status = common.ChannelStatusEnabled
+		}
+		if err := ValidateChannelAdmissionSnapshot(context.Background(), &effective); err != nil {
+			return err
+		}
+		err := DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(channel).Error; err != nil {
+				return err
+			}
+			return channel.AddAbilities(tx)
+		})
+		if err == nil {
+			BumpSyncTopic(SyncTopicChannels)
+		}
+		return err
+	}
 	var err error
 	err = DB.Create(channel).Error
 	if err != nil {
@@ -620,6 +703,9 @@ func (channel *Channel) Insert() error {
 // UpdateChannelLocked, so an edit never writes back a key a refresh replaced
 // after the edit read it.
 func (channel *Channel) Update() error {
+	if core.ModelAdmissionEnabled() {
+		return channel.updateWithAdmission()
+	}
 	// If this is a multi-key channel, recalculate MultiKeySize based on the stored key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string
@@ -662,6 +748,65 @@ func (channel *Channel) Update() error {
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
 	err = channel.UpdateAbilities(nil)
 	return err
+}
+
+// updateWithAdmission retains Updates(struct)'s nonzero-field contract for all
+// identity fields currently consumed by ChannelModelAdmission. Zero scalars and
+// nil pointers preserve the stored value; nonnil empty mapping/setting clears
+// it. Future projection changes must extend this explicit merge as well.
+func (channel *Channel) updateWithAdmission() error {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		lock := sqliteChannelKeyLock(channel.Id)
+		lock.Lock()
+		defer lock.Unlock()
+	}
+	var stored Channel
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&stored, "id = ?", channel.Id).Error; err != nil {
+			return err
+		}
+		effective := stored
+		if channel.Type != 0 {
+			effective.Type = channel.Type
+		}
+		if channel.Status != 0 {
+			effective.Status = channel.Status
+		}
+		if channel.Models != "" {
+			effective.Models = channel.Models
+		}
+		if channel.ModelMapping != nil {
+			effective.ModelMapping = channel.ModelMapping
+		}
+		if channel.Setting != nil {
+			effective.Setting = channel.Setting
+		}
+		if channel.ChannelInfo.IsMultiKey {
+			channel.ChannelInfo.MultiKeySize = len(stored.GetKeys())
+			for idx := range channel.ChannelInfo.MultiKeyStatusList {
+				if idx >= channel.ChannelInfo.MultiKeySize {
+					delete(channel.ChannelInfo.MultiKeyStatusList, idx)
+				}
+			}
+		}
+		if err := ValidateChannelAdmissionSnapshot(tx.Statement.Context, &effective); err != nil {
+			return err
+		}
+		if err := tx.Model(channel).Omit("key").Updates(channel).Error; err != nil {
+			return err
+		}
+		// Reload all written non-identity fields too before rebuilding abilities.
+		if err := tx.First(&stored, "id = ?", channel.Id).Error; err != nil {
+			return err
+		}
+		return stored.UpdateAbilities(tx)
+	})
+	if err != nil {
+		return err
+	}
+	*channel = stored
+	BumpSyncTopic(SyncTopicChannels)
+	return nil
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {
@@ -859,6 +1004,9 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) (changed bool) {
+	if core.ModelAdmissionEnabled() {
+		return updateChannelStatusWithAdmission(channelId, usingKey, status, reason)
+	}
 	// A status set by hand names no key and is never an automatic disable; it
 	// reaches every node within seconds. An automatic change, a disable after a
 	// failure or the re-enable after a test of the key it used, is left to the
@@ -967,6 +1115,90 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 	return written
 }
 
+// updateChannelStatusWithAdmission never mutates the routing cache before the
+// locked stored snapshot is accepted and committed. The bool API reports vetoes
+// as false, just like an unsuccessful status write.
+func updateChannelStatusWithAdmission(channelID int, usingKey string, status int, reason string) bool {
+	if common.MemoryCacheEnabled {
+		channelStatusLock.Lock()
+		defer channelStatusLock.Unlock()
+	}
+	pollingLock := GetChannelPollingLock(channelID)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		lock := sqliteChannelKeyLock(channelID)
+		lock.Lock()
+		defer lock.Unlock()
+	}
+	var channel Channel
+	var written, statusChanged bool
+	bump := usingKey == "" && status != common.ChannelStatusAutoDisabled
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&channel, "id = ?", channelID).Error; err != nil {
+			return err
+		}
+		if status == common.ChannelStatusAutoDisabled && channel.Status == common.ChannelStatusManuallyDisabled {
+			return nil
+		}
+		overridesKeyExhaustion := channel.ChannelInfo.IsMultiKey && usingKey == "" &&
+			status == common.ChannelStatusManuallyDisabled && reason != ChannelStatusReasonAllKeysDisabled &&
+			channel.GetOtherInfo()["status_reason"] == ChannelStatusReasonAllKeysDisabled
+		if channel.Status == status && !overridesKeyExhaustion {
+			return nil
+		}
+		beforeStatus := channel.Status
+		if channel.ChannelInfo.IsMultiKey {
+			handlerMultiKeyUpdate(&channel, usingKey, status, reason)
+		} else {
+			info := channel.GetOtherInfo()
+			info["status_reason"], info["status_time"] = reason, common.GetTimestamp()
+			channel.SetOtherInfo(info)
+			channel.Status = status
+		}
+		// This host-owned operation only changes status/key quarantine metadata.
+		// A disable cannot expand execution authority and must remain possible
+		// after admission is revoked, even while another key stays enabled.
+		if status == common.ChannelStatusEnabled {
+			if err := ValidateChannelAdmissionSnapshot(tx.Statement.Context, &channel); err != nil {
+				return err
+			}
+		}
+		if status == common.ChannelStatusAutoDisabled && !common.IsMasterNode && channelPluginHasHook(&channel, "scheduled") {
+			bump = true
+		}
+		updates := map[string]any{"status": channel.Status, "other_info": channel.OtherInfo}
+		if channel.ChannelInfo.IsMultiKey {
+			updates["channel_info"] = channel.ChannelInfo
+		}
+		if err := tx.Model(&Channel{}).Where("id = ?", channelID).Updates(updates).Error; err != nil {
+			return err
+		}
+		statusChanged, written = beforeStatus != channel.Status, true
+		if statusChanged {
+			return tx.Model(&Ability{}).Where("channel_id = ?", channelID).Update("enabled", channel.Status == common.ChannelStatusEnabled).Error
+		}
+		return nil
+	})
+	if err != nil || !written {
+		return false
+	}
+	if common.MemoryCacheEnabled {
+		channelSyncLock.Lock()
+		if cached, ok := channelsIDM[channelID]; ok {
+			updated := *cached
+			updated.ChannelInfo, updated.OtherInfo = channel.ChannelInfo, channel.OtherInfo
+			channelsIDM[channelID] = &updated
+		}
+		channelSyncLock.Unlock()
+		CacheUpdateChannelStatus(channelID, channel.Status)
+	}
+	if bump {
+		BumpSyncTopic(SyncTopicChannels)
+	}
+	return true
+}
+
 // channelPluginHasHook reports a task plugin channel whose plugin exports
 // hook. It reads the setting without GetSetting, which clears an invalid
 // stored setting.
@@ -980,6 +1212,34 @@ func channelPluginHasHook(ch *Channel, hook string) bool {
 }
 
 func EnableChannelByTag(tag string) error {
+	if core.ModelAdmissionEnabled() {
+		err := DB.Transaction(func(tx *gorm.DB) error {
+			var channels []Channel
+			if err := lockForUpdate(tx).Where("tag = ?", tag).Order("id").Find(&channels).Error; err != nil {
+				return err
+			}
+			for i := range channels {
+				channels[i].Status = common.ChannelStatusEnabled
+			}
+			if err := validateChannelAdmissionSnapshots(tx.Statement.Context, channels); err != nil {
+				return err
+			}
+			// Write exactly the locked set, not rows concurrently moved into tag.
+			for i := range channels {
+				if err := tx.Model(&Channel{}).Where("id = ?", channels[i].Id).Update("status", common.ChannelStatusEnabled).Error; err != nil {
+					return err
+				}
+				if err := tx.Model(&Ability{}).Where("channel_id = ?", channels[i].Id).Update("enabled", true).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err == nil {
+			BumpSyncTopic(SyncTopicChannels)
+		}
+		return err
+	}
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
 	if err != nil {
 		return err
@@ -1045,6 +1305,45 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
+	if core.ModelAdmissionEnabled() {
+		err := DB.Transaction(func(tx *gorm.DB) error {
+			var channels []Channel
+			if err := lockForUpdate(tx).Where("tag = ?", tag).Order("id").Find(&channels).Error; err != nil {
+				return err
+			}
+			for i := range channels {
+				// Match Updates(updateData): empty models/group are omitted, while
+				// nonnil mapping (including an empty string) is an explicit write.
+				if updateData.ModelMapping != nil {
+					channels[i].ModelMapping = updateData.ModelMapping
+				}
+				if updateData.Models != "" {
+					channels[i].Models = updateData.Models
+				}
+			}
+			if err := validateChannelAdmissionSnapshots(tx.Statement.Context, channels); err != nil {
+				return err
+			}
+			for i := range channels {
+				if err := tx.Model(&Channel{}).Where("id = ?", channels[i].Id).Updates(updateData).Error; err != nil {
+					return err
+				}
+				// Refresh a complete result for transactional ability maintenance.
+				var stored Channel
+				if err := tx.First(&stored, "id = ?", channels[i].Id).Error; err != nil {
+					return err
+				}
+				if err := stored.UpdateAbilities(tx); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err == nil {
+			BumpSyncTopic(SyncTopicChannels)
+		}
+		return err
+	}
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
 	if err != nil {
 		return err

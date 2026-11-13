@@ -23,7 +23,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1-A首批实际官方候选/目录接线完成，未安装core.Models：model/channel_constraint.go（共享解析、候选约束含实际plugin filters与禁用状态）、model/ability.go（分组及类型批量投影、DB错误关闭）、controller/model.go（dashboard/retrieve）、relay/helper/model_mapped.go（复用host解析，self/cycle兼容）。新集中测试 `ext/domestic/host_admission_test.go`在真SQLite3.50.4/MySQL8.0.44/PG17.12全部通过，DB/cache两模式。独立复核两缺陷已修正回归。证据 `acceptance/p2/H1-A-candidate-catalog.md`。剩余渠道写入、pricing/vendor/owner/endpoint、prebill/retry/WS/实际插件计划/最终目的地仍未完；不能启用Gate。
+3. H1-A候选/目录首批与本轮价格关联/渠道持久化接线已完成，仍未安装core.Models。本轮新增model/pricing.go、model/model_meta.go、model/channel.go、model/channel_plugin_credential.go：价格vendor/group/endpoint/owner按允许候选投影，warm撤销/查询失败清空；Create/Update/tag/status/credential在有效快照和事务内校验，回滚能力写入失败，冻结callback identity pointers。集中host_admission_test真SQLite3.50.4/MySQL8.0.44/PG17.12全部通过。独立复核P1指针别名和宿主多Key隔离边界已修并回归。证据 `acceptance/p2/H1-A-persistence-pricing.md`。剩余controller早期Key/网络side effects、自动同步/直接写入口、prebill/retry/WS/实际plugin制品计划/最终目的地仍未完；不能启用Gate。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -33,7 +33,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前13官方文件/396行，H1专项累计硬上限32/2500（已明确批准），逐文件白名单不变。未核对分支保护，CI成功不代表强制阻断merge。
+- 门禁目前17官方文件/964行，H1专项累计硬上限32/2500（已明确批准），逐文件白名单不变。未核对分支保护，CI成功不代表强制阻断merge。
 
 ## 临时资源与作业
 
@@ -41,7 +41,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续优先：补齐publication的pricing/vendor/endpoint及owner元数据按允许候选过滤（已读model/pricing.go、model/model_meta.go），沿用已批准RFC，不另问预算；再接渠道写前有效快照与预扣/重试/长连接/实际plugin制品计划。新首批测试集中在host_admission_test.go，扩展该文件不要散落同功能测试。
+- 接续优先：controller/channel.go新增/更新第一次Key写入之前预验有效快照；controller/channel_upstream_update.go自动/手工apply模型写前及generic UpdateChannelOtherInfo边界；再接prebill/retry/WS/实际plugin计划与最终目的地。沿用已批准RFC，不重复问预算；集中扩展host_admission_test，不散落同功能测试。当前Update只合并ChannelModelAdmission实际读取的五类字段，未来加入BaseURL/override/plugin制品时必须同步扩展合并与回归。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 

@@ -2,6 +2,7 @@ package domestic
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestHostAdmissionMappingContract(t *testing.T) {
@@ -96,6 +98,152 @@ func TestHostAdmissionMappingContract(t *testing.T) {
 	}
 }
 
+func runHostAdmissionWrites(t *testing.T, gate *Gate, noop core.ModelGate) {
+	t.Helper()
+	approved, denied := `{"public-chat":"approved-target"}`, `{"public-chat":"unapproved-target"}`
+	tag := "admission-write-fixture"
+	makeChannel := func(id int, mapping *string) model.Channel {
+		return model.Channel{Id: id, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "admission-write", Key: "fixture", Models: "public-chat", Group: "default", ModelMapping: mapping, Tag: &tag}
+	}
+	ids := []int{92001, 92002, 92003, 92004, 92005}
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id IN ?", ids).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id IN ?", ids).Delete(&model.Channel{}).Error)
+		core.Models = gate
+	}()
+	good := makeChannel(92001, &approved)
+	bad := makeChannel(92002, &denied)
+	batch := []model.Channel{good, bad}
+	require.Error(t, model.BatchInsertChannels(batch))
+	var count int64
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id IN ?", ids).Count(&count).Error)
+	assert.Zero(t, count, "later denied batch row must leave no first channel")
+	require.NoError(t, good.Insert())
+	require.Error(t, bad.Insert())
+	callbackName := "cmh_admission_fail_ability_create"
+	require.NoError(t, model.DB.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table == "abilities" {
+			tx.AddError(errors.New("fixture ability write failed"))
+		}
+	}))
+	failedInsert := makeChannel(92004, &approved)
+	insertErr := failedInsert.Insert()
+	require.NoError(t, model.DB.Callback().Create().Remove(callbackName))
+	require.Error(t, insertErr)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", 92004).Count(&count).Error)
+	assert.Zero(t, count, "failed ability creation must roll back its channel")
+	patch := model.Channel{Id: good.Id, ModelMapping: &denied}
+	require.Error(t, patch.Update())
+	stored, err := model.GetChannelById(good.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, approved, stored.GetModelMapping(), "partial patch uses merged stored type/status/models")
+	patch = model.Channel{Id: good.Id, Name: "admission-renamed"}
+	require.NoError(t, patch.Update())
+	stored, err = model.GetChannelById(good.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "admission-renamed", stored.Name)
+	assert.Equal(t, approved, stored.GetModelMapping())
+
+	// Invalid old rows can remain disabled, but cannot be republished in a tag
+	// batch. Seed through the explicit baseline/noop path to model existing data.
+	core.Models = noop
+	bad.Status = common.ChannelStatusManuallyDisabled
+	require.NoError(t, bad.Insert())
+	core.Models = gate
+	require.Error(t, model.EnableChannelByTag(tag))
+	stored, err = model.GetChannelById(bad.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.Status)
+	require.Error(t, model.EditChannelByTag(tag, nil, &denied, nil, nil, nil, nil, nil, nil))
+	stored, err = model.GetChannelById(good.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, approved, stored.GetModelMapping(), "tag veto preserves every matching row")
+	assert.False(t, model.UpdateChannelStatus(bad.Id, "", common.ChannelStatusEnabled, "fixture enable"))
+	_, err = model.UpdateChannelLocked(bad.Id, func(ch *model.Channel) error { ch.Status = common.ChannelStatusEnabled; ch.Key = "changed"; return nil })
+	require.Error(t, err)
+	stored, err = model.GetChannelById(bad.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "fixture", stored.Key, "credential callback cannot change key when enable is rejected")
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.Status)
+	_, err = model.UpdateScheduledChannelLocked(context.Background(), bad.Id, func(ch *model.Channel) error { ch.Status = common.ChannelStatusEnabled; ch.Key = "changed"; return nil })
+	require.Error(t, err)
+	stored, err = model.GetChannelById(bad.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "fixture", stored.Key)
+	_, err = model.UpdateChannelLocked(bad.Id, func(ch *model.Channel) error {
+		*ch.ModelMapping = approved
+		ch.Status = common.ChannelStatusEnabled
+		ch.Key = "changed"
+		return nil
+	})
+	require.Error(t, err, "unwritten pointer mutations cannot fake the persisted admission identity")
+	stored, err = model.GetChannelById(bad.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, denied, stored.GetModelMapping())
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.Status)
+	_, err = model.UpdateScheduledChannelLocked(context.Background(), bad.Id, func(ch *model.Channel) error {
+		*ch.ModelMapping = approved
+		ch.Status = common.ChannelStatusEnabled
+		ch.Key = "changed"
+		return nil
+	})
+	require.Error(t, err)
+	stored, err = model.GetChannelById(bad.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, denied, stored.GetModelMapping())
+	assert.Equal(t, "fixture", stored.Key)
+	core.Models = noop
+	pluginKey := `{"task_plugin_key":"cmh-unapproved"}`
+	pluginChannel := makeChannel(92005, &approved)
+	pluginChannel.Type, pluginChannel.Setting, pluginChannel.Status = constant.ChannelTypeTaskPlugin, &pluginKey, common.ChannelStatusManuallyDisabled
+	require.NoError(t, pluginChannel.Insert())
+	core.Models = gate
+	err = model.UpdateTaskPluginChannelLocked(pluginChannel.Id, func(ch *model.Channel, _ []*model.Channel) error {
+		*ch.Setting = `{}`
+		ch.Type = constant.ChannelTypeOpenAI
+		ch.Status = common.ChannelStatusEnabled
+		ch.Key = "changed"
+		return nil
+	})
+	require.Error(t, err)
+	stored, err = model.GetChannelById(pluginChannel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, pluginKey, *stored.Setting)
+	assert.Equal(t, "fixture", stored.Key)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.Status)
+	newTag, newGroup := "admission-moved", "admission-group"
+	priority, weight := int64(8), uint(3)
+	require.NoError(t, model.EditChannelByTag(tag, &newTag, &approved, nil, &newGroup, &priority, &weight, nil, nil))
+	stored, err = model.GetChannelById(good.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, newTag, stored.GetTag())
+	assert.Equal(t, newGroup, stored.Group)
+	var moved model.Ability
+	require.NoError(t, model.DB.Where("channel_id = ? AND model = ?", good.Id, "public-chat").First(&moved).Error)
+	assert.Equal(t, newGroup, moved.Group)
+	require.NotNil(t, moved.Tag)
+	assert.Equal(t, newTag, *moved.Tag)
+	require.NotNil(t, moved.Priority)
+	assert.Equal(t, priority, *moved.Priority)
+	assert.Equal(t, weight, moved.Weight)
+	core.Models = noop
+	quarantine := makeChannel(92003, &denied)
+	quarantine.Key = "fixture-a\nfixture-b"
+	quarantine.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2}
+	require.NoError(t, quarantine.Insert())
+	core.Models = gate
+	require.True(t, model.UpdateChannelStatus(quarantine.Id, "fixture-a", common.ChannelStatusAutoDisabled, "fixture quarantine"))
+	stored, err = model.GetChannelById(quarantine.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status, "remaining key stays enabled but new execution is independently denied")
+	assert.False(t, model.UpdateChannelStatus(quarantine.Id, "fixture-a", common.ChannelStatusEnabled, "fixture re-enable"), "quarantine cannot be lifted without admission")
+	// Explicit disable/cleanup cannot be blocked by a model that is no longer authorized.
+	patch = model.Channel{Id: good.Id, Status: common.ChannelStatusManuallyDisabled, ModelMapping: &denied}
+	require.NoError(t, patch.Update())
+}
+
 func TestHostAdmissionCandidateAndCatalog(t *testing.T) {
 	engines := []struct{ name, dsn string }{
 		{"sqlite", ""},
@@ -145,7 +293,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 		common.SQLitePath = oldSQLite
 	})
 
-	public, err := New([]string{"gpt-4o-mini,public-chat"}, []string{"1,61"})
+	public, err := New([]string{"gpt-4o-mini,public-chat,denied-only"}, []string{"1,14,61"})
 	require.NoError(t, err)
 	upstream, err := New([]string{"approved-target"}, nil)
 	require.NoError(t, err)
@@ -159,7 +307,17 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 		{Id: 91002, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "allowed-low", Key: "fixture", Models: "gpt-4o-mini,public-chat", Group: "default", ModelMapping: &approved, Priority: &low},
 		{Id: 91003, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Name: "unresolved-plugin", Key: "fixture", Models: "public-chat", Group: "default", ModelMapping: &approved, Setting: &pluginSetting},
 		{Id: 91004, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusManuallyDisabled, Name: "disabled-stale-ability", Key: "fixture", Models: "public-chat", Group: "default", ModelMapping: &approved, Priority: &high},
+		{Id: 91005, Type: constant.ChannelTypeAnthropic, Status: common.ChannelStatusEnabled, Name: "denied-owner", Key: "fixture", Models: "gpt-4o-mini,denied-only", Group: "default", ModelMapping: &denied, Priority: &high},
 	}
+	vendors := []model.Vendor{{Id: 93001, Name: "admission-allowed", Status: 1}, {Id: 93002, Name: "admission-denied", Status: 1}, {Id: 93003, Name: "admission-unrelated", Status: 1}}
+	require.NoError(t, db.Create(&vendors).Error)
+	metadata := []model.Model{
+		{Id: 93001, ModelName: "public-chat", Status: 1, VendorID: 93001, Endpoints: `{"allowed_endpoint":{"path":"/allowed","method":"POST"}}`},
+		{Id: 93002, ModelName: "gpt-4o-mini", Status: 1, VendorID: 93001},
+		{Id: 93003, ModelName: "denied-only", Status: 1, VendorID: 93002, Endpoints: `{"denied_endpoint":{"path":"/denied","method":"POST"}}`},
+		{Id: 93004, ModelName: "unrelated-metadata", Status: 1, VendorID: 93003, Endpoints: `{"ghost_endpoint":{"path":"/ghost","method":"POST"}}`},
+	}
+	require.NoError(t, db.Create(&metadata).Error)
 	for i := range channels {
 		require.NoError(t, db.Create(&channels[i]).Error)
 		require.NoError(t, channels[i].AddAbilities(db))
@@ -193,6 +351,26 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.True(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeOpenAI))
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeAnthropic))
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
+	runHostAdmissionWrites(t, gate, oldGate)
+	owners, err := model.GetPreferredModelOwnerChannelTypes([]string{"gpt-4o-mini"}, []string{"default"})
+	require.NoError(t, err)
+	assert.Equal(t, constant.ChannelTypeOpenAI, owners["gpt-4o-mini"], "denied high-priority provider cannot own the public projection")
+	model.InvalidatePricingCache()
+	pricing := model.GetPricing()
+	pricingNames := make([]string, 0, len(pricing))
+	for _, row := range pricing {
+		pricingNames = append(pricingNames, row.ModelName)
+		assert.Empty(t, row.BillingPluginVariants, "unattested plugin variants cannot augment builtin pricing")
+	}
+	assert.ElementsMatch(t, []string{"gpt-4o-mini", "public-chat"}, pricingNames)
+	visibleVendors := model.GetVendors()
+	require.Len(t, visibleVendors, 1)
+	assert.Equal(t, 93001, visibleVendors[0].ID)
+	endpoints := model.GetSupportedEndpointMap()
+	assert.Contains(t, endpoints, "allowed_endpoint")
+	assert.NotContains(t, endpoints, "denied_endpoint")
+	assert.NotContains(t, endpoints, "ghost_endpoint")
+	assert.Empty(t, model.GetModelSupportEndpointTypes("denied-only"))
 
 	router := gin.New()
 	router.GET("/catalog", controller.DashboardListModels)
@@ -204,6 +382,9 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 91002).Update("status", common.ChannelStatusManuallyDisabled).Error)
 	require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", 91002).Update("enabled", false).Error)
 	assert.Empty(t, model.GetGroupEnabledModels("default"))
+	assert.Empty(t, model.GetPricing(), "revoked candidate cannot remain visible through a warm pricing cache")
+	assert.Empty(t, model.GetVendors())
+	assert.Empty(t, model.GetSupportedEndpointMap())
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/models/gpt-4o-mini", nil))
 	assert.Contains(t, w.Body.String(), `"code":"model_not_found"`)
@@ -211,8 +392,10 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/catalog", nil))
 	assert.NotContains(t, w.Body.String(), `"gpt-4o-mini"`)
 	// Query failure must not publish or fall back to an unfiltered capability set.
-	require.NoError(t, db.Where("channel_id IN ?", []int{91001, 91002, 91003, 91004}).Delete(&model.Ability{}).Error)
-	require.NoError(t, db.Where("id IN ?", []int{91001, 91002, 91003, 91004}).Delete(&model.Channel{}).Error)
+	require.NoError(t, db.Where("channel_id IN ?", []int{91001, 91002, 91003, 91004, 91005}).Delete(&model.Ability{}).Error)
+	require.NoError(t, db.Where("id IN ?", []int{91001, 91002, 91003, 91004, 91005}).Delete(&model.Channel{}).Error)
+	require.NoError(t, db.Unscoped().Where("id IN ?", []int{93001, 93002, 93003, 93004}).Delete(&model.Model{}).Error)
+	require.NoError(t, db.Unscoped().Where("id IN ?", []int{93001, 93002, 93003}).Delete(&model.Vendor{}).Error)
 	common.MemoryCacheEnabled = true
 	model.InitChannelCache()
 	sqlDB, err := db.DB()
@@ -220,6 +403,10 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	require.NoError(t, sqlDB.Close())
 	assert.Empty(t, model.GetGroupEnabledModels("default"))
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini"))
+	assert.Empty(t, model.GetPricing())
+	assert.Empty(t, model.GetVendors())
+	assert.Empty(t, model.GetSupportedEndpointMap())
+	assert.Empty(t, model.GetModelSupportEndpointTypes("public-chat"))
 	core.Models = oldGate
 	assert.False(t, core.ModelAdmissionEnabled())
 	assert.True(t, model.IsModelAdmittedForPublication("gpt-4o-mini"), "default publication must not query a closed database")

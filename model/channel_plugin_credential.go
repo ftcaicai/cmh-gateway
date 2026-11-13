@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
@@ -40,6 +41,21 @@ func sqliteChannelKeyLock(channelID int) *sync.Mutex {
 	return lock.(*sync.Mutex)
 }
 
+// credentialAdmissionSnapshot freezes the stored identity before a callback can
+// mutate pointed-to settings that the credential writer does not persist.
+func credentialAdmissionSnapshot(channel *Channel) Channel {
+	snapshot := *channel
+	if channel.ModelMapping != nil {
+		mapping := *channel.ModelMapping
+		snapshot.ModelMapping = &mapping
+	}
+	if channel.Setting != nil {
+		setting := *channel.Setting
+		snapshot.Setting = &setting
+	}
+	return snapshot
+}
+
 // UpdateChannelLocked lets update change a channel's key while no other node
 // or goroutine can: MySQL and PostgreSQL hold the channel row lock across
 // update, and SQLite holds a process lock. update must not wait on the
@@ -53,16 +69,35 @@ func sqliteChannelKeyLock(channelID int) *sync.Mutex {
 // stored channel afterwards is returned, a new key is published to this
 // node's channel cache, and a new status to the channel's abilities.
 func UpdateChannelLocked(channelID int, update func(channel *Channel) error) (*Channel, error) {
+	db := DB
+	if core.ModelAdmissionEnabled() {
+		// A failed credential write must not interpolate its key into SQL logs.
+		db = DB.Session(&gorm.Session{Logger: logger.Discard})
+	}
+	if core.ModelAdmissionEnabled() && common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		lock := sqliteChannelKeyLock(channelID)
+		lock.Lock()
+		defer lock.Unlock()
+	}
 	var channel Channel
 	var keyChanged, statusChanged, written bool
 	// changes runs update on channel and returns the columns it changed.
 	changes := func() (map[string]any, error) {
+		admissionSnapshot := credentialAdmissionSnapshot(&channel)
 		key, status, otherInfo := channel.Key, channel.Status, channel.OtherInfo
 		info, err := common.Marshal(channel.ChannelInfo)
 		if err != nil {
 			return nil, err
 		}
 		if err := update(&channel); err != nil {
+			return nil, err
+		}
+		// Only these callback fields are persisted; never validate an unwritten
+		// callback model/type/settings change in place of the stored identity.
+		admissionSnapshot.Status = channel.Status
+		admissionSnapshot.Key, admissionSnapshot.ChannelInfo = channel.Key, channel.ChannelInfo
+		admissionSnapshot.OtherInfo = channel.OtherInfo
+		if err := ValidateChannelAdmissionSnapshot(context.Background(), &admissionSnapshot); err != nil {
 			return nil, err
 		}
 		channel.Keys = nil
@@ -83,7 +118,7 @@ func UpdateChannelLocked(channelID int, update func(channel *Channel) error) (*C
 		}
 		return updates, nil
 	}
-	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) && !core.ModelAdmissionEnabled() {
 		lock := sqliteChannelKeyLock(channelID)
 		lock.Lock()
 		defer lock.Unlock()
@@ -106,7 +141,7 @@ func UpdateChannelLocked(channelID int, update func(channel *Channel) error) (*C
 			written = true
 		}
 	} else {
-		err := DB.Transaction(func(tx *gorm.DB) error {
+		err := db.Transaction(func(tx *gorm.DB) error {
 			if err := lockForUpdate(tx).Where("id = ?", channelID).First(&channel).Error; err != nil {
 				return err
 			}
@@ -115,7 +150,13 @@ func UpdateChannelLocked(channelID int, update func(channel *Channel) error) (*C
 				return err
 			}
 			written = true
-			return tx.Model(&Channel{}).Where("id = ?", channelID).Updates(updates).Error
+			if err := tx.Model(&Channel{}).Where("id = ?", channelID).Updates(updates).Error; err != nil {
+				return err
+			}
+			if core.ModelAdmissionEnabled() && statusChanged {
+				return tx.Model(&Ability{}).Where("channel_id = ?", channelID).Update("enabled", channel.Status == common.ChannelStatusEnabled).Error
+			}
+			return nil
 		})
 		if err != nil {
 			return nil, err
@@ -127,7 +168,7 @@ func UpdateChannelLocked(channelID int, update func(channel *Channel) error) (*C
 	if keyChanged {
 		CacheUpdateChannelKey(channelID, channel.Key)
 	}
-	if statusChanged {
+	if statusChanged && !core.ModelAdmissionEnabled() {
 		if err := UpdateAbilityStatus(channelID, channel.Status == common.ChannelStatusEnabled); err != nil {
 			return nil, err
 		}
@@ -154,7 +195,11 @@ func UpdateTaskPluginChannelLocked(channelID int, update func(channel *Channel, 
 	}
 	var statusChanged bool
 	var enabled bool
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	db := DB
+	if core.ModelAdmissionEnabled() {
+		db = DB.Session(&gorm.Session{Logger: logger.Discard})
+	}
+	err := db.Transaction(func(tx *gorm.DB) error {
 		var channels []*Channel
 		if err := lockForUpdate(tx).Where("type = ?", constant.ChannelTypeTaskPlugin).Order("id").Find(&channels).Error; err != nil {
 			return err
@@ -172,7 +217,14 @@ func UpdateTaskPluginChannelLocked(channelID int, update func(channel *Channel, 
 			return gorm.ErrRecordNotFound
 		}
 		status := target.Status
+		admissionSnapshot := credentialAdmissionSnapshot(target)
 		if err := update(target, others); err != nil {
+			return err
+		}
+		admissionSnapshot.Status = target.Status
+		admissionSnapshot.Key, admissionSnapshot.ChannelInfo = target.Key, target.ChannelInfo
+		admissionSnapshot.OtherInfo = target.OtherInfo
+		if err := ValidateChannelAdmissionSnapshot(tx.Statement.Context, &admissionSnapshot); err != nil {
 			return err
 		}
 		statusChanged, enabled = target.Status != status, target.Status == common.ChannelStatusEnabled
@@ -183,13 +235,19 @@ func UpdateTaskPluginChannelLocked(channelID int, update func(channel *Channel, 
 			"other_info":   target.OtherInfo,
 			"channel_info": target.ChannelInfo,
 		}
-		return tx.Model(&Channel{}).Where("id = ?", channelID).Updates(updates).Error
+		if err := tx.Model(&Channel{}).Where("id = ?", channelID).Updates(updates).Error; err != nil {
+			return err
+		}
+		if core.ModelAdmissionEnabled() && statusChanged {
+			return tx.Model(&Ability{}).Where("channel_id = ?", channelID).Update("enabled", enabled).Error
+		}
+		return nil
 	})
 	if err != nil {
 		return err
 	}
 	defer BumpSyncTopic(SyncTopicChannels)
-	if statusChanged {
+	if statusChanged && !core.ModelAdmissionEnabled() {
 		return UpdateAbilityStatus(channelID, enabled)
 	}
 	return nil
@@ -255,12 +313,19 @@ func UpdateScheduledChannelLocked(ctx context.Context, channelID int, update fun
 		if err := lockForUpdate(tx).Where("id = ?", channelID).First(&channel).Error; err != nil {
 			return err
 		}
+		admissionSnapshot := credentialAdmissionSnapshot(&channel)
 		key, status, otherInfo := channel.Key, channel.Status, channel.OtherInfo
 		info, err := common.Marshal(channel.ChannelInfo)
 		if err != nil {
 			return err
 		}
 		if err := update(&channel); err != nil {
+			return err
+		}
+		admissionSnapshot.Status = channel.Status
+		admissionSnapshot.Key, admissionSnapshot.ChannelInfo = channel.Key, channel.ChannelInfo
+		admissionSnapshot.OtherInfo = channel.OtherInfo
+		if err := ValidateChannelAdmissionSnapshot(ctx, &admissionSnapshot); err != nil {
 			return err
 		}
 		channel.Keys = nil
@@ -283,7 +348,13 @@ func UpdateScheduledChannelLocked(ctx context.Context, channelID int, update fun
 			return nil
 		}
 		written = true
-		return tx.Model(&Channel{}).Where("id = ?", channelID).Updates(updates).Error
+		if err := tx.Model(&Channel{}).Where("id = ?", channelID).Updates(updates).Error; err != nil {
+			return err
+		}
+		if core.ModelAdmissionEnabled() && statusChanged {
+			return tx.Model(&Ability{}).Where("channel_id = ?", channelID).Update("enabled", channel.Status == common.ChannelStatusEnabled).Error
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -336,7 +407,7 @@ func UpdateScheduledChannelLocked(ctx context.Context, channelID int, update fun
 			channelSyncLock.Unlock()
 		}
 	}
-	if statusChanged {
+	if statusChanged && !core.ModelAdmissionEnabled() {
 		if err := UpdateAbilityStatus(channelID, channel.Status == common.ChannelStatusEnabled); err != nil {
 			return nil, err
 		}

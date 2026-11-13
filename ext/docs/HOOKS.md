@@ -23,6 +23,10 @@
 | H1-A | 模型能力目录准入 | 准入型 | `model/ability.go` | GetGroupEnabledModels / filterAbilitiesByConstraints / IsModelAdmittedForPublication | 2026-11-13 | 按允许候选过滤客户目录；已安装门禁的查询错误fail-closed | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 客户静态模型目录 | 准入型 | `controller/model.go` | DashboardListModels / RetrieveModel | 2026-11-13 | 默认透传，激活时批量过滤静态/插件目录和单模型retrieve；ListModels经分组能力投影复用 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 官方模型映射复用 | 准入桥接 | `relay/helper/model_mapped.go` | ModelMappedHelper | 2026-11-13 | 从原循环提取host解析API，保持默认mapping/selfmap语义；不代表预扣/派发前完整接线 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-A | 价格目录关联投影 | 准入型 | `model/pricing.go` | GetPricing / GetVendors / updatePricing / GetModelSupportEndpointTypes / GetSupportedEndpointMap | 2026-11-13 | 过滤实际允许能力后构建价格、vendor/group/endpoint；失败不回退旧目录，默认noop保持原行为 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-A | 允许候选owner投影 | 准入型 | `model/model_meta.go` | GetPreferredModelOwnerChannelTypes | 2026-11-13 | 仅允许候选参与优先级owner选择，批量查询不逐模型N+1 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-A | 渠道写前预验 | 准入型 | `model/channel.go` | BatchInsertChannels / Insert / Update / EditChannelByTag / EnableChannelByTag / UpdateChannelStatus / ValidateChannelAdmissionSnapshot | 2026-11-13 | 安装门禁时按有效快照整批校验、事务内复核；未激活路径透传；控制器更早side effects另续接 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-A | 凭据恢复启用预验 | 准入型 | `model/channel_plugin_credential.go` | UpdateChannelLocked / UpdateTaskPluginChannelLocked / UpdateScheduledChannelLocked | 2026-11-13 | callback后写前核对实际持久化快照，拒绝不得先发布Key/cache | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -50,4 +54,8 @@ model/channel_constraint.go
 model/ability.go
 controller/model.go
 relay/helper/model_mapped.go
+model/pricing.go
+model/model_meta.go
+model/channel.go
+model/channel_plugin_credential.go
 ```
