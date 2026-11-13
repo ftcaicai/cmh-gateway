@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `be91c56c5`：main/develop一致，CI两次success（43423100839 / 43423091509）；本轮request stage预验待提交。全局core.Models、PluginHooks与Executors仍默认noop。
+- 最近业务已推 `944fea0c9`：main/develop一致，CI差异门禁两次success（43426313999 / 43426305414）。负责人随后明确批准累计48文件/6000行收口，独立rules PR #1已合并 `eac5ebaa0` 并同步main/develop。PR创建完整CI43439381396与合并后43440243739均最终success（Ubuntu root/relaykit/tokenkit vet/build/make test、官方frontend typecheck/test），差异门禁也通过；合并时frontend仍pending，默认merge未强制等待，因此不声称分支保护已认证。全局Models/PluginHooks/Executors仍noop。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -15,7 +15,7 @@
 
 ## 当前需要的用户决策（不是逐小节确认）
 
-R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明确批准累计32文件/2500增删行、准入型多调用点与无业务core导入，规则v0.8；不授权资金重构。下轮直接按RFC A/B/C实施，不再重复征求相同预算。
+R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，负责人明确选择“批准累计48文件/6000行收口预算（推荐）”，v0.9与CI已经独立rules PR #1落实；只限H1剩余执行链、目的地、后台延续和兼容缺口，逐文件登记/80%复核不变。直接继续，不再重复问同一预算；不含费用/生产/资金重构，额度不等于完成保证。
 
 资金同事务方案仍单独设计复核；H1审批不等于H3/H7审批或三库测试通过。
 
@@ -33,7 +33,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前32官方文件/2463行，已到H1专项硬上限32文件（2500行剩37），最后一个为relay/requestplugin/plan.go。逐文件白名单不变。再接reply/report/chain等新官方文件前必须负责人明确规则决策；不压缩删校验凑额度或偷增上限。未核验分支保护。
+- 门禁目前32官方文件/2463行，新H1累计硬限48/6000（负责人明确批准，PR#1落实），剩16文件/3537行；逐文件登记和80%复核保留。隔离脚本实测48文件/6000行允许、49文件/6001行及未登记拒绝。不是目录豁免或验收保证；分支保护未认证。
 
 ## 临时资源与作业
 
@@ -41,7 +41,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续是负责人规则决策：Plan stages已接，但reply.go390 CallReply、report.go376 CallReport/task_report独立target、provider chain.go114 sendStep/279 openWebSocket、最终URL/opaquebody模型/redirect/fetch、背景credential与既有任务冻结延续仍缺；candidate generation/affinity、Save目录/type60也未闭合。32文件已满不可再登记新官方文件，需一次性H1收口预算或明确改方向；不重复询问旧授权，不将现有部分Gate激活，不缩协议掩盖未完。资金同事务仍单独RFC。
+- 接续H1-C收口：Plan stage已接，下一批复用同一原配置/角色/路径executor投影接reply.go390 CallReply、report.go376 CallReport及task_report target，host veto不能被optional吞，网络计数在拒绝前直接观察。然后provider chain.go114 sendStep/279 openWebSocket、最终URL/opaquebody模型/redirect/fetch、背景credential与既有任务冻结延续；candidate generation/affinity和Save目录/type60未闭合。新48/6000预算已批准，不再停旧限；不安装部分Gate，资金仍单独同事务RFC。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 
