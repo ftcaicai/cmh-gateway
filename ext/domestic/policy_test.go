@@ -288,6 +288,47 @@ func TestExecutorApprovalManifestAndConfig(t *testing.T) {
 	assert.Equal(t, false, object["enabled"])
 }
 
+func TestDestinationPolicyExactRelations(t *testing.T) {
+	address, err := core.DestinationAddress("https://EXAMPLE.invalid?deployment=approved")
+	require.NoError(t, err)
+	same, err := core.DestinationAddress("https://example.invalid/?deployment=approved")
+	require.NoError(t, err)
+	assert.Equal(t, address, same)
+	for _, raw := range []string{"", "file:///etc/passwd", "https://user:secret@example.invalid/", "https://example.invalid/#secret", "https://example.invalid\\evil/", "https://example.invalid/ bad", "https:opaque", "http://[fe80::1%25ETH0]/x", "http://[fe80::1%25eth0]/x"} {
+		_, err := core.DestinationAddress(raw)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), raw+"secret")
+	}
+	changed, err := core.DestinationAddress("https://example.invalid/?deployment=other")
+	require.NoError(t, err)
+	assert.NotEqual(t, address, changed, "deployment query is part of approval even when host unchanged")
+	admission := core.DestinationAdmission{Kind: "relay_http", Method: "POST", AddressSHA256: address, HostSHA256: core.DestinationHost("example.invalid"), Model: core.ModelIdentity{Public: "public-chat", Upstream: "approved-target"}, Channel: core.ChannelIdentity{Known: true, ID: 1, Type: 1}}
+	before := core.Destinations
+	policy, err := NewDestinationPolicy([]core.DestinationAdmission{admission})
+	require.NoError(t, err)
+	assert.Equal(t, before, core.Destinations, "constructing approval relations cannot activate transport policy")
+	assert.NoError(t, policy.CheckDestination(t.Context(), admission))
+	for _, alter := range []func(*core.DestinationAdmission){func(a *core.DestinationAdmission) { a.AddressSHA256 = changed }, func(a *core.DestinationAdmission) { a.HostSHA256 = core.DestinationHost("else.invalid") }, func(a *core.DestinationAdmission) { a.Model.Upstream = "unapproved-target" }, func(a *core.DestinationAdmission) { a.Channel.ID = 2 }, func(a *core.DestinationAdmission) { a.Method = "GET" }} {
+		next := admission
+		alter(&next)
+		assert.ErrorIs(t, policy.CheckDestination(t.Context(), next), ErrAdmissionDenied)
+	}
+	bad := admission
+	bad.AddressSHA256 = "bad"
+	got, err := NewDestinationPolicy([]core.DestinationAdmission{admission, bad})
+	require.Error(t, err)
+	assert.Nil(t, got)
+	got, err = NewDestinationPolicy([]core.DestinationAdmission{admission, admission})
+	require.Error(t, err)
+	assert.Nil(t, got)
+	empty, err := NewDestinationPolicy(nil)
+	require.NoError(t, err)
+	assert.ErrorIs(t, empty.CheckDestination(t.Context(), admission), ErrAdmissionDenied)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.ErrorIs(t, policy.CheckDestination(ctx, admission), context.Canceled)
+}
+
 func TestAdmissionGateBatchCancellationAndNoop(t *testing.T) {
 	public, upstream, executor, candidate := admissionFixture(t)
 	original := core.Models

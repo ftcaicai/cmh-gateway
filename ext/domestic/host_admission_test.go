@@ -382,6 +382,8 @@ func runHostProviderChainAdmission(t *testing.T, previousGate *Gate, noop core.M
 	constant.StreamingTimeout = 5
 	defer func() { constant.StreamingTimeout = oldTimeout }()
 	previousRegistry := jsplugin.DefaultRegistry
+	previousDestinations := core.Destinations
+	defer func() { core.Destinations = previousDestinations }()
 	registry := jsplugin.NewRegistry()
 	jsplugin.DefaultRegistry = registry
 	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
@@ -450,8 +452,21 @@ export function convertStreamEvent(ctx,event){if(ctx.state.stream)return {events
 		ws                                 bool
 		denied                             bool
 		wantCalls, wantDials, wantMessages int32
-	}{{"chain allowed", 0, false, false, 2, 0, 0}, {"chain revoked after first", 1, false, true, 1, 0, 0}, {"websocket allowed", 2, true, false, 0, 1, 1}, {"websocket revoked before conversion", 3, true, true, 0, 1, 1}, {"stream pending revoked", 4, true, false, 0, 1, 1}} {
+	}{{"chain allowed", 0, false, false, 2, 0, 0}, {"chain revoked after first", 1, false, true, 1, 0, 0}, {"websocket allowed", 2, true, false, 0, 1, 1}, {"websocket revoked before conversion", 3, true, true, 0, 1, 1}, {"stream pending revoked", 4, true, false, 0, 1, 1}, {"websocket destination denied", 5, true, true, 0, 0, 0}, {"websocket destination approved", 6, true, false, 0, 1, 1}} {
 		t.Run(scenario.name, func(t *testing.T) {
+			core.Destinations = previousDestinations
+			if scenario.mode == 5 {
+				deniedTarget, err := NewDestinationPolicy(nil)
+				require.NoError(t, err)
+				core.Destinations = deniedTarget
+			}
+			if scenario.mode == 6 {
+				digest, err := core.DestinationAddress("ws" + strings.TrimPrefix(upstream.URL, "http") + "/socket")
+				require.NoError(t, err)
+				exactTarget, err := NewDestinationPolicy([]core.DestinationAdmission{{Kind: "relay_websocket", Method: "GET", AddressSHA256: digest, HostSHA256: core.DestinationHost(""), Model: core.ModelIdentity{Public: "public-chat", Upstream: "public-chat"}, Channel: core.ChannelIdentity{Known: true, ID: channel.Id, Type: channel.Type}}})
+				require.NoError(t, err)
+				core.Destinations = exactTarget
+			}
 			mode.Store(scenario.mode)
 			calls.Store(0)
 			handshakes.Store(0)

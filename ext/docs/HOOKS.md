@@ -47,6 +47,7 @@
 | H1-C | Report执行组回归 | 测试 | `relay/requestplugin/requestplugin_test.go` | TestReportExecutorPreflight | 2026-11-13 | 真实optional report双实例本地fetch计数；ordinary/task共用worker、消费时撤销与源/配置/路径变化拒绝 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Provider多步/WS派发准入 | 准入型 | `relay/channel/providerplugin/chain.go` | sendStep / readStep / dialWebSocket / openWebSocket | 2026-11-13 | 每step签名联网/响应转换前、每次dial与初始message前复用actual runtime检查；不等于最终目的地审批 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Provider流转换/回写准入 | 准入型 | `relay/channel/providerplugin/stream.go` | streamConverter runtime check / Read / convertNext | 2026-11-13 | actual info与冻结hook配置一致复核，在读事件前后、转换/queue/回写与pending输出前检查；保留原中断计费 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Relay最终目的地准入 | 准入型 | `relay/channel/api_request.go` | CheckDestination / doRequest / DoWssRequest | 2026-11-13 | actual signed URL+effective Host摘要与channel/model/method关系审批，HTTP发送及WS握手前拒绝；普通relay保留3xx不跟随 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -98,4 +99,5 @@ relay/requestplugin/report.go
 relay/requestplugin/requestplugin_test.go
 relay/channel/providerplugin/chain.go
 relay/channel/providerplugin/stream.go
+relay/channel/api_request.go
 ```

@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/requestplugin"
@@ -523,6 +524,75 @@ export function reply(ctx,outputs){utils.fetch({url:ctx.config.url});return {act
 		assert.NotContains(t, w.Body.String(), "revoked text must never")
 		assert.Contains(t, w.Body.String(), "request_plugin_failed")
 	})
+}
+
+func TestRelayDestinationBeforeNetwork(t *testing.T) {
+	old := core.Destinations
+	t.Cleanup(func() { core.Destinations = old })
+	var received, redirected atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Add(1); w.WriteHeader(http.StatusNoContent) }))
+	defer other.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, other.URL, http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	service.InitHttpClient()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(c, constant.ContextKeyChannelId, 7)
+	common.SetContextKey(c, constant.ContextKeyChannelType, 1)
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, "public-chat")
+	info := &relaycommon.RelayInfo{OriginModelName: "public-chat", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 7, ChannelType: 1, UpstreamModelName: "approved-target"}}
+	address, err := core.DestinationAddress(upstream.URL + "/approved?deployment=one")
+	require.NoError(t, err)
+	request, err := http.NewRequest(http.MethodPost, upstream.URL+"/approved?deployment=one", nil)
+	require.NoError(t, err)
+	approval := core.DestinationAdmission{Kind: "relay_http", Method: http.MethodPost, AddressSHA256: address, HostSHA256: core.DestinationHost(request.Host), Model: core.ModelIdentity{Public: "public-chat", Upstream: "approved-target"}, Channel: core.ChannelIdentity{Known: true, ID: 7, Type: 1}}
+	policy, err := NewDestinationPolicy([]core.DestinationAdmission{approval})
+	require.NoError(t, err)
+	core.Destinations = policy
+	response, err := relaychannel.DoRequest(c, request, info)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, int32(1), received.Load())
+	for _, change := range []struct{ name, url, host string }{{"same-host unapproved deployment", upstream.URL + "/approved?deployment=two", ""}, {"different destination", other.URL + "/approved", ""}, {"custom Host", upstream.URL + "/approved?deployment=one", "unapproved.invalid"}} {
+		t.Run(change.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, change.url, nil)
+			require.NoError(t, err)
+			if change.host != "" {
+				req.Host = change.host
+			}
+			_, err = relaychannel.DoRequest(c, req, info)
+			require.Error(t, err)
+			typed := kittypes.NewOpenAIError(err, kittypes.ErrorCodeDoRequestFailed, 500)
+			assert.Equal(t, 403, typed.StatusCode)
+			assert.False(t, service.ShouldRetryRelayError(c, typed, 2))
+			assert.Equal(t, int32(1), received.Load())
+			assert.Zero(t, redirected.Load())
+		})
+	}
+	redirectURL := upstream.URL + "/redirect"
+	redirectHash, err := core.DestinationAddress(redirectURL)
+	require.NoError(t, err)
+	redirectApproval := approval
+	redirectApproval.AddressSHA256 = redirectHash
+	policy, err = NewDestinationPolicy([]core.DestinationAdmission{redirectApproval})
+	require.NoError(t, err)
+	core.Destinations = policy
+	request, err = http.NewRequest(http.MethodPost, redirectURL, nil)
+	require.NoError(t, err)
+	response, err = relaychannel.DoRequest(c, request, info)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusFound, response.StatusCode)
+	require.NoError(t, response.Body.Close())
+	assert.Zero(t, redirected.Load(), "official relay must keep 3xx rather than follow to unapproved target")
+	core.Destinations = old
+	assert.NoError(t, relaychannel.CheckDestination(nil, nil, "", "", "", ""), "default must not add nil/context dependencies")
 }
 
 func TestParamNormalizePluginHostContract(t *testing.T) {

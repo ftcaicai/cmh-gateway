@@ -14,6 +14,7 @@ import (
 	"github.com/MoeForge/moego/regexp"
 	common2 "github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
@@ -498,6 +499,9 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if info.ChannelSetting.TLSInsecureSkipVerify {
 		dialer.TLSClientConfig = common2.InsecureTLSConfig
 	}
+	if err = CheckDestination(c, info, http.MethodGet, fullRequestURL, targetHeader.Get("Host"), "relay_websocket"); err != nil {
+		return nil, err
+	}
 	targetConn, resp, err := dialer.DialContext(c.Request.Context(), fullRequestURL, targetHeader)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
@@ -525,6 +529,35 @@ func toWebSocketURL(raw string) string {
 	}
 }
 
+// CheckDestination authorizes the actual transport target, not a channel base
+// URL or a fresh mapping substituted for what the adaptor will send. Addresses
+// and Host overrides may contain private routing data; only their hashes leave.
+func CheckDestination(c *gin.Context, info *common.RelayInfo, method, rawURL, hostOverride, kind string) error {
+	if !core.DestinationAdmissionEnabled() {
+		return nil
+	}
+	rejected := types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	if c == nil || c.Request == nil || info == nil || info.ChannelMeta == nil || info.ChannelId <= 0 || info.ChannelType <= 0 || info.OriginModelName == "" || info.UpstreamModelName == "" || method == "" || (kind != "relay_http" && kind != "relay_websocket") {
+		return rejected
+	}
+	if info.ChannelId != common2.GetContextKeyInt(c, appconstant.ContextKeyChannelId) || info.ChannelType != common2.GetContextKeyInt(c, appconstant.ContextKeyChannelType) || info.OriginModelName != common2.GetContextKeyString(c, appconstant.ContextKeyOriginalModel) {
+		return rejected
+	}
+	address, err := core.DestinationAddress(rawURL)
+	if err != nil {
+		return rejected
+	}
+	admission := core.DestinationAdmission{
+		Kind: kind, Method: method, AddressSHA256: address, HostSHA256: core.DestinationHost(hostOverride),
+		Model:   core.ModelIdentity{Public: info.OriginModelName, Upstream: info.UpstreamModelName},
+		Channel: core.ChannelIdentity{Known: true, ID: info.ChannelId, Type: info.ChannelType},
+	}
+	if core.Destinations.CheckDestination(c.Request.Context(), admission) != nil {
+		return rejected
+	}
+	return nil
+}
+
 func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	return doRequest(c, req, info)
 }
@@ -536,6 +569,14 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	if core.DestinationAdmissionEnabled() {
+		if req == nil || req.URL == nil {
+			return nil, CheckDestination(c, info, "", "", "", "relay_http")
+		}
+		if err := CheckDestination(c, info, req.Method, req.URL.String(), req.Host, "relay_http"); err != nil {
+			return nil, err
+		}
+	}
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)

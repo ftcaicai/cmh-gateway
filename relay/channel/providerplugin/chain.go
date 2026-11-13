@@ -388,6 +388,9 @@ func (a *Adaptor) dialWebSocket(c *gin.Context, info *relaycommon.RelayInfo, req
 	if err = a.checkExecution(c, info); err != nil {
 		return nil, err
 	}
+	if err = channel.CheckDestination(c, info, http.MethodGet, target.String(), header.Get("Host"), "relay_websocket"); err != nil {
+		return nil, err
+	}
 	session, resp, err := dialer.DialContext(c.Request.Context(), target.String(), header)
 	if err != nil {
 		statusCode := http.StatusBadGateway
