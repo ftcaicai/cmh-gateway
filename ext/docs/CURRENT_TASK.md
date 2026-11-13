@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `f32015d85`：main/develop一致，差异门禁两次success（43490348116 / 43490341068），本轮cycle-free pinnedcandidate view待提交。48/6000规则已落实；完整Ubuntu CI证据见 `acceptance/p2/H1-closeout-approval.md`。分支保护未认证。所有Gate仍noop，TaskContinuations默认nil。
+- 最近已推 `61e7d0b16`：main/develop一致，差异门禁两次success（43494738314 / 43494728871），本轮verified operator loader待提交。48/6000规则已落实；完整Ubuntu CI证据见 `acceptance/p2/H1-closeout-approval.md`。分支保护未认证。所有Gate仍noop，TaskContinuations默认nil。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -23,7 +23,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1-C本轮cycle-free pinnedview：dto只core typedSnapshot/PluginCandidateView，model私有wrapper保留真实generation指针+existingChannelPluginAdmission，无any/反射/name-number查源；missing/混合views拒，nilkindfilters继承view，cachekind分组前传播，publication仍current。Distribute选择前/directSetup绑定view并retaincontext，providerSetup同capturedgen。真三库oldAapproved/currentBdeny/viewAtrue、conflict/emptygen拒、DB/cache选择A、actualSetup retainedgen及provider旧chat被B删路由viewA仍可用全部过（最终7.543s）；相关tests/vet/build过，独立review无限定范围阻断。证据 `acceptance/p2/H1-C-pinned-candidate-view.md`。sharedendpoint Distribute前preselection仍未绑定专项验/allGateStore未装。
+3. 本轮extension LoadOperatorPolicies(map)：FILE与env/buildSHA明确partialfailclosed，两anchor冲突拒不得override；预Stat+OpenhandleStat regular/size与LimitRead<=1MiB，rawfileSHA匹配才Parse严格manifest，无processenv/defaultpath/lastgood/installer。真实临时文件env/build正控、newline tamper、missing/dir/hash/oversize拒globalunchanged；review发现FIFO Open先阻塞风险，主代理补preStat但不声称raceproof/UnixFIFO实测；exttests/vet/build过，证据 `acceptance/p2/H1-C-operator-loader.md`。官方本轮0改动/allGateStore未装。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -41,7 +41,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续task-scoped continuationgrant/其余兼容：pinnedtypedview已接Distribute/directSetup但sharedendpoint预选在未登记middleware/task_plugin.go，需先证明可复用已登记接口不改该file，否则第49文件须新决策，不自行超范围。OperatorManifest仍purecompiler无启动原子安装；task旧source/config/targets grant、credentialrefresh、affinity/type60/legacy、keycustody备份GCM预算/fullactivation未完。48file硬限0slots/1937lines保留，不删测试凑。金融同事务独立RFC未批准，缺档skip本次原timeout仍退款。
+- 接续task-scoped旧grant/其余兼容：explicitmanifest+anchoredloader已验但未在Register启用；pinnedview sharedendpoint提前预选仍未登记middleware/task_plugin.go，若不能在已登记范围复用，需49文件新决策，不擅自超48硬限。task旧source/config/targets grant、credentialrefresh、affinity/type60/legacy、keycustody备份GCM预算/fullactivation未完。金融同事务独立RFC未批准，缺档skip本次原timeout仍退款。优先真实收口已登记范围，不用纯配置parser当最终live验收。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 

@@ -2,7 +2,10 @@ package domestic
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +14,56 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestOperatorManifestFileVerification(t *testing.T) {
+	originalBuild := BuildOperatorManifestSHA256
+	BuildOperatorManifestSHA256 = ""
+	t.Cleanup(func() { BuildOperatorManifestSHA256 = originalBuild })
+	beforeModels, beforeTargets := core.Models, core.Destinations
+	inactive, err := LoadOperatorPolicies(nil)
+	require.NoError(t, err)
+	assert.Nil(t, inactive)
+	wire, err := EncodeOperatorManifest(OperatorManifest{Version: 1, PublicModels: []string{"public-chat"}, UpstreamModels: []string{"approved-target"}, ChannelTypes: []int{1}})
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "approval.json")
+	require.NoError(t, os.WriteFile(path, wire, 0600))
+	digest := fmt.Sprintf("%x", sha256.Sum256(wire))
+	environment := map[string]string{"CMH_OPERATOR_MANIFEST_FILE": path, "CMH_OPERATOR_MANIFEST_SHA256": digest}
+	loaded, err := LoadOperatorPolicies(environment)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, beforeModels, core.Models)
+	assert.Equal(t, beforeTargets, core.Destinations)
+	BuildOperatorManifestSHA256 = digest
+	delete(environment, "CMH_OPERATOR_MANIFEST_SHA256")
+	built, err := LoadOperatorPolicies(environment)
+	require.NoError(t, err)
+	assert.Equal(t, loaded.Fingerprint, built.Fingerprint)
+	environment["CMH_OPERATOR_MANIFEST_SHA256"] = strings.Repeat("a", 64)
+	got, err := LoadOperatorPolicies(environment)
+	require.Error(t, err)
+	assert.Nil(t, got)
+	environment["CMH_OPERATOR_MANIFEST_SHA256"] = digest
+	require.NoError(t, os.WriteFile(path, append(wire, '\n'), 0600))
+	got, err = LoadOperatorPolicies(environment)
+	require.Error(t, err)
+	assert.Nil(t, got, "even harmless trailing bytes need a new raw-file anchor")
+	for _, bad := range []map[string]string{{"CMH_OPERATOR_MANIFEST_FILE": path}, {"CMH_OPERATOR_MANIFEST_SHA256": digest}, {"CMH_OPERATOR_MANIFEST_FILE": filepath.Dir(path), "CMH_OPERATOR_MANIFEST_SHA256": digest}, {"CMH_OPERATOR_MANIFEST_FILE": path + "-missing", "CMH_OPERATOR_MANIFEST_SHA256": digest}, {"CMH_OPERATOR_MANIFEST_FILE": path, "CMH_OPERATOR_MANIFEST_SHA256": "bad-hash"}} {
+		BuildOperatorManifestSHA256 = ""
+		got, err := LoadOperatorPolicies(bad)
+		require.Error(t, err)
+		assert.Nil(t, got)
+		assert.NotContains(t, err.Error(), path)
+	}
+	oversized := make([]byte, (1<<20)+1)
+	require.NoError(t, os.WriteFile(path, oversized, 0600))
+	environment["CMH_OPERATOR_MANIFEST_SHA256"] = fmt.Sprintf("%x", sha256.Sum256(oversized))
+	got, err = LoadOperatorPolicies(environment)
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Equal(t, beforeModels, core.Models)
+	assert.Equal(t, beforeTargets, core.Destinations)
+}
 
 func TestOperatorManifestCompilation(t *testing.T) {
 	oldModels, oldDestinations := core.Models, core.Destinations
