@@ -2,18 +2,247 @@ package domestic
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPluginSourceIdentity(t *testing.T) {
+	const source = `export const meta = {apiVersion: 1, key: "cmh-source-identity", name: "Source identity", version: "1.0.0", author: {name: "Test"}};
+export function ingress() { return {action: "continue"}; }`
+	sources := []string{
+		source,
+		source + "\nexport const revision = 2;",
+		source + "\n// source identity comment",
+		" \n" + source + "\n\t",
+	}
+	compiled := make([]*jsplugin.LoadedPlugin, len(sources))
+	for i, raw := range sources {
+		plugin, err := jsplugin.CompilePlugin(raw, jsplugin.Options{})
+		require.NoError(t, err)
+		compiled[i] = plugin
+		assert.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte(raw))), plugin.SourceSHA256())
+		assert.Equal(t, "cmh-source-identity", plugin.Meta.Key)
+		assert.Equal(t, "1.0.0", plugin.Meta.Version)
+		for _, previous := range compiled[:i] {
+			assert.NotEqual(t, previous.SourceSHA256(), plugin.SourceSHA256(), "code, comments and whitespace all contribute to source identity")
+		}
+	}
+
+	registry := jsplugin.NewRegistry()
+	factory, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	assert.Equal(t, compiled[0].SourceSHA256(), factory.SourceSHA256())
+	factoryGeneration := registry.Generation()
+
+	override, err := registry.Register(sources[1], jsplugin.Options{})
+	require.NoError(t, err)
+	assert.Equal(t, compiled[1].SourceSHA256(), override.SourceSHA256())
+	overrideGeneration := registry.Generation()
+	require.NoError(t, registry.ReplaceOverrides([]*jsplugin.LoadedPlugin{compiled[2]}))
+	current, ok := registry.Get(factory.Meta.Key)
+	require.True(t, ok)
+	assert.Same(t, compiled[2], current)
+	assert.Equal(t, compiled[2].SourceSHA256(), current.SourceSHA256())
+
+	retainedFactory, ok := factoryGeneration.Get(factory.Meta.Key)
+	require.True(t, ok)
+	assert.Same(t, factory, retainedFactory)
+	assert.Equal(t, compiled[0].SourceSHA256(), retainedFactory.SourceSHA256())
+	retainedOverride, ok := overrideGeneration.Get(override.Meta.Key)
+	require.True(t, ok)
+	assert.Same(t, override, retainedOverride)
+	assert.Equal(t, compiled[1].SourceSHA256(), retainedOverride.SourceSHA256())
+}
+
+type sourceHookProbe struct {
+	allow bool
+	seen  []core.PluginHookIdentity
+}
+
+func (p *sourceHookProbe) CheckHook(_ context.Context, identity core.PluginHookIdentity) error {
+	recorded := identity
+	recorded.Members = append([]string(nil), identity.Members...)
+	p.seen = append(p.seen, recorded)
+	// A policy must not be able to rewrite the caller's member path.
+	if len(identity.Members) > 0 {
+		identity.Members[0] = "policy-mutated"
+	}
+	if !p.allow {
+		return errors.New("private policy error must not escape")
+	}
+	return nil
+}
+
+func TestPluginSourceHookArtifactVeto(t *testing.T) {
+	previous := core.PluginHooks
+	t.Cleanup(func() { core.PluginHooks = previous })
+	probe := &sourceHookProbe{}
+	core.PluginHooks = probe
+	require.True(t, core.PluginHookAdmissionEnabled())
+	const source = `let calls = 0;
+export const meta = {name: "inspectable"};
+function invoked() { calls++; return {calls, payload: {ok: true}}; }
+export function run() { return invoked(); }
+export const native = {go: invoked, deep: {go: invoked}};`
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(source)))
+	type result struct {
+		Calls int `json:"calls"`
+	}
+	cases := []struct {
+		name, export string
+		members      []string
+		invoke       func(*jsplugin.Engine, []string) (int, error)
+	}{
+		{"Call", "run", nil, func(e *jsplugin.Engine, _ []string) (int, error) {
+			var out result
+			value, err := e.Call(t.Context(), "run")
+			if err == nil {
+				raw, merr := common.Marshal(value)
+				require.NoError(t, merr)
+				require.NoError(t, common.Unmarshal(raw, &out))
+			}
+			return out.Calls, err
+		}},
+		{"CallInto", "run", nil, func(e *jsplugin.Engine, _ []string) (int, error) {
+			var out result
+			err := e.CallInto(t.Context(), &out, "run")
+			return out.Calls, err
+		}},
+		{"CallJSONInto", "run", nil, func(e *jsplugin.Engine, _ []string) (int, error) {
+			var out result
+			err := e.CallJSONInto(t.Context(), &out, "run")
+			return out.Calls, err
+		}},
+		{"CallMember", "native", []string{"go"}, func(e *jsplugin.Engine, _ []string) (int, error) {
+			value, err := e.CallMember(t.Context(), "native", "go")
+			var out result
+			if err == nil {
+				raw, merr := common.Marshal(value)
+				require.NoError(t, merr)
+				require.NoError(t, common.Unmarshal(raw, &out))
+			}
+			return out.Calls, err
+		}},
+		{"CallPath", "native", []string{"deep", "go"}, func(e *jsplugin.Engine, path []string) (int, error) {
+			value, err := e.CallPath(t.Context(), "native", path)
+			var out result
+			if err == nil {
+				raw, merr := common.Marshal(value)
+				require.NoError(t, merr)
+				require.NoError(t, common.Unmarshal(raw, &out))
+			}
+			return out.Calls, err
+		}},
+		{"CallPathInto", "native", []string{"deep", "go"}, func(e *jsplugin.Engine, path []string) (int, error) {
+			var out result
+			err := e.CallPathInto(t.Context(), &out, "native", path)
+			return out.Calls, err
+		}},
+		{"CallPathWithAdmissionTimeout", "native", []string{"deep", "go"}, func(e *jsplugin.Engine, path []string) (int, error) {
+			value, err := e.CallPathWithAdmissionTimeout(t.Context(), time.Second, "native", path)
+			var out result
+			if err == nil {
+				raw, merr := common.Marshal(value)
+				require.NoError(t, merr)
+				require.NoError(t, common.Unmarshal(raw, &out))
+			}
+			return out.Calls, err
+		}},
+		{"CallPathWithMemberJSON", "native", []string{"deep", "go"}, func(e *jsplugin.Engine, path []string) (int, error) {
+			value, text, err := e.CallPathWithMemberJSON(t.Context(), time.Second, "payload", "native", path)
+			var out result
+			if err == nil {
+				assert.JSONEq(t, `{"ok":true}`, string(text))
+				raw, merr := common.Marshal(value)
+				require.NoError(t, merr)
+				require.NoError(t, common.Unmarshal(raw, &out))
+			}
+			return out.Calls, err
+		}},
+		{"CallPathWithMembersJSON", "native", []string{"deep", "go"}, func(e *jsplugin.Engine, path []string) (int, error) {
+			value, text, err := e.CallPathWithMembersJSON(t.Context(), time.Second, []string{"payload"}, "native", path)
+			var out result
+			if err == nil {
+				assert.JSONEq(t, `{"ok":true}`, string(text))
+				raw, merr := common.Marshal(value)
+				require.NoError(t, merr)
+				require.NoError(t, common.Unmarshal(raw, &out))
+			}
+			return out.Calls, err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			probe.allow, probe.seen = false, nil
+			engine, err := jsplugin.Compile(source, jsplugin.Options{Key: "caller-label-is-not-identity", Concurrency: 1})
+			require.NoError(t, err, "source inspection must not require runtime hook approval")
+			meta, err := engine.Export(t.Context(), "meta")
+			require.NoError(t, err)
+			assert.NotNil(t, meta)
+			assert.Empty(t, probe.seen, "declarative exports are not runtime hook calls")
+			path := append([]string(nil), tc.members...)
+			_, err = tc.invoke(engine, path)
+			require.EqualError(t, err, "plugin execution rejected")
+			require.Len(t, probe.seen, 1)
+			assert.Equal(t, core.PluginHookIdentity{SourceSHA256: digest, Export: tc.export, Members: tc.members}, probe.seen[0])
+			assert.Equal(t, tc.members, path)
+			probe.allow = true
+			calls, err := tc.invoke(engine, path)
+			require.NoError(t, err)
+			assert.Equal(t, 1, calls, "vetoed call must never execute hook or modify module state")
+			assert.Equal(t, tc.members, path)
+		})
+	}
+	engine, err := jsplugin.Compile(source+"\n// changed bytes", jsplugin.Options{Key: "same-options-key", Concurrency: 1})
+	require.NoError(t, err)
+	probe.allow = false
+	probe.seen = nil
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = engine.Call(ctx, "run")
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, probe.seen, "cancellation precedes installed policy")
+	_, err = engine.Call(t.Context(), "run")
+	require.EqualError(t, err, "plugin execution rejected")
+	require.Len(t, probe.seen, 1)
+	assert.NotEqual(t, digest, probe.seen[0].SourceSHA256)
+	core.PluginHooks = previous
+	assert.False(t, core.PluginHookAdmissionEnabled(), "no source policy remains installed after this fixture")
+	_, err = engine.Call(t.Context(), "run")
+	require.NoError(t, err)
+}
+
+func TestPluginSourceHookVetoBeforeCapacity(t *testing.T) {
+	previous := core.PluginHooks
+	t.Cleanup(func() { core.PluginHooks = previous })
+	entered, release := make(chan struct{}), make(chan struct{})
+	engine, err := jsplugin.Compile(`export function hold() { utils.unixNow(); return 1; }`, jsplugin.Options{Concurrency: 1, Now: func() time.Time { close(entered); <-release; return time.Unix(1, 0) }})
+	require.NoError(t, err)
+	finished := make(chan error, 1)
+	go func() { _, callErr := engine.Call(t.Context(), "hold"); finished <- callErr }()
+	<-entered
+	probe := &sourceHookProbe{}
+	core.PluginHooks = probe
+	_, err = engine.CallPathWithAdmissionTimeout(t.Context(), time.Millisecond, "hold", nil)
+	assert.EqualError(t, err, "plugin execution rejected", "source veto must precede occupied JS capacity")
+	close(release)
+	require.NoError(t, <-finished)
+	require.Len(t, probe.seen, 1)
+}
 
 func TestParamNormalizePluginHostContract(t *testing.T) {
 	source, err := os.ReadFile(filepath.Join("..", "..", "plugins", "tasks", "cmh-param-normalize", "plugin.js"))

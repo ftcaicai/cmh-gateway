@@ -25,6 +25,26 @@ type executorApproval struct {
 }
 
 var _ core.ModelGate = (*Gate)(nil)
+var _ core.PluginHookGate = (*Gate)(nil)
+
+// CheckHook is a source-only veto. Passing it grants no model, channel,
+// configuration or network authority: those require their own exact checks.
+// Any approved config tuple for a source permits it at this source-only
+// boundary; it must never substitute for Check's full executor tuple match.
+func (g *Gate) CheckHook(ctx context.Context, hook core.PluginHookIdentity) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if g == nil || hook.Export == "" || len(hook.SourceSHA256) != 64 {
+		return ErrAdmissionDenied
+	}
+	for approval := range g.approvals {
+		if approval.kind == "plugin" && approval.sourceSHA256 == hook.SourceSHA256 {
+			return nil
+		}
+	}
+	return ErrAdmissionDenied
+}
 
 // NewGate keeps public and upstream authorization independent. Public owns the
 // channel-type allowlist. Nonempty Declared identities require exact membership

@@ -2,9 +2,11 @@ package domestic
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,6 +221,71 @@ func TestAdmissionGateApprovalValidationAndCopy(t *testing.T) {
 	gate, err = NewGate(&Policy{}, &Policy{}, nil)
 	require.NoError(t, err)
 	assert.ErrorIs(t, gate.Check(context.Background(), candidate), ErrAdmissionDenied, "zero policy denies all")
+}
+
+func TestExecutorApprovalManifestAndConfig(t *testing.T) {
+	before := core.Models
+	source := strings.Repeat("a", 64)
+	config, err := EffectiveConfigFingerprint([]byte(`{"temperature":0,"enabled":false}`))
+	require.NoError(t, err)
+	assert.Len(t, config, 64)
+	line := "cmh-test\t" + source + "\t" + config
+	approvals, err := ParseExecutorApprovals(line + "\r\n")
+	require.NoError(t, err)
+	require.Len(t, approvals, 1)
+	assert.Equal(t, core.ExecutorIdentity{Kind: "plugin", Key: "cmh-test", SourceSHA256: source, ConfigFingerprint: config}, approvals[0])
+	assert.Equal(t, before, core.Models, "parsing operator approvals never installs or trusts a plugin")
+	for _, raw := range []string{" ", "# comment", line + "\n" + line, strings.Replace(line, "cmh-test", "cmh-*", 1), strings.Replace(line, source, strings.ToUpper(source), 1), line + "\textra", "cmh-test\t" + source, strings.Repeat("x", 64*1024+1)} {
+		got, err := ParseExecutorApprovals(raw)
+		require.Error(t, err)
+		assert.Nil(t, got, "no partial approvals on malformed input")
+		assert.NotContains(t, err.Error(), source)
+	}
+	empty, err := ParseExecutorApprovals("")
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+	_, err = ParseExecutorApprovals(string([]byte{0xff}))
+	require.Error(t, err)
+	var tooMany strings.Builder
+	for i := range 257 {
+		fmt.Fprintf(&tooMany, "cmh-%d\t%s\t%s\n", i, source, config)
+	}
+	_, err = ParseExecutorApprovals(tooMany.String())
+	require.Error(t, err)
+	_, err = EffectiveConfigFingerprint([]byte{0xff})
+	require.Error(t, err)
+	withNull, err := EffectiveConfigFingerprint([]byte(`{"optional":null}`))
+	require.NoError(t, err)
+	assert.Len(t, withNull, 64)
+	_, err = EffectiveConfigFingerprint([]byte(`{"a":0,"a":false}`))
+	require.NoError(t, err, "host decoder accepts duplicate keys; exact original bytes are approved, this helper is not schema or unique-key validation")
+	for _, raw := range []string{"", "null", "[]", "false", `{"bad":`, `{} {}`} {
+		digest, err := EffectiveConfigFingerprint([]byte(raw))
+		require.Error(t, err)
+		assert.Empty(t, digest)
+	}
+	other, err := EffectiveConfigFingerprint([]byte(`{"temperature":0,"enabled":true}`))
+	require.NoError(t, err)
+	assert.NotEqual(t, config, other)
+	formatted, err := EffectiveConfigFingerprint([]byte(`{ "temperature":0,"enabled":false}`))
+	require.NoError(t, err)
+	assert.NotEqual(t, config, formatted, "fingerprint is exact host-produced bytes, not inferred canonical JSON")
+	public, upstream, executor, candidate := admissionFixture(t)
+	executor.SourceSHA256, executor.ConfigFingerprint = source, config
+	gate, err := NewGate(public, upstream, approvals)
+	require.NoError(t, err)
+	candidate.Executor = executor
+	assert.NoError(t, gate.Check(context.Background(), candidate))
+	assert.NoError(t, gate.CheckHook(context.Background(), core.PluginHookIdentity{SourceSHA256: source, Export: "run"}))
+	assert.ErrorIs(t, gate.CheckHook(context.Background(), core.PluginHookIdentity{SourceSHA256: strings.Repeat("b", 64), Export: "run"}), ErrAdmissionDenied)
+	assert.ErrorIs(t, gate.CheckHook(context.Background(), core.PluginHookIdentity{SourceSHA256: source}), ErrAdmissionDenied)
+	candidate.Executor.ConfigFingerprint = other
+	assert.ErrorIs(t, gate.Check(context.Background(), candidate), ErrAdmissionDenied)
+	// Effective config is validated by the host before hashing. Preserve explicit
+	// zero/false and unknown fields in that exact host value, never strip defaults.
+	var object map[string]any
+	require.NoError(t, common.Unmarshal([]byte(`{"temperature":0,"enabled":false}`), &object))
+	assert.Equal(t, false, object["enabled"])
 }
 
 func TestAdmissionGateBatchCancellationAndNoop(t *testing.T) {

@@ -2,6 +2,7 @@ package jsplugin
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/MoeForge/moejs"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 )
 
@@ -115,6 +117,8 @@ type Options struct {
 }
 
 type Engine struct {
+	sourceSHA256 string
+
 	key       string
 	version   string
 	timeout   time.Duration
@@ -200,6 +204,7 @@ func Compile(source string, options Options) (*Engine, error) {
 		hooks:     make(map[hookKey]moejs.Hook),
 		exports:   make(map[string]struct{}),
 	}
+	engine.sourceSHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte(source)))
 	instance, err := engine.newRuntime(context.Background())
 	if err != nil {
 		return nil, err
@@ -437,6 +442,15 @@ type callOptions struct {
 }
 
 func (e *Engine) call(ctx context.Context, opts callOptions, exportName string, members []string, args ...any) (any, json.RawMessage, error) {
+	if core.PluginHookAdmissionEnabled() {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		identity := core.PluginHookIdentity{SourceSHA256: e.sourceSHA256, Export: exportName, Members: slices.Clone(members)}
+		if core.PluginHooks.CheckHook(ctx, identity) != nil {
+			return nil, nil, errors.New("plugin execution rejected")
+		}
+	}
 	if err := e.acquireCallSlot(ctx, opts.admissionTimeout); err != nil {
 		return nil, nil, err
 	}

@@ -2,6 +2,7 @@ package jsplugin
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"maps"
@@ -389,6 +390,14 @@ type UsageFieldSchema struct {
 type LoadedPlugin struct {
 	Meta   Meta
 	Engine *Engine
+
+	sourceSHA256 string
+}
+
+// SourceSHA256 returns the lowercase hex SHA-256 of the exact compiled source bytes.
+// It is fixed at compilation, independently of the plugin's claimed version.
+func (p *LoadedPlugin) SourceSHA256() string {
+	return p.sourceSHA256
 }
 
 // UsesSubmitEventDelta reports whether SSE submissions go through
@@ -778,7 +787,7 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 	if err = validateProviderHooks(meta, engine); err != nil {
 		return nil, err
 	}
-	return &LoadedPlugin{Meta: meta, Engine: engine}, nil
+	return &LoadedPlugin{Meta: meta, Engine: engine, sourceSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(source)))}, nil
 }
 
 // taskOnlyMetaFields are the manifest fields only a task part reads.
