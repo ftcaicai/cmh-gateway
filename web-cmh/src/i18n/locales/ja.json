@@ -1,0 +1,21 @@
+{
+  "translation": {
+    "Available": "利用可能",
+    "Current account": "現在のアカウント",
+    "Gateway status": "ゲートウェイの状態",
+    "Group": "グループ",
+    "Loading account...": "アカウントを読み込み中…",
+    "Loading...": "読み込み中…",
+    "Operations console": "運用コンソール",
+    "Overview": "概要",
+    "Page not found.": "ページが見つかりません。",
+    "Request failed": "リクエストに失敗しました",
+    "Role": "ロール",
+    "Session expired!": "セッションの有効期限が切れました！",
+    "Session expired. Redirecting to sign in...": "セッションの有効期限が切れました。ログイン画面に移動中…",
+    "This independent console reuses the official sign-in session.": "この独立したコンソールは公式のログインセッションを再利用します。",
+    "Unable to verify your session. Reload to try again.": "セッションを確認できません。ページを再読み込みしてお試しください。",
+    "Unavailable": "利用不可",
+    "Username": "ユーザー名"
+  }
+}

@@ -8,7 +8,10 @@
 package ext
 
 import (
+	"github.com/gin-gonic/gin"
+
 	"github.com/QuantumNous/new-api/ext/brand"
+	"github.com/QuantumNous/new-api/ext/console"
 	"github.com/QuantumNous/new-api/ext/core"
 )
 
@@ -18,5 +21,13 @@ func init() { Register() }
 // Idempotent; call order is the delivery order of the phases.
 func Register() {
 	core.Tenant = brand.Resolver{} // H2
-	core.Routes = brand.Routes{}   // H5
+	core.Routes = routes{}         // H5
+}
+
+// routes is the single H5 registrar; each module mounts itself here in order.
+type routes struct{}
+
+func (routes) Register(engine *gin.Engine) {
+	brand.Routes{}.Register(engine) // brand hosts first: they must never reach official fallbacks
+	console.Mount(engine)           // /cmh/* operations console
 }

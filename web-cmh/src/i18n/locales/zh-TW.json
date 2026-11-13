@@ -1,0 +1,21 @@
+{
+  "translation": {
+    "Available": "正常",
+    "Current account": "目前帳號",
+    "Gateway status": "閘道狀態",
+    "Group": "群組",
+    "Loading account...": "正在讀取帳號…",
+    "Loading...": "讀取中…",
+    "Operations console": "營運控制台",
+    "Overview": "概覽",
+    "Page not found.": "頁面不存在。",
+    "Request failed": "請求失敗",
+    "Role": "角色",
+    "Session expired!": "工作階段已過期！",
+    "Session expired. Redirecting to sign in...": "工作階段已過期，正在前往登入頁…",
+    "This independent console reuses the official sign-in session.": "此獨立控制台沿用官方登入工作階段。",
+    "Unable to verify your session. Reload to try again.": "無法驗證工作階段，請重新整理頁面再試。",
+    "Unavailable": "無法使用",
+    "Username": "使用者名稱"
+  }
+}

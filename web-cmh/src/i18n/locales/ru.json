@@ -1,0 +1,21 @@
+{
+  "translation": {
+    "Available": "Доступен",
+    "Current account": "Текущая учётная запись",
+    "Gateway status": "Состояние шлюза",
+    "Group": "Группа",
+    "Loading account...": "Загрузка учётной записи…",
+    "Loading...": "Загрузка…",
+    "Operations console": "Консоль управления",
+    "Overview": "Обзор",
+    "Page not found.": "Страница не найдена.",
+    "Request failed": "Ошибка запроса",
+    "Role": "Роль",
+    "Session expired!": "Сеанс истёк!",
+    "Session expired. Redirecting to sign in...": "Сеанс истёк. Переход на страницу входа…",
+    "This independent console reuses the official sign-in session.": "Эта независимая консоль использует официальный сеанс входа.",
+    "Unable to verify your session. Reload to try again.": "Не удалось проверить сеанс. Обновите страницу и повторите попытку.",
+    "Unavailable": "Недоступен",
+    "Username": "Имя пользователя"
+  }
+}

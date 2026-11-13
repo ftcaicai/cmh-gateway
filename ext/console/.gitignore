@@ -1,0 +1,3 @@
+# web-cmh build output lives here so go:embed can reach it; rebuilt in CI/release
+dist/*
+!dist/.gitkeep

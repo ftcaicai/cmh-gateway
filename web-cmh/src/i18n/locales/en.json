@@ -1,0 +1,21 @@
+{
+  "translation": {
+    "Available": "Available",
+    "Current account": "Current account",
+    "Gateway status": "Gateway status",
+    "Group": "Group",
+    "Loading account...": "Loading account...",
+    "Loading...": "Loading...",
+    "Operations console": "Operations console",
+    "Overview": "Overview",
+    "Page not found.": "Page not found.",
+    "Request failed": "Request failed",
+    "Role": "Role",
+    "Session expired!": "Session expired!",
+    "Session expired. Redirecting to sign in...": "Session expired. Redirecting to sign in...",
+    "This independent console reuses the official sign-in session.": "This independent console reuses the official sign-in session.",
+    "Unable to verify your session. Reload to try again.": "Unable to verify your session. Reload to try again.",
+    "Unavailable": "Unavailable",
+    "Username": "Username"
+  }
+}

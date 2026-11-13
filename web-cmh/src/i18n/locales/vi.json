@@ -1,0 +1,21 @@
+{
+  "translation": {
+    "Available": "Khả dụng",
+    "Current account": "Tài khoản hiện tại",
+    "Gateway status": "Trạng thái cổng",
+    "Group": "Nhóm",
+    "Loading account...": "Đang tải tài khoản…",
+    "Loading...": "Đang tải…",
+    "Operations console": "Bảng điều hành",
+    "Overview": "Tổng quan",
+    "Page not found.": "Không tìm thấy trang.",
+    "Request failed": "Yêu cầu thất bại",
+    "Role": "Vai trò",
+    "Session expired!": "Phiên đã hết hạn!",
+    "Session expired. Redirecting to sign in...": "Phiên đã hết hạn. Đang chuyển đến trang đăng nhập…",
+    "This independent console reuses the official sign-in session.": "Bảng điều hành độc lập này dùng lại phiên đăng nhập chính thức.",
+    "Unable to verify your session. Reload to try again.": "Không thể xác minh phiên. Hãy tải lại trang để thử lại.",
+    "Unavailable": "Không khả dụng",
+    "Username": "Tên người dùng"
+  }
+}

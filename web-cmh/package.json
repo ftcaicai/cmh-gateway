@@ -1,0 +1,40 @@
+{
+    "devDependencies": {
+        "@rsbuild/core": "^2.1.4",
+        "@rsbuild/plugin-react": "^2.1.0",
+        "@tanstack/router-plugin": "^1.168.42",
+        "@types/node": "^26.6.6",
+        "@types/react": "^19.2.17",
+        "@types/react-dom": "^19.2.3",
+        "oxlint": "^1.72.0",
+        "oxfmt": "^0.72.0",
+        "typescript": "^5.9.3"
+    },
+    "name": "web-cmh",
+    "description": "ChinaModelHub operations console: independent app served by ext at /cmh/. Same stack as official web/ (ext/AGENTS.md §6).",
+    "scripts": {
+        "typecheck": "tsc --noEmit",
+        "build": "rsbuild build",
+        "dev": "rsbuild dev",
+        "test": "node --import ./test/register.mjs --test test/*.test.mjs",
+        "i18n:sync": "node scripts/sync-i18n.mjs",
+        "lint": "oxlint src test scripts rsbuild.config.ts",
+        "format:check": "oxfmt --check src test scripts rsbuild.config.ts"
+    },
+    "type": "module",
+    "dependencies": {
+        "@tanstack/react-query": "^5.101.2",
+        "@tanstack/react-router": "^1.170.17",
+        "axios": "^1.20.0",
+        "clsx": "^2.1.1",
+        "i18next": "^26.5.3",
+        "i18next-browser-languagedetector": "^8.2.1",
+        "lucide-react": "^1.23.0",
+        "react-i18next": "^17.1.0",
+        "tailwind-merge": "^3.7.0",
+        "zustand": "^5.0.14",
+        "react": "^19.2.7",
+        "react-dom": "^19.2.7"
+    },
+    "private": true
+}

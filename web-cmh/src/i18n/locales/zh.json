@@ -1,0 +1,21 @@
+{
+  "translation": {
+    "Available": "正常",
+    "Current account": "当前账号",
+    "Gateway status": "网关状态",
+    "Group": "分组",
+    "Loading account...": "正在读取账号…",
+    "Loading...": "读取中…",
+    "Operations console": "运营控制台",
+    "Overview": "概览",
+    "Page not found.": "页面不存在。",
+    "Request failed": "请求失败",
+    "Role": "角色",
+    "Session expired!": "会话已过期！",
+    "Session expired. Redirecting to sign in...": "会话已过期，正在跳转到登录页…",
+    "This independent console reuses the official sign-in session.": "此独立控制台复用官方登录会话。",
+    "Unable to verify your session. Reload to try again.": "无法验证会话，请刷新页面重试。",
+    "Unavailable": "不可用",
+    "Username": "用户名"
+  }
+}

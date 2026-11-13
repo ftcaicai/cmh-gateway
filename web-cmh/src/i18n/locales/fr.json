@@ -1,0 +1,21 @@
+{
+  "translation": {
+    "Available": "Disponible",
+    "Current account": "Compte actuel",
+    "Gateway status": "État de la passerelle",
+    "Group": "Groupe",
+    "Loading account...": "Chargement du compte…",
+    "Loading...": "Chargement…",
+    "Operations console": "Console de gestion",
+    "Overview": "Vue d’ensemble",
+    "Page not found.": "Page introuvable.",
+    "Request failed": "Échec de la requête",
+    "Role": "Rôle",
+    "Session expired!": "Session expirée !",
+    "Session expired. Redirecting to sign in...": "Session expirée. Redirection vers la connexion…",
+    "This independent console reuses the official sign-in session.": "Cette console indépendante réutilise la session de connexion officielle.",
+    "Unable to verify your session. Reload to try again.": "Impossible de vérifier votre session. Rechargez la page pour réessayer.",
+    "Unavailable": "Indisponible",
+    "Username": "Nom d’utilisateur"
+  }
+}
