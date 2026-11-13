@@ -29,6 +29,9 @@
 | H1-A | 凭据恢复启用预验 | 准入型 | `model/channel_plugin_credential.go` | UpdateChannelLocked / UpdateTaskPluginChannelLocked / UpdateScheduledChannelLocked | 2026-11-13 | callback后写前核对实际持久化快照，拒绝不得先发布Key/cache | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 控制器变更前准入 | 准入型 | `controller/channel.go` | AddChannel / UpdateChannel / normalizeChannel | 2026-11-13 | 规范化后、凭据检查与首次Key写之前预验；激活时Key+补丁+Ability通过UpdateWithAdmissionKey同事务 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 上游模型自动与手工应用 | 准入型 | `controller/channel_upstream_update.go` | updateChannelUpstreamModelSettings / checkAndPersistChannelUpstreamModelUpdates / applyChannelUpstreamModelUpdates | 2026-11-13 | 将选定模型delta应用于锁内当前行、持久化前准入；能力同步同事务，原noop路径保留 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-B | 分发与凭据选择前准入 | 准入型 | `middleware/distributor.go` | Distribute / SetupContextForSelectedChannel | 2026-11-13 | 公开名覆盖pin分支；选中渠道DB刷新及实际执行者复核在Key取用前；Setup错误不再忽略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-B | 估价与预扣前准入 | 准入型 | `relay/request_billing.go` | CheckRequestAdmission / PrepareRequestBilling | 2026-11-13 | 当前持久化身份复核，拒绝发生在token估算/免费跳过/预扣前；不改资金生命周期 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-B | 重试追加预留前准入 | 准入型 | `controller/relay.go` | Relay重试循环getChannel后 | 2026-11-13 | 以本次选择身份快照复核，先于PrepareTieredBillingForSelectedGroup，保留原退款策略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -62,4 +65,7 @@ model/channel.go
 model/channel_plugin_credential.go
 controller/channel.go
 controller/channel_upstream_update.go
+middleware/distributor.go
+relay/request_billing.go
+controller/relay.go
 ```

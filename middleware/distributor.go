@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -49,6 +50,15 @@ func Distribute() func(c *gin.Context) {
 		if err != nil {
 			abortWithOpenAiMessage(c, invalidRequestStatus(err), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
+		}
+		if core.ModelAdmissionEnabled() && (shouldSelectChannel || len(constraints.Pins) > 0) {
+			if err := core.Models.Check(c.Request.Context(), core.Admission{
+				Phase: core.AdmissionPublic,
+				Model: core.ModelIdentity{Public: modelRequest.Model},
+			}); err != nil {
+				abortWithOpenAiMessage(c, http.StatusForbidden, model.ErrChannelAdmissionDenied.Error(), types.ErrorCodeAccessDenied)
+				return
+			}
 		}
 		_, pinned, _ := constraints.ResolvedPin()
 		if !pinned {
@@ -131,7 +141,15 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		if pinned || shouldSelectChannel {
+			if setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model); setupErr != nil {
+				service.RecordRequestPolicyTermination(c, setupErr)
+				abortWithOpenAiMessage(c, setupErr.StatusCode, setupErr.MaskSensitiveError(), setupErr.GetErrorCode())
+				return
+			}
+		} else {
+			c.Set("original_model", modelRequest.Model)
+		}
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
@@ -621,8 +639,42 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		logTaskPluginChannelDecision(c, nil, modelName, "channel_rejected", "nil_channel")
 		return types.NewError(errors.New("channel is nil"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
+	admissionActive := core.ModelAdmissionEnabled()
+	var admission core.Admission
+	if admissionActive {
+		// Selection can use cached snapshots; an attempt must use the current
+		// persisted channel, including its key, without mutating the caller's copy.
+		fresh, err := model.GetChannelById(channel.Id, true)
+		if err != nil || fresh == nil || fresh.Id != channel.Id || fresh.Status != common.ChannelStatusEnabled {
+			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		channel = fresh
+		group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+		if group == "auto" {
+			group = common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+		}
+		if group != "" && !slices.Contains(strings.Split(channel.Group, ","), group) {
+			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		constraints := service.GetChannelConstraints(c)
+		if pin, pinned, _ := constraints.ResolvedPin(); pinned && pin.ChannelId != channel.Id {
+			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		// GetSetting may repair malformed stored JSON. Reject it read-only
+		// before plugin reconciliation can call that getter.
+		var setting dto.ChannelSettings
+		if channel.Setting != nil && *channel.Setting != "" {
+			if err := common.UnmarshalJsonStr(*channel.Setting, &setting); err != nil {
+				return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+			}
+		}
+		admission = model.ChannelModelAdmission(channel, modelName, core.AdmissionAttempt, constraints.Filters...)
+	}
 	if expectedPlugin != "" && !channelMatchesExpectedTaskPlugin(c, channel, expectedPlugin) {
 		logTaskPluginChannelDecision(c, channel, modelName, "channel_rejected", "identity_mismatch")
+		if admissionActive {
+			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
 		return types.NewError(
 			errors.New("selected channel does not match the pinned task plugin"),
 			types.ErrorCodeGetChannelFailed,
@@ -668,12 +720,19 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 			)
 		}
 	}
-	common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
-	common.SetContextKey(c, constant.ContextKeyChannelName, channel.Name)
-	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
-	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
-	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())
-	otherSettings := channel.GetOtherSettings()
+	var otherSettings dto.ChannelOtherSettings
+	if admissionActive {
+		if channel.OtherSettings != "" {
+			if err := common.UnmarshalJsonStr(channel.OtherSettings, &otherSettings); err != nil {
+				return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+			}
+		}
+		if preset := common.GetAdvancedCustomPreset(channel.Type); preset != nil {
+			otherSettings.AdvancedCustom = preset
+		}
+	} else {
+		otherSettings = channel.GetOtherSettings()
+	}
 	// An ordinary request on a task plugin channel runs on the relay routes of
 	// its plugin, pinned for the request like a task relay pins its plugin.
 	var providerPlugin any
@@ -684,6 +743,41 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 			otherSettings.AdvancedCustom = plugin.Meta.ChannelRelayConfig(plugin.ChannelConfigFor(otherSettings.PluginConfig))
 		}
 	}
+	if admissionActive {
+		// A request-pinned executor can outlive the registry generation used by
+		// the channel projection. It must never be relabeled builtin; artifact
+		// approval belongs to the later execution-plan boundary.
+		actualPlugin := providerPlugin != nil || c.GetString("expected_task_plugin_key") != ""
+		if value, exists := c.Get(jsplugin.ContextKeyPinnedPlugin); exists {
+			if pinned, ok := value.(jsplugin.PinnedPlugin); ok && pinned.Plugin != nil {
+				actualPlugin = true
+			}
+		}
+		if value, exists := c.Get(jsplugin.ContextKeyPinnedEndpoint); exists {
+			if pinned, ok := value.(jsplugin.PinnedEndpoint); ok && pinned.Plugin != nil {
+				actualPlugin = true
+			}
+		}
+		if value, exists := c.Get(jsplugin.ContextKeyPinnedRoute); exists {
+			if pinned, ok := value.(jsplugin.PinnedRoute); ok && pinned.Plugin != nil {
+				actualPlugin = true
+			}
+		}
+		if actualPlugin {
+			admission.Executor = core.ExecutorIdentity{}
+		}
+		if err := core.Models.Check(c.Request.Context(), admission); err != nil {
+			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		if matches, _ := model.ChannelSatisfiesFilters(channel, modelName, service.GetChannelConstraints(c).Filters); !matches {
+			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	}
+	common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
+	common.SetContextKey(c, constant.ContextKeyChannelName, channel.Name)
+	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
+	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
+	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())
 	common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, otherSettings)
 	common.SetContextKey(c, constant.ContextKeyProviderPlugin, providerPlugin)
 	switch channel.Type {

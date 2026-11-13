@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
@@ -212,6 +213,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		service.AppendUsedChannel(c, channel.Id)
+		if core.ModelAdmissionEnabled() {
+			// Handlers initialize ChannelMeta after billing, so it may still name
+			// the previous attempt. Admission uses this selection-only snapshot.
+			admissionInfo := *relayInfo
+			admissionInfo.ChannelMeta = &relaycommon.ChannelMeta{ChannelId: channel.Id, ChannelType: channel.Type}
+			if newAPIError = relay.CheckRequestAdmission(c, &admissionInfo); newAPIError != nil {
+				break
+			}
+		}
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
 			break

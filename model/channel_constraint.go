@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
 )
@@ -53,6 +54,12 @@ func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase
 	admission.Channel = core.ChannelIdentity{Known: true, ID: ch.Id, Type: ch.Type}
 	if phase != core.AdmissionChannelSave && ch.Status != common.ChannelStatusEnabled {
 		return admission
+	}
+	if phase != core.AdmissionChannelSave {
+		names := ch.GetModels()
+		if !slices.Contains(names, public) && !slices.Contains(names, ratio_setting.RoutingMatchModelName(public)) {
+			return admission
+		}
 	}
 	var mapping map[string]string
 	if raw := ch.GetModelMapping(); raw != "" && raw != "{}" {

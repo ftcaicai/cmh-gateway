@@ -15,7 +15,9 @@ import (
 	"github.com/QuantumNous/new-api/controller"
 	hostdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/ext/core"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
@@ -24,6 +26,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+type admissionBillingProbe struct{ reserve, settle, refund int }
+
+func (p *admissionBillingProbe) Settle(int) error              { p.settle++; return nil }
+func (p *admissionBillingProbe) Refund(*gin.Context)           { p.refund++ }
+func (p *admissionBillingProbe) NeedsRefund() bool             { return false }
+func (p *admissionBillingProbe) GetPreConsumedQuota() int      { return 0 }
+func (p *admissionBillingProbe) Reserve(int) error             { p.reserve++; return nil }
+func (p *admissionBillingProbe) ReserveBeforeSubmit(int) error { p.reserve++; return nil }
 
 func TestHostAdmissionMappingContract(t *testing.T) {
 	cases := []struct {
@@ -97,6 +108,99 @@ func TestHostAdmissionMappingContract(t *testing.T) {
 			assert.Equal(t, tc.requestModel, req.Model)
 		})
 	}
+}
+
+func runHostAdmissionRequestBoundary(t *testing.T, channels []model.Channel, gate *Gate, noop core.ModelGate) {
+	t.Helper()
+	newContext := func(id int, name string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+name+`","messages":[]}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("original_model", name)
+		common.SetContextKey(c, constant.ContextKeyChannelId, id)
+		common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+		common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channels[1].GetModelMapping())
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+		return c
+	}
+	allowedInfo := &relaycommon.RelayInfo{OriginModelName: "public-chat", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channels[1].Id, ChannelType: constant.ChannelTypeOpenAI, UpstreamModelName: "stale-not-authoritative"}}
+	allowedContext := newContext(channels[1].Id, "public-chat")
+	validSetup := newContext(channels[1].Id, "public-chat")
+	require.Nil(t, middleware.SetupContextForSelectedChannel(validSetup, &channels[1], "public-chat"))
+	assert.Equal(t, channels[1].Key, common.GetContextKeyString(validSetup, constant.ContextKeyChannelKey))
+	require.Nil(t, relay.CheckRequestAdmission(allowedContext, allowedInfo))
+	assert.Equal(t, "stale-not-authoritative", allowedInfo.UpstreamModelName, "identity check must not mutate relay state")
+	staleMappingContext := newContext(channels[1].Id, "public-chat")
+	common.SetContextKey(staleMappingContext, constant.ContextKeyChannelModelMapping, channels[0].GetModelMapping())
+	require.NotNil(t, relay.CheckRequestAdmission(staleMappingContext, allowedInfo), "fresh DB repair cannot authorize an older denied context mapping")
+	req := &kitdto.GeneralOpenAIRequest{Model: "original-request-must-not-change"}
+	probe := &admissionBillingProbe{}
+	deniedInfo := &relaycommon.RelayInfo{OriginModelName: "public-chat", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channels[0].Id, ChannelType: constant.ChannelTypeOpenAI}, Request: req, Billing: probe}
+	apiErr := relay.PrepareRequestBilling(newContext(channels[0].Id, "public-chat"), deniedInfo)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.Zero(t, probe.reserve)
+	assert.Zero(t, probe.settle)
+	assert.Zero(t, probe.refund)
+	assert.Equal(t, "original-request-must-not-change", req.Model)
+	assert.Zero(t, deniedInfo.FinalPreConsumedQuota)
+	assert.Zero(t, deniedInfo.GetEstimatePromptTokens(), "denied request must stop before token estimation")
+	assert.NotContains(t, apiErr.Error(), "unapproved-target")
+	// The ordinary initial path has nil ChannelMeta until the handler. Its
+	// admission-only snapshot still rejects before estimation or free-model skip.
+	initial := &relaycommon.RelayInfo{OriginModelName: "public-chat", Request: req, Billing: probe}
+	require.NotNil(t, relay.PrepareRequestBilling(newContext(channels[0].Id, "public-chat"), initial))
+	assert.Nil(t, initial.ChannelMeta)
+	assert.Zero(t, probe.reserve)
+
+	// Removing a model from an otherwise enabled cached selection must revoke
+	// this attempt even when a mapping entry for that old name still exists.
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channels[1].Id).Update("models", "gpt-4o-mini").Error)
+	require.NotNil(t, middleware.SetupContextForSelectedChannel(newContext(channels[1].Id, "public-chat"), &channels[1], "public-chat"))
+	require.NotNil(t, relay.CheckRequestAdmission(allowedContext, allowedInfo))
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channels[1].Id).Update("models", channels[1].Models).Error)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channels[1].Id).Update("group", "other-group").Error)
+	require.NotNil(t, middleware.SetupContextForSelectedChannel(newContext(channels[1].Id, "public-chat"), &channels[1], "public-chat"))
+	require.NotNil(t, relay.CheckRequestAdmission(allowedContext, allowedInfo))
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channels[1].Id).Update("group", "default").Error)
+	// A cached chosen channel may become disabled before credential selection.
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channels[1].Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	setupContext := newContext(channels[1].Id, "public-chat")
+	setupErr := middleware.SetupContextForSelectedChannel(setupContext, &channels[1], "public-chat")
+	require.NotNil(t, setupErr)
+	_, credentialPublished := common.GetContextKey(setupContext, constant.ContextKeyChannelKey)
+	assert.False(t, credentialPublished, "rejected setup cannot publish a channel credential")
+	require.NotNil(t, relay.CheckRequestAdmission(allowedContext, allowedInfo))
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channels[1].Id).Update("status", common.ChannelStatusEnabled).Error)
+
+	distributor := gin.New()
+	reached := 0
+	distributor.POST("/v1/chat/completions", middleware.Distribute(), func(c *gin.Context) { reached++; c.Status(http.StatusNoContent) })
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"not-published","messages":[]}`))
+	r.Header.Set("Content-Type", "application/json")
+	distributor.ServeHTTP(w, r)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Zero(t, reached, "public denial stops before channel selection/downstream dispatch")
+	assert.NotContains(t, w.Body.String(), "fixture")
+	readTask := model.Task{ID: 94001, TaskID: "task_cmh_admission_read", UserId: 1, Properties: model.Properties{OriginModelName: "not-published"}}
+	require.NoError(t, model.DB.Create(&readTask).Error)
+	defer func() { require.NoError(t, model.DB.Where("id = ?", readTask.ID).Delete(&model.Task{}).Error) }()
+	for _, limited := range []bool{false, true} {
+		reads := gin.New()
+		reads.GET("/v1/videos/:task_id", func(c *gin.Context) {
+			c.Set("id", 1)
+			common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, limited)
+			common.SetContextKey(c, constant.ContextKeyTokenModelLimit, map[string]bool{"not-published": true})
+			c.Next()
+		}, middleware.Distribute(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+		rw := httptest.NewRecorder()
+		reads.ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/v1/videos/task_cmh_admission_read", nil))
+		assert.Equal(t, http.StatusNoContent, rw.Code, "existing task read is not a new submission; model-limited=%v", limited)
+	}
+	core.Models = noop
+	assert.Nil(t, relay.CheckRequestAdmission(nil, nil), "default boundary must not create new context or DB dependencies")
+	core.Models = gate
 }
 
 func runHostAdmissionWrites(t *testing.T, gate *Gate, noop core.ModelGate) {
@@ -540,6 +644,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.True(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeOpenAI))
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeAnthropic))
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
+	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
 	runHostAdmissionWrites(t, gate, oldGate)
 	owners, err := model.GetPreferredModelOwnerChannelTypes([]string{"gpt-4o-mini"}, []string{"default"})
 	require.NoError(t, err)
