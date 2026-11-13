@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `ccb26ae2b`：main/develop一致，差异门禁两次success（43460203279 / 43460173896），本轮task content目标待提交。48/6000规则已落实；完整Ubuntu CI证据见 `acceptance/p2/H1-closeout-approval.md`。分支保护未认证。所有Gate仍noop。
+- 最近已推 `2dec61dd5`：main/develop一致，差异门禁两次success（43463913669 / 43463887927），本轮extension continuation archive待提交。48/6000规则已落实；完整Ubuntu CI证据见 `acceptance/p2/H1-closeout-approval.md`。分支保护未认证。所有Gate仍noop。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -23,7 +23,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1-C本轮taskcontent：持久task Origin/Upstream fallback+actual channel/type/URL/Host/method exacttask_content检查，初始发送和每redirect修改credential/headers后预验，原owner/auth/SSRF/Range/HEAD不变。真实proxyTaskMedia初始拒0、准206Range/securityheaders保持、credentialless第二hop未批0/单独批准流media、旧Upstream空回退Origin；controller既有集中测试新126行同计预算。真三库SQLite3.50.4 pkg0.334/MySQL8.0.44 pkg0.595/PG17.12 pkg0.468全过，定向媒体+service/task/ext tests/vet/buildexit0；独立review无限定范围阻断。证据 `acceptance/p2/H1-C-task-content.md`。未声称公共auth全E2E/source配置持久冻结/钱账通过，全局Gate不安装。
+3. H1-C本轮extension continuation档案：core task/user/channel绑定ref/artifact/purpose合同、Store AES256GCM随机nonce+schema/Binding/Ref/KeyIDAAD、immutableCreateConflict后authLoad、严格sourcehash+runtime对象exactbytes界限；显式未注册cmh_task_continuations migration，MySQL大文本容量。真实三库fresh/repeat2+已有数据repeat2/70KiB源码/独立重开连接Store恢复、错task/user/channel/ref/key/purpose拒、inputkeycopy+轮换旧读新写+buffercopy、密文移植/损坏拒且Save不修复全过（SQLite0.06/MySQL0.18/PG0.21包5.890s）；ext tests/vet/buildexit0，独立安全review无本未启用基础范围问题。证据 `acceptance/p2/H1-C-continuation-archive.md`。官方本轮0修改，未接poll/sourcecompile/taskref/启动密钥或资金逻辑。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -41,7 +41,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续持久任务冻结：本轮只读核实TaskPluginSnapshot仅审计Key/version/generation；官方版本表能查old override SourceHash但可删除，factory只当前embed，Registry无耐久旧源，故GetBySource/hash字段不足。需ext不可变加密档案+task-bound ref，提交成功前捕获actual source/config/targets且只存safe refs到TaskPrivateExecution，不复制source/secrets进官方snapshot；unpublished CompilePlugin恢复旧源，poll按ref+CredentialAccount分批、content同ref。缺/损档必须hold/recoverable，不可落普通PollFailures自动终态/退款（现poll代码会这样）。尚需先纯档案/DTO+三库roundtrip，再真实一task restart A→B仍A查询/newsubmit obeycurrent，无financial架构偷改。candidategeneration/affinity/Save目录/type60/启动加载也未收口，所有Gate未装。
+- 接续host冻结投影/旧源恢复：纯加密archive+DTO已验，现需host版本化runtime投影（无APIKey/credentialblob，只保必要config/route/base/proxy/headers/param/targets身份）与unpublished CompilePlugin exactsource，不替全局Registry发布；提交前耐久Save并TaskPrivate只存safe ref，taskawarepoll/content/report Load。当前只有审计snapshot、版本表可删不能代档案，按ref+CredentialAccount分批。缺档要hold不落普通PollFailures自动退款/timeout终态，尚需设计完整恢复/人工修复边界，不能私改钱账。启动key来源/备份/跨节点GCM预算和旧key保留未落，纯constructor不算生产配置。另candidate generation/affinity/Save目录/type60/启动实际gate都未完。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 
