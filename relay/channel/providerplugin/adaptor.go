@@ -21,7 +21,9 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -173,20 +175,32 @@ func (a *Adaptor) PrepareWebSocket(c *gin.Context, info *relaycommon.RelayInfo) 
 // exports exchangeKey.
 func (a *Adaptor) prepareKey(c *gin.Context, info *relaycommon.RelayInfo) error {
 	if a.prepared {
-		return nil
+		return a.checkExecution(c, info)
 	}
-	a.prepared = true
+	if core.ModelAdmissionEnabled() && (c == nil || c.Request == nil || c.Request.URL == nil || info == nil || info.ChannelMeta == nil) {
+		return model.ErrChannelAdmissionDenied
+	}
+	if !core.ModelAdmissionEnabled() {
+		a.prepared = true // Preserve the upstream default path.
+	}
 	if err := a.bind(c, info); err != nil {
 		return err
 	}
 	if err := a.useFreshCredential(c, info); err != nil {
 		return err
 	}
-	return a.useToken(c, info)
+	if err := a.useToken(c, info); err != nil {
+		return err
+	}
+	a.prepared = true
+	return nil
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
 	if err := a.prepareKey(c, info); err != nil {
+		return nil, err
+	}
+	if err := a.checkExecution(c, info); err != nil {
 		return nil, err
 	}
 	_, pluginRoute := jsplugin.SplitProviderConverter(a.route.Converter)
@@ -519,6 +533,9 @@ func (a *Adaptor) bind(c *gin.Context, info *relaycommon.RelayInfo) error {
 	value, _ := common.GetContextKey(c, constant.ContextKeyProviderPlugin)
 	pinned, ok := value.(jsplugin.PinnedPlugin)
 	if !ok || pinned.Plugin == nil || !pinned.Plugin.Meta.HasProviderPart() {
+		if core.ModelAdmissionEnabled() {
+			return model.ErrChannelAdmissionDenied
+		}
 		return errors.New("task plugin channel has no plugin with relay routes")
 	}
 	a.plugin = pinned.Plugin
@@ -528,6 +545,9 @@ func (a *Adaptor) bind(c *gin.Context, info *relaycommon.RelayInfo) error {
 	}
 	route, ok := a.plugin.Meta.RelayRoute(strings.Split(path, "?")[0], info.OriginModelName)
 	if !ok {
+		if core.ModelAdmissionEnabled() {
+			return model.ErrChannelAdmissionDenied
+		}
 		return fmt.Errorf("plugin %s has no relay route for %s and model %s", a.plugin.Meta.Key, path, info.OriginModelName)
 	}
 	a.route = route
@@ -535,7 +555,66 @@ func (a *Adaptor) bind(c *gin.Context, info *relaycommon.RelayInfo) error {
 		return types.NewError(fmt.Errorf("channel credential belongs to plugin %s", a.credential.Plugin), types.ErrorCodeChannelInvalidKey)
 	}
 	a.config = a.plugin.ChannelConfigFor(info.ChannelOtherSettings.PluginConfig)
-	return nil
+	return a.checkExecution(c, info)
+}
+
+// checkExecution uses the values the provider hooks actually read. It never
+// rebuilds that selected state from the fresh DB row it is checking against.
+func (a *Adaptor) checkExecution(c *gin.Context, info *relaycommon.RelayInfo) error {
+	if !core.ModelAdmissionEnabled() {
+		return nil
+	}
+	if c == nil || c.Request == nil || c.Request.URL == nil || info == nil || info.ChannelMeta == nil {
+		return model.ErrChannelAdmissionDenied
+	}
+	if info.ChannelId != common.GetContextKeyInt(c, constant.ContextKeyChannelId) || info.ChannelType != common.GetContextKeyInt(c, constant.ContextKeyChannelType) || info.OriginModelName != common.GetContextKeyString(c, constant.ContextKeyOriginalModel) {
+		return model.ErrChannelAdmissionDenied
+	}
+	if plan, exists := c.Get("request_plugin_plan"); exists && plan != nil {
+		return model.ErrChannelAdmissionDenied
+	}
+	value, _ := common.GetContextKey(c, constant.ContextKeyProviderPlugin)
+	pinned, ok := value.(jsplugin.PinnedPlugin)
+	if !ok || pinned.Plugin == nil || pinned.Plugin != a.plugin || !bytes.Equal(a.config, a.plugin.ChannelConfigFor(info.ChannelOtherSettings.PluginConfig)) {
+		return model.ErrChannelAdmissionDenied
+	}
+	if a.credential != nil {
+		current, found := jsplugin.DefaultRegistry.Generation().Get(a.plugin.Meta.Key)
+		if !found || current != a.plugin {
+			return model.ErrChannelAdmissionDenied
+		}
+	}
+	channelOther, exists := c.Get("cmh_plugin_channel_other")
+	other, ok := channelOther.(string)
+	if !exists || !ok {
+		return model.ErrChannelAdmissionDenied
+	}
+	group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	if group == "auto" {
+		group = common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+	}
+	if info.UsingGroup != group && info.UsingGroup != "auto" {
+		return model.ErrChannelAdmissionDenied
+	}
+	selected := &model.Channel{Id: info.ChannelId, Type: info.ChannelType, Status: common.ChannelStatusEnabled,
+		Models: info.OriginModelName, Group: group, BaseURL: &info.ChannelBaseUrl, Other: other}
+	values := []any{info.ChannelSetting, info.ChannelOtherSettings, info.ParamOverride, info.HeadersOverride}
+	fields := []**string{&selected.Setting, nil, &selected.ParamOverride, &selected.HeaderOverride}
+	for i, value := range values {
+		encoded, err := common.Marshal(value)
+		if err != nil {
+			return model.ErrChannelAdmissionDenied
+		}
+		raw := string(encoded)
+		if i == 1 {
+			selected.OtherSettings = raw
+		} else {
+			*fields[i] = &raw
+		}
+	}
+	mapping := common.GetContextKeyString(c, constant.ContextKeyChannelModelMapping)
+	selected.ModelMapping = &mapping
+	return model.CheckPluginExecution(c.Request.Context(), selected, pinned, info.OriginModelName, info.UpstreamModelName, "provider", c.Request.URL.Path)
 }
 
 // useFreshCredential refreshes a credential that expires within the request
@@ -637,6 +716,9 @@ func (a *Adaptor) canRenew() bool {
 // renew refreshes the request's credential, or drops its token and
 // exchanges the key again, after the upstream rejected it.
 func (a *Adaptor) renew(c *gin.Context, info *relaycommon.RelayInfo) error {
+	if err := a.checkExecution(c, info); err != nil {
+		return err
+	}
 	if a.credential == nil {
 		service.InvalidatePluginKeyToken(a.plugin, info.ChannelId, info.ApiKey, a.config, info.ChannelBaseUrl, a.token)
 		if err := a.useToken(c, info); err != nil {
@@ -657,6 +739,9 @@ func (a *Adaptor) renew(c *gin.Context, info *relaycommon.RelayInfo) error {
 // send relays the body over the matched route. A credential line is no API
 // key, so {api_key} in header overrides is empty while the request is built.
 func (a *Adaptor) send(c *gin.Context, info *relaycommon.RelayInfo, body io.Reader) (any, error) {
+	if err := a.checkExecution(c, info); err != nil {
+		return nil, err
+	}
 	if a.credential == nil {
 		return a.Adaptor.DoRequestWith(a, c, info, body)
 	}

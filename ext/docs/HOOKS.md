@@ -19,7 +19,7 @@
 | R3 | 已登录回跳 | 前端桥接 | `web/src/routes/(auth)/sign-in.tsx` | 22、43–46 | 2026-11-13 | 回源确认登录后的 beforeLoad 使用同一安全导航选项 | `rfc/2026-11-13-cross-app-login-return.md` | ftcaicai |
 | R3 | 桥接边界回归 | 测试 | `web/src/features/auth/lib/auth-redirect.test.ts` | 23–27、67–92 | 2026-11-13 | 复用既有测试文件验证路径边界及不安全回跳；计入官方文件与行数预算 | `rfc/2026-11-13-cross-app-login-return.md` | ftcaicai |
 | R4 | 自有插件工厂清单 | 测试 | `plugins/builtin_plugins_test.go` | requestPluginHooks 字典中的 cmh-param-normalize 条目 | 2026-11-13 | 保留精确目录集合断言并验证自有 outbound 工厂插件 | `rfc/2026-11-13-plugin-factory-inventory.md` | ftcaicai |
-| H1-A | 候选与目录准入 | 准入型 | `model/channel_constraint.go` | ChannelSatisfiesFilters / ChannelSatisfiesHostFilters / filterCandidateIDs / ResolveChannelModel / ChannelModelAdmission / PluginExecutorIdentity / ChannelPluginAdmission | 2026-11-13 | 共享映射解析与候选身份投影；DB/cache/pin候选在原过滤前准入 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-A | 候选与目录准入 | 准入型 | `model/channel_constraint.go` | ChannelSatisfiesFilters / ChannelSatisfiesHostFilters / filterCandidateIDs / ResolveChannelModel / ChannelModelAdmission / PluginExecutorIdentity / ChannelPluginAdmission / CheckPluginExecution | 2026-11-13 | 共享映射解析与候选身份投影；DB/cache/pin候选在原过滤前准入 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 模型能力目录准入 | 准入型 | `model/ability.go` | GetGroupEnabledModels / filterAbilitiesByConstraints / IsModelAdmittedForPublication | 2026-11-13 | 按允许候选过滤客户目录；已安装门禁的查询错误fail-closed | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 客户静态模型目录 | 准入型 | `controller/model.go` | DashboardListModels / RetrieveModel | 2026-11-13 | 默认透传，激活时批量过滤静态/插件目录和单模型retrieve；ListModels经分组能力投影复用 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 官方模型映射复用 | 准入桥接 | `relay/helper/model_mapped.go` | ModelMappedHelper | 2026-11-13 | 从原循环提取host解析API，保持默认mapping/selfmap语义；不代表预扣/派发前完整接线 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
@@ -37,6 +37,7 @@
 | H1-B | Realtime握手前准入 | 准入型 | `relay/websocket.go` | WssHelper初始化ChannelMeta后、DoRequest前 | 2026-11-13 | 实际握手逻辑目标必须先通过固定模型准入，不能联网后才拒绝映射不一致 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | 不可变插件源身份 | 身份投影 | `pkg/jsplugin/registry.go` | LoadedPlugin.SourceSHA256 / CompilePlugin | 2026-11-13 | 编译时记录原始源字节SHA256，版本标签不代替制品身份；不自动批准或激活插件 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | 共用插件hook源制品拒绝点 | 准入型（仅源身份） | `pkg/jsplugin/engine.go` | Compile / Engine.SourceSHA256 / Engine.call | 2026-11-13 | Engine保存不可变原始源摘要，所有Call路径在slot/runtime/JS执行之前调用core.PluginHooks；默认noop，不含config/model/target授权 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Provider实际配置执行前准入 | 准入型 | `relay/channel/providerplugin/adaptor.go` | bind / checkExecution / prepareKey / renew | 2026-11-13 | actual RelayInfo/已绑定a.config与fresh行双投影，credential refresh/key exchange/convert前及prepared复用重新检查；不覆盖后台credential服务或opaque最终正文 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -78,4 +79,5 @@ relay/channel/openai/relay_realtime.go
 relay/websocket.go
 pkg/jsplugin/registry.go
 pkg/jsplugin/engine.go
+relay/channel/providerplugin/adaptor.go
 ```

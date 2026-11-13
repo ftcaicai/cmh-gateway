@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `7ba2d94fd`：main/develop一致，CI两次success（43408383641 / 43408378322）；本轮type61固定投影与quota审计待提交，见下方。全局core.Models与PluginHooks仍默认noop。
+- 最近已推 `2bb4e5916`：main/develop一致，CI两次success（43415639277 / 43415630748）；本轮provider运行前检查待提交。全局core.Models与PluginHooks仍默认noop。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -23,7 +23,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1-C本轮type61 exact bound制品投影已接model+middleware+relay：Engine真实源getter比对Loaded源，role/path/fullbinding/effectiveconfig+base/controls envelope，实际pin generation指针；选中context冻结值与freshDB双投影比较。Setup/Check均拒绝retainedrequestplan，新旧config都批准仍拒绝错配；实三库最终PASS10.013s，相关tests/vet/fullbuildexit0。独立review指出candidate不带pinnedgeneration（切换前选路可能误拒旧已准源）、affinityruntimeoverride当前拒绝，明确未修兼容条件不冒称支持；task实际hook cache仍待接。证据 `acceptance/p2/H1-C-bound-projection.md`。所有Gate未安装。T1.6c独立清单24匹配（15production/5test/3def/1comment），parentgrep复核同值；见 `acceptance/p1/quota-write-inventory.md`，非资金唯一出口/守恒证明。
+3. H1-C本轮provider actual info/a.config→freshDB运行前CheckPluginExecution，初始refresh/exchange/convert前、prepared复用/renew/directsend重验。独立发现漏group、serviceRefresh解析CURRENT源、prepared早置失败绕过准备均修复；credential当前源!=oldpin保守拒绝（明确兼容限制）。真实loopback exchange/dispatch计数未准config0/0，允许1/1；首次exchange失败后同adaptor必须再exchange才dispatch；改target/group/config prepared拒绝，registry替换的过期credentialrefresh0。最终真三库4.018s、相关tests/vet/fullbuildexit0。独立fixreview闭合限定范围，证据 `acceptance/p2/H1-C-provider-runtime.md`。完整chain/WS/finalwire/后台credential并发TOCTOU仍未验、Gate不安装。前轮候选generation/affinity兼容条件仍在 `H1-C-bound-projection.md`，T1.6c审计已提交不是资金守恒。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -33,7 +33,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前27官方文件/2211行，H1专项硬上限32/2500（已明确批准），逐文件白名单不变。剩5文件/289行，文件/行均超80%，已独立范围复核；不压缩代码漏逻辑或偷增上限。未核验分支保护。
+- 门禁目前28官方文件/2328行，H1专项硬上限32/2500（已明确批准），逐文件白名单不变。剩4文件/172行，文件/行均超80%，已独立范围复核；不压缩代码漏逻辑或偷增上限。未核验分支保护。
 
 ## 临时资源与作业
 
@@ -41,7 +41,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续优先：type61 task/provider实际networkcapable hook前需与该hook真正接收的配置/模型同证据；task descriptor.Model/RewriteModel改后再验且不漏reserve。再完成candidate固定generation传递与affinityeffectiveenvelope关系，而不是删control比较。随后requestplugin有序chain不可选hostveto、最终URL/body模型/redirect/fetch、后台既有任务冻结能力、Save/目录无请求规格及type60歧义均未闭合。剩5files289rows不足全覆盖，不再凭估计承诺；下一批拿可读真实diff到硬上限前需用户一次性决策。不激活全局Gate或以长期未知拒绝冒充完整支持。
+- 接续优先：task driver提交前实际hookcache配置/模型证明与descriptor.Model/RewriteModel后再次检查；不能只拿selectedcontext假设真实hook一致。普通provider主路径已接，但chain/WS/后台credential仍缺，sourcegate当前未安装不兜底。candidate固定generation与affinityeffectiveenvelope兼容、requestplugin有序chain不可选hostveto、最终URL/body模型/redirect/fetch、后台既有任务冻结、Save/目录无请求规格/type60歧义均未闭合。剩4files172rows，下一批真实可读diff接近硬上限即需用户一次性规则决策；不多写审计冒充实现，不激活全部Gate。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 

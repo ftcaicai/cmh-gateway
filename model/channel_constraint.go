@@ -249,6 +249,30 @@ func ChannelPluginAdmission(ch *Channel, public string, phase core.AdmissionPhas
 	return admission, nil
 }
 
+// CheckPluginExecution checks runtime-owned settings, not a fresh row pretending
+// to be the selected snapshot. Source/config approval does not attest opaque wire bodies.
+func CheckPluginExecution(ctx context.Context, selected *Channel, pinned jsplugin.PinnedPlugin, public, upstream, role, pathScope string) error {
+	if !core.ModelAdmissionEnabled() {
+		return nil
+	}
+	if selected == nil || DB == nil || upstream == "" {
+		return ErrChannelAdmissionDenied
+	}
+	fresh, err := GetChannelById(selected.Id, false)
+	if err != nil || fresh == nil || fresh.Type != selected.Type || selected.Group == "" || !slices.Contains(strings.Split(fresh.Group, ","), selected.Group) {
+		return ErrChannelAdmissionDenied
+	}
+	actual, err := ChannelPluginAdmission(selected, public, core.AdmissionDispatch, pinned, role, pathScope)
+	if err != nil || actual.Model.Upstream != upstream {
+		return ErrChannelAdmissionDenied
+	}
+	current, err := ChannelPluginAdmission(fresh, public, core.AdmissionDispatch, pinned, role, pathScope)
+	if err != nil || current.Model != actual.Model || current.Executor != actual.Executor || core.Models.Check(ctx, actual) != nil {
+		return ErrChannelAdmissionDenied
+	}
+	return nil
+}
+
 var filterEvalOrder = []dto.ChannelFilterKind{
 	dto.FilterRequestPath,
 	dto.FilterTaskPluginEndpoint,

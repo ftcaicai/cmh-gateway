@@ -23,7 +23,9 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
+	"github.com/QuantumNous/new-api/relay/channel/providerplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	kittypes "github.com/QuantumNous/new-api/relaykit/types"
@@ -219,11 +221,36 @@ func runHostBoundProviderAdmission(t *testing.T, previousGate *Gate, noop core.M
 	registry := jsplugin.NewRegistry()
 	jsplugin.DefaultRegistry = registry
 	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
-	const source = `export const meta={apiVersion:1,key:"cmh-host-bound",name:"Host bound",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/chat/completions",upstream_path:"/generate",converter:"none"}],channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"standard"}}}};`
+	var exchanges, dispatches, refreshes atomic.Int32
+	var failExchange atomic.Bool
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/refresh" {
+			refreshes.Add(1)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		if r.URL.Path == "/token" {
+			exchanges.Add(1)
+			if failExchange.Load() {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write([]byte(`{"token":"fixture-token"}`))
+			return
+		}
+		dispatches.Add(1)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstreamServer.Close()
+	service.InitHttpClient()
+	const source = `export const meta={apiVersion:1,key:"cmh-host-bound",name:"Host bound",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/chat/completions",upstream_path:"/generate",converter:"none"}],channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"standard"}}}};
+export function exchangeKey(ctx) { const r=utils.fetch({url:ctx.baseUrl+"/token",method:"POST",body:JSON.stringify({tier:ctx.config.tier})}); if(r.status!==200) throw new Error("exchange failed"); return {token:r.body.token}; }
+export function refresh(ctx) { utils.fetch({url:ctx.baseUrl+"/refresh",method:"POST"}); return {credential:{fixture:true},expiresAt:utils.unixNow()+3600}; }`
 	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
 	require.NoError(t, err)
 	binding, mapping := `{"task_plugin_key":"cmh-host-bound"}`, `{"public-chat":"approved-target"}`
-	base := "https://fixture.invalid"
+	base := upstreamServer.URL
 	channel := model.Channel{Id: 95002, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Key: "fixture", Models: "public-chat", Group: "default", BaseURL: &base, Setting: &binding, ModelMapping: &mapping, OtherSettings: `{"plugin_config":{"tier":"standard"}}`}
 	core.Models = noop
 	require.NoError(t, model.DB.Create(&channel).Error)
@@ -256,6 +283,57 @@ func runHostBoundProviderAdmission(t *testing.T, previousGate *Gate, noop core.M
 	c.Set("request_plugin_plan", struct{}{})
 	require.NotNil(t, relay.CheckRequestAdmission(c, info), "retained plan remains unknown even after current request-plugin settings are empty")
 	delete(c.Keys, "request_plugin_plan")
+	actual := &relaycommon.RelayInfo{UsingGroup: "default", OriginModelName: "public-chat", RequestURLPath: c.Request.URL.Path, RelayMode: relayconstant.RelayModeChatCompletions, RelayFormat: kittypes.RelayFormatOpenAI}
+	actual.InitChannelMeta(c)
+	actual.UpstreamModelName = "approved-target"
+	changedActual := *actual
+	changedMeta := *actual.ChannelMeta
+	changedActual.ChannelMeta = &changedMeta
+	changedActual.ChannelOtherSettings.PluginConfig = common.RawMessage(`{"tier":"unapproved"}`)
+	deniedAdaptor := &providerplugin.Adaptor{}
+	deniedAdaptor.Init(&changedActual)
+	_, runtimeErr := deniedAdaptor.DoRequest(c, &changedActual, strings.NewReader(`{"model":"approved-target"}`))
+	require.Error(t, runtimeErr)
+	assert.Zero(t, exchanges.Load(), "actual unapproved hook config must fail before key-exchange fetch")
+	assert.Zero(t, dispatches.Load())
+	adaptor := &providerplugin.Adaptor{}
+	adaptor.Init(actual)
+	response, runtimeErr := adaptor.DoRequest(c, actual, strings.NewReader(`{"model":"approved-target"}`))
+	require.NoError(t, runtimeErr)
+	upstreamResponse, ok := response.(*http.Response)
+	require.True(t, ok)
+	require.NoError(t, upstreamResponse.Body.Close())
+	assert.Equal(t, int32(1), exchanges.Load())
+	assert.Equal(t, int32(1), dispatches.Load())
+	failedInfo := *actual
+	failedMeta := *actual.ChannelMeta
+	failedInfo.ChannelMeta = &failedMeta
+	failedInfo.ApiKey = "fixture-exchange-retry"
+	failedAdaptor := &providerplugin.Adaptor{}
+	failedAdaptor.Init(&failedInfo)
+	failExchange.Store(true)
+	_, runtimeErr = failedAdaptor.DoRequest(c, &failedInfo, strings.NewReader(`{"model":"approved-target"}`))
+	require.Error(t, runtimeErr)
+	assert.Equal(t, int32(2), exchanges.Load())
+	assert.Equal(t, int32(1), dispatches.Load())
+	failExchange.Store(false)
+	response, runtimeErr = failedAdaptor.DoRequest(c, &failedInfo, strings.NewReader(`{"model":"approved-target"}`))
+	require.NoError(t, runtimeErr)
+	upstreamResponse, ok = response.(*http.Response)
+	require.True(t, ok)
+	require.NoError(t, upstreamResponse.Body.Close())
+	assert.Equal(t, int32(3), exchanges.Load(), "retry must prepare the key again after failed exchange")
+	assert.Equal(t, int32(2), dispatches.Load())
+	actual.UpstreamModelName = "unapproved-target"
+	_, runtimeErr = adaptor.DoRequest(c, actual, strings.NewReader(`{"model":"unapproved-target"}`))
+	require.Error(t, runtimeErr, "prepared adaptor cannot bypass a changed logical target")
+	assert.Equal(t, int32(2), dispatches.Load())
+	actual.UpstreamModelName = "approved-target"
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("group", "removed").Error)
+	_, runtimeErr = adaptor.DoRequest(c, actual, strings.NewReader(`{"model":"approved-target"}`))
+	require.Error(t, runtimeErr, "removed using group must reject at runtime before dispatch")
+	assert.Equal(t, int32(2), dispatches.Load())
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("group", "default").Error)
 	planContext, _ := gin.CreateTestContext(httptest.NewRecorder())
 	planContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	common.SetContextKey(planContext, constant.ContextKeyUsingGroup, "default")
@@ -268,9 +346,23 @@ func runHostBoundProviderAdmission(t *testing.T, previousGate *Gate, noop core.M
 	_, err = registry.Register(source+"\nexport const revision=2;", jsplugin.Options{})
 	require.NoError(t, err)
 	require.Nil(t, relay.CheckRequestAdmission(c, info), "retained approved pinned source does not silently switch to new registry artifact")
+	credentialInfo := *actual
+	credentialMeta := *actual.ChannelMeta
+	credentialInfo.ChannelMeta = &credentialMeta
+	credentialInfo.ApiKey = `{"type":"plugin_credential","plugin":"cmh-host-bound","data":{"fixture":true},"expires_at":1}`
+	credentialAdaptor := &providerplugin.Adaptor{}
+	credentialAdaptor.Init(&credentialInfo)
+	_, runtimeErr = credentialAdaptor.DoRequest(c, &credentialInfo, strings.NewReader(`{"model":"approved-target"}`))
+	require.Error(t, runtimeErr, "credential service would resolve current replacement; it must not execute after approving old pinned source")
+	assert.Zero(t, refreshes.Load())
+	assert.Equal(t, int32(2), dispatches.Load())
 	changed := `{"plugin_config":{"tier":"premium"}}`
 	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("settings", changed).Error)
 	require.NotNil(t, relay.CheckRequestAdmission(c, info), "fresh config cannot authorize a different frozen hook config")
+	_, runtimeErr = adaptor.DoRequest(c, actual, strings.NewReader(`{"model":"approved-target"}`))
+	require.Error(t, runtimeErr, "prepared provider must revalidate fresh configuration before more work")
+	assert.Equal(t, int32(3), exchanges.Load())
+	assert.Equal(t, int32(2), dispatches.Load())
 	changedChannel := channel
 	changedChannel.OtherSettings = changed
 	freshIdentity, err := model.PluginExecutorIdentity(&changedChannel, plugin, uint64(identity.Generation), "provider", "/v1/chat/completions")
