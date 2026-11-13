@@ -45,10 +45,9 @@ func ResolveChannelModel(public string, mapping map[string]string) (string, erro
 	}
 }
 
-// ChannelModelAdmission projects only identities proven by the host. This first
-// subset does not resolve plugin execution plans or their approved artifacts;
-// those candidates deliberately retain an unknown executor, never "builtin".
-func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase, filters ...dto.ChannelFilter) core.Admission {
+// channelModelProjection resolves only authoritative channel/model/mapping values.
+// Executor identity is supplied by the caller's explicit publication or runtime role.
+func channelModelProjection(ch *Channel, public string, phase core.AdmissionPhase) core.Admission {
 	admission := core.Admission{Phase: phase, Model: core.ModelIdentity{Public: public}}
 	if ch == nil {
 		return admission
@@ -74,6 +73,17 @@ func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase
 		return admission
 	}
 	admission.Model.Upstream = upstream
+	return admission
+}
+
+// ChannelModelAdmission projects an explicit executor role when the host has a
+// witness. Publication approval is distinct from permission to execute any route.
+func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase, filters ...dto.ChannelFilter) core.Admission {
+	admission := channelModelProjection(ch, public, phase)
+	if ch == nil || admission.Model.Upstream == "" {
+		return admission
+	}
+	upstream := admission.Model.Upstream
 	if ch.Type == constant.ChannelTypeTaskPlugin && phase != core.AdmissionChannelSave && len(filters) > 0 {
 		var setting kitdto.ChannelSettings
 		if ch.Setting != nil && common.UnmarshalJsonStr(*ch.Setting, &setting) == nil {
@@ -119,6 +129,32 @@ func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase
 			return admission
 		}
 	}
+	if ch.Type == constant.ChannelTypeTaskPlugin && len(filters) == 0 && (phase == core.AdmissionChannelSave || phase == core.AdmissionCandidate) {
+		generation := jsplugin.DefaultRegistry.Generation()
+		loaded, found := generation.Get(setting.TaskPluginKey)
+		if !found {
+			return admission
+		}
+		var declared string
+		if loaded.Meta.HasTaskPart() {
+			for _, name := range []string{public, upstream, reasoning.BaseModelName(public), reasoning.BaseModelName(upstream)} {
+				canonical, ok := generation.CanonicalModel(name)
+				if ok && slices.Contains(loaded.Meta.Models, canonical) {
+					declared = canonical
+					break
+				}
+			}
+		}
+		if declared == "" && !loaded.Meta.RelaysModel(public) {
+			return admission
+		}
+		executor, err := PluginExecutorIdentity(ch, loaded, generation.Number, "publication", "/v1/models")
+		if err != nil {
+			return admission
+		}
+		admission.Model.Declared, admission.Executor = declared, executor
+		return admission
+	}
 	if ch.Type == constant.ChannelTypeTaskPlugin || setting.TaskPluginKey != "" || len(setting.TaskExtendPluginKeys) > 0 || len(setting.RequestPlugins) > 0 {
 		return admission
 	}
@@ -147,7 +183,7 @@ func PluginExecutorIdentity(ch *Channel, loaded *jsplugin.LoadedPlugin, generati
 	denied := errors.New("model admission denied")
 	if ch == nil || ch.Type != constant.ChannelTypeTaskPlugin || loaded == nil || loaded.Engine == nil ||
 		loaded.SourceSHA256() == "" || loaded.SourceSHA256() != loaded.Engine.SourceSHA256() ||
-		(role != "task" && role != "provider") || pathScope == "" || !strings.HasPrefix(pathScope, "/") || strings.ContainsAny(pathScope, "?#\\\\\r\n") {
+		(role != "task" && role != "provider" && (role != "publication" || pathScope != "/v1/models")) || pathScope == "" || !strings.HasPrefix(pathScope, "/") || strings.ContainsAny(pathScope, "?#\\\\\r\n") {
 		return core.ExecutorIdentity{}, denied
 	}
 	var setting kitdto.ChannelSettings
@@ -217,8 +253,8 @@ func stringPointerValue(value *string) string {
 
 // ChannelPluginAdmission requires the exact pinned artifact, never a metadata owner.
 func ChannelPluginAdmission(ch *Channel, public string, phase core.AdmissionPhase, pinned jsplugin.PinnedPlugin, role, pathScope string) (core.Admission, error) {
-	admission := ChannelModelAdmission(ch, public, phase)
-	if pinned.Generation == nil || pinned.Plugin == nil {
+	admission := channelModelProjection(ch, public, phase)
+	if (role != "task" && role != "provider") || pinned.Generation == nil || pinned.Plugin == nil {
 		return admission, errors.New("model admission denied")
 	}
 	published, ok := pinned.Generation.Get(pinned.Plugin.Meta.Key)

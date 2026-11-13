@@ -1619,6 +1619,57 @@ func TestHostAdmissionCandidateAndCatalog(t *testing.T) {
 	}
 }
 
+func runHostPluginPublication(t *testing.T, noop core.ModelGate) {
+	t.Helper()
+	oldGate, oldRegistry := core.Models, jsplugin.DefaultRegistry
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	defer func() { core.Models = oldGate; jsplugin.DefaultRegistry = oldRegistry }()
+	const source = `export const meta={apiVersion:1,key:"cmh-publication",name:"Publication",version:"1.0.0",author:{name:"Test"},models:["published-task"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"};}
+export function parseSubmitResponse(){return {taskId:"local"};}
+export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}`
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	setting, base := `{"task_plugin_key":"cmh-publication"}`, "https://fixture.invalid"
+	channel := model.Channel{Id: 95009, Name: "publication", Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Models: "published-task", Group: "default", Key: "fixture", BaseURL: &base, Setting: &setting}
+	public, err := New([]string{"published-task"}, []string{"61"})
+	require.NoError(t, err)
+	upstream, err := New([]string{"published-task"}, nil)
+	require.NoError(t, err)
+	runtime, err := model.PluginExecutorIdentity(&channel, plugin, registry.Generation().Number, "task", "/v1/tasks/cmh-publication")
+	require.NoError(t, err)
+	runtimeOnly, err := NewGate(public, upstream, []core.ExecutorIdentity{runtime})
+	require.NoError(t, err)
+	core.Models = runtimeOnly
+	assert.Error(t, model.ValidateChannelAdmissionSnapshot(t.Context(), &channel), "runtime approval cannot authorize publication")
+	publication, err := model.PluginExecutorIdentity(&channel, plugin, registry.Generation().Number, "publication", "/v1/models")
+	require.NoError(t, err)
+	_, err = model.PluginExecutorIdentity(&channel, plugin, registry.Generation().Number, "publication", "/v1/tasks/cmh-publication")
+	require.Error(t, err)
+	_, err = model.ChannelPluginAdmission(&channel, "published-task", core.AdmissionDispatch, jsplugin.PinnedPlugin{Plugin: plugin, Generation: registry.Generation()}, "publication", "/v1/models")
+	require.Error(t, err)
+	publicationGate, err := NewGate(public, upstream, []core.ExecutorIdentity{publication})
+	require.NoError(t, err)
+	core.Models = publicationGate
+	require.NoError(t, channel.Insert())
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id = ?", channel.Id).Delete(&model.Channel{}).Error)
+		model.InitChannelCache()
+	}()
+	assert.Contains(t, model.GetGroupEnabledModels("default"), "published-task")
+	actual, err := model.ChannelPluginAdmission(&channel, "published-task", core.AdmissionDispatch, jsplugin.PinnedPlugin{Plugin: plugin, Generation: registry.Generation()}, "task", "/v1/tasks/cmh-publication")
+	require.NoError(t, err)
+	assert.Error(t, publicationGate.Check(t.Context(), actual), "publication approval cannot authorize task dispatch")
+	_, err = registry.RegisterFactory(source+"\nexport const revision=2;", jsplugin.Options{})
+	require.NoError(t, err)
+	assert.NotContains(t, model.GetGroupEnabledModels("default"), "published-task", "source replacement revokes exact publication match")
+	assert.Error(t, model.ValidateChannelAdmissionSnapshot(t.Context(), &channel))
+}
+
 func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	t.Helper()
 	oldDB, oldLogDB := model.DB, model.LOG_DB
@@ -1711,6 +1762,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.True(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeOpenAI))
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeAnthropic))
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
+	runHostPluginPublication(t, oldGate)
 	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
 	runHostBoundProviderAdmission(t, gate, oldGate)
 	runHostProviderChainAdmission(t, gate, oldGate)
