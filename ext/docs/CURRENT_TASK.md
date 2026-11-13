@@ -1,6 +1,8 @@
 # 连续推进检查点
 
-更新时间：2026-11-13；范围 P0→P1→P2；当前状态：P0 HTTP 契约通过，浏览器登录返回仍待验；P1 资金设计复核未通过。
+更新时间：2026-11-13；范围 P0→P1→P2；当前状态：P0 HTTP/Chrome会话契约通过，官方UI自动返回仍待验；P1资金设计复核未通过。
+
+已推源码：`ab4c69bee`，远程 main/develop 完全一致；GitHub cmh-upstream-diff 两次 success（43367336940 / 43367330565）。不将此门禁成功解释为分支保护已启用。
 
 ## 当前目标
 
@@ -32,6 +34,6 @@
 ## 本轮资源与作业
 
 - 本地验收二进制 `%TEMP%/cmh-gateway-proto.exe`，官方 `web/dist/index.html` 仅本轮新增的本地 embed 占位，非生产构建；需保留直到本轮验收结束，之后按精确路径清理。
-- 所有 loopback 验收服务已请求终止，作业 pwsh-cbeb81ac5a80489d、pwsh-4bda4b3d3df5496a 已收输出；pwsh-e627f46499c346d9 需收终止输出。构建 pwsh-9a9565ed24074527 成功且已收；race pwsh-5d04b3b69e8c44bf 已收失败。
+- 所有 loopback 验收服务与独立Chrome均已关闭且输出已收；HTTP三个实例和浏览器实例由 job_kill/Browser.close 退出，不是运行失败。构建任务 pwsh-9a9565ed24074527、pwsh-1423a3758b4a4d03 和前端 pwsh-2130ccbf4ce047a4 全部 exit0 已收；race pwsh-5d04b3b69e8c44bf 因CGO未执行已收。
 - 临时 SQLite `cmh-p0-fixture-*.db` 是合成验收库，可能含仅测试凭据，禁止提交；不能按广泛匹配清理，先列精确绝对路径归属。
 - 当前未提交内容含前一轮尚未完成的 console/web-cmh，加上本轮隔离修复与审查记录；提交前逐项检查，不 `git add -A` 扫进临时数据库。
