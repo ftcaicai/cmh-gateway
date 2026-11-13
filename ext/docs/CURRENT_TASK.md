@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `61e7d0b16`：main/develop一致，差异门禁两次success（43494738314 / 43494728871），本轮verified operator loader待提交。48/6000规则已落实；完整Ubuntu CI证据见 `acceptance/p2/H1-closeout-approval.md`。分支保护未认证。所有Gate仍noop，TaskContinuations默认nil。
+- 最近已推 `a758574ae`：main/develop一致，差异门禁两次success（43496724567 / 43496716171）。当前核实sharedendpoint提前预选需要第49官方文件例外，**待负责人决定，未改规则或该官方文件**；申请见 `rfc/2026-11-14-shared-endpoint-file-exception.md`。所有Gate仍noop，TaskContinuations默认nil。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
