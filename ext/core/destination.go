@@ -18,6 +18,10 @@ type DestinationAdmission struct {
 	Kind, Method, AddressSHA256, HostSHA256 string
 	Model                                   ModelIdentity
 	Channel                                 ChannelIdentity
+	// Plugin fetches may run before selection or after settlement. They bind
+	// their actual source/capability and hook instead of fabricating a model.
+	Executor ExecutorIdentity
+	Hook     string
 }
 
 type DestinationGate interface {

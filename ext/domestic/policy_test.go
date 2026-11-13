@@ -324,6 +324,26 @@ func TestDestinationPolicyExactRelations(t *testing.T) {
 	empty, err := NewDestinationPolicy(nil)
 	require.NoError(t, err)
 	assert.ErrorIs(t, empty.CheckDestination(t.Context(), admission), ErrAdmissionDenied)
+	_, _, executor, _ := admissionFixture(t)
+	fetch := core.DestinationAdmission{Kind: "plugin_fetch", Method: "POST", AddressSHA256: address, HostSHA256: core.DestinationHost("example.invalid"), Executor: executor, Hook: "refresh"}
+	fetchPolicy, err := NewDestinationPolicy([]core.DestinationAdmission{fetch})
+	require.NoError(t, err)
+	assert.NoError(t, fetchPolicy.CheckDestination(t.Context(), fetch))
+	fake := fetch
+	fake.Channel = admission.Channel
+	_, err = NewDestinationPolicy([]core.DestinationAdmission{fake})
+	require.Error(t, err)
+	fake = fetch
+	fake.Model = admission.Model
+	_, err = NewDestinationPolicy([]core.DestinationAdmission{fake})
+	require.Error(t, err)
+	fake = fetch
+	fake.Hook = "ingress"
+	assert.ErrorIs(t, fetchPolicy.CheckDestination(t.Context(), fake), ErrAdmissionDenied)
+	fake = admission
+	fake.Executor = executor
+	_, err = NewDestinationPolicy([]core.DestinationAdmission{fake})
+	require.Error(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	assert.ErrorIs(t, policy.CheckDestination(ctx, admission), context.Canceled)

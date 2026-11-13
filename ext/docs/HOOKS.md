@@ -48,6 +48,7 @@
 | H1-C | Provider多步/WS派发准入 | 准入型 | `relay/channel/providerplugin/chain.go` | sendStep / readStep / dialWebSocket / openWebSocket | 2026-11-13 | 每step签名联网/响应转换前、每次dial与初始message前复用actual runtime检查；不等于最终目的地审批 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Provider流转换/回写准入 | 准入型 | `relay/channel/providerplugin/stream.go` | streamConverter runtime check / Read / convertNext | 2026-11-13 | actual info与冻结hook配置一致复核，在读事件前后、转换/queue/回写与pending输出前检查；保留原中断计费 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Relay最终目的地准入 | 准入型 | `relay/channel/api_request.go` | CheckDestination / doRequest / DoWssRequest | 2026-11-13 | actual signed URL+effective Host摘要与channel/model/method关系审批，HTTP发送及WS握手前拒绝；普通relay保留3xx不跟随 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Plugin fetch目的地准入 | 准入型 | `service/provider_plugin.go` | PluginFetchExecutor / RequestPluginFetchExecutor / PluginFetcher / RequestPluginFetcher / sendPluginFetch | 2026-11-13 | actual源+网络能力摘要与hook/URL/Host关系，在client/网络前检查；不伪造未选channel/model，保留原allowedHosts/TLS/proxy/redirect规则 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -100,4 +101,5 @@ relay/requestplugin/requestplugin_test.go
 relay/channel/providerplugin/chain.go
 relay/channel/providerplugin/stream.go
 relay/channel/api_request.go
+service/provider_plugin.go
 ```

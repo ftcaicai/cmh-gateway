@@ -36,26 +36,38 @@ func NewDestinationPolicy(approvals []core.DestinationAdmission) (*DestinationPo
 }
 
 func validDestination(admission core.DestinationAdmission) bool {
-	if !admission.Channel.Known || admission.Channel.ID <= 0 || admission.Channel.Type <= 0 {
-		return false
-	}
-	switch admission.Kind {
-	case "relay_http":
-		switch admission.Method {
-		case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+	if admission.Kind == "plugin_fetch" {
+		if admission.Channel != (core.ChannelIdentity{}) || admission.Model != (core.ModelIdentity{}) || admission.Executor.Kind != "plugin" || admission.Hook == "" || len(admission.Hook) > 128 || !utf8.ValidString(admission.Hook) || strings.ContainsFunc(admission.Hook, unicode.IsControl) {
+			return false
+		}
+		if _, valid := approvedExecutorIdentity(admission.Executor); !valid {
+			return false
+		}
+		if admission.Method != "GET" && admission.Method != "HEAD" && admission.Method != "POST" {
+			return false
+		}
+	} else {
+		if admission.Executor != (core.ExecutorIdentity{}) || admission.Hook != "" || !admission.Channel.Known || admission.Channel.ID <= 0 || admission.Channel.Type <= 0 {
+			return false
+		}
+		switch admission.Kind {
+		case "relay_http":
+			switch admission.Method {
+			case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+			default:
+				return false
+			}
+		case "relay_websocket":
+			if admission.Method != "GET" {
+				return false
+			}
 		default:
 			return false
 		}
-	case "relay_websocket":
-		if admission.Method != "GET" {
-			return false
-		}
-	default:
-		return false
-	}
-	for _, name := range []string{admission.Model.Public, admission.Model.Upstream} {
-		if name == "" || len(name) > 255 || !utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
-			return false
+		for _, name := range []string{admission.Model.Public, admission.Model.Upstream} {
+			if name == "" || len(name) > 255 || !utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
+				return false
+			}
 		}
 	}
 	if len(admission.Model.Declared) > 255 || !utf8.ValidString(admission.Model.Declared) || strings.ContainsFunc(admission.Model.Declared, unicode.IsControl) {

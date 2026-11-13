@@ -18,6 +18,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -54,20 +55,56 @@ func PluginOfChannel(channel *model.Channel) (*jsplugin.LoadedPlugin, bool) {
 	return jsplugin.DefaultRegistry.Get(channel.GetSetting().TaskPluginKey)
 }
 
+// PluginFetchExecutor identifies a channel fetch capability, not the hook's full
+// config: this API only receives base URL, proxy and transport settings. Operators
+// must approve those exact inputs and each destination/hook relationship.
+func PluginFetchExecutor(plugin *jsplugin.LoadedPlugin, baseURL, proxy string, setting dto.ChannelSettings) (core.ExecutorIdentity, error) {
+	return pluginFetchExecutor(plugin, struct {
+		Version              int
+		Role, BaseURL, Proxy string
+		Settings             dto.ChannelSettings
+	}{1, "channel_fetch", baseURL, proxy, setting})
+}
+
+// RequestPluginFetchExecutor binds the original instance config, not a lossy
+// keyword summary or the current settings of an already-frozen request plan.
+func RequestPluginFetchExecutor(plugin *jsplugin.LoadedPlugin, config json.RawMessage) (core.ExecutorIdentity, error) {
+	return pluginFetchExecutor(plugin, struct {
+		Version int
+		Role    string
+		Config  json.RawMessage
+	}{1, "request_fetch", config})
+}
+
+func pluginFetchExecutor(plugin *jsplugin.LoadedPlugin, capability any) (core.ExecutorIdentity, error) {
+	if plugin == nil || plugin.Meta.Key == "" || plugin.Engine == nil || plugin.SourceSHA256() == "" || plugin.SourceSHA256() != plugin.Engine.SourceSHA256() {
+		return core.ExecutorIdentity{}, errors.New("request rejected")
+	}
+	encoded, err := common.Marshal(capability)
+	if err != nil {
+		return core.ExecutorIdentity{}, errors.New("request rejected")
+	}
+	return core.ExecutorIdentity{Kind: "plugin", Key: plugin.Meta.Key, SourceSHA256: plugin.Engine.SourceSHA256(), ConfigFingerprint: fmt.Sprintf("%x", sha256.Sum256(encoded))}, nil
+}
+
 // PluginFetcher returns the utils.fetch of a plugin's hooks on a channel: the
 // base URL host and the plugin's allowedHosts only, through the channel proxy,
 // with a redirect returned to the plugin as it is. setting decides TLS
 // verification; credential hooks pass none, so they always verify TLS.
 func PluginFetcher(plugin *jsplugin.LoadedPlugin, baseURL, proxy string, setting dto.ChannelSettings) jsplugin.Fetcher {
 	return func(ctx context.Context, request jsplugin.FetchRequest) (jsplugin.FetchResponse, error) {
+		var executor core.ExecutorIdentity
+		if core.DestinationAdmissionEnabled() {
+			var err error
+			executor, err = PluginFetchExecutor(plugin, baseURL, proxy, setting)
+			if err != nil {
+				return jsplugin.FetchResponse{}, err
+			}
+		}
 		if err := jsplugin.ValidateRequestURL(request.URL, baseURL, plugin.Meta.AllowedHosts); err != nil {
 			return jsplugin.FetchResponse{}, err
 		}
-		client, err := GetHttpClientWithProxySettings(proxy, setting)
-		if err != nil {
-			return jsplugin.FetchResponse{}, err
-		}
-		return sendPluginFetch(ctx, plugin, client, request)
+		return sendPluginFetch(ctx, plugin, executor, proxy, setting, request)
 	}
 }
 
@@ -78,24 +115,27 @@ func PluginFetcher(plugin *jsplugin.LoadedPlugin, baseURL, proxy string, setting
 // channel proxy and always verify TLS; a redirect reaches the plugin as it is.
 func RequestPluginFetcher(plugin *jsplugin.LoadedPlugin, config json.RawMessage) jsplugin.Fetcher {
 	return func(ctx context.Context, request jsplugin.FetchRequest) (jsplugin.FetchResponse, error) {
+		var executor core.ExecutorIdentity
+		if core.DestinationAdmissionEnabled() {
+			var err error
+			executor, err = RequestPluginFetchExecutor(plugin, config)
+			if err != nil {
+				return jsplugin.FetchResponse{}, err
+			}
+		}
 		hosts := append(slices.Clone(plugin.Meta.AllowedHosts), plugin.ConfigURLHosts(config)...)
 		if err := jsplugin.ValidateServiceURL(request.URL, hosts); err != nil {
 			return jsplugin.FetchResponse{}, err
 		}
-		client, err := GetHttpClientWithProxySettings("", dto.ChannelSettings{})
-		if err != nil {
-			return jsplugin.FetchResponse{}, err
-		}
-		return sendPluginFetch(ctx, plugin, client, request)
+		return sendPluginFetch(ctx, plugin, executor, "", dto.ChannelSettings{}, request)
 	}
 }
 
-// sendPluginFetch sends one checked utils.fetch request with client. A
+// sendPluginFetch sends one checked utils.fetch request after its exact
+// destination has passed admission, before acquiring a transport client. A
 // redirect reaches the plugin as it is; fetching its location is a new
 // request, checked and counted again.
-func sendPluginFetch(ctx context.Context, plugin *jsplugin.LoadedPlugin, client *http.Client, request jsplugin.FetchRequest) (jsplugin.FetchResponse, error) {
-	noRedirects := *client
-	noRedirects.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+func sendPluginFetch(ctx context.Context, plugin *jsplugin.LoadedPlugin, executor core.ExecutorIdentity, proxy string, setting dto.ChannelSettings, request jsplugin.FetchRequest) (jsplugin.FetchResponse, error) {
 	var body io.Reader
 	if request.Method == http.MethodPost {
 		body = strings.NewReader(request.Body)
@@ -106,6 +146,9 @@ func sendPluginFetch(ctx context.Context, plugin *jsplugin.LoadedPlugin, client 
 	}
 	req, err := http.NewRequestWithContext(ctx, request.Method, request.URL, body)
 	if err != nil {
+		if core.DestinationAdmissionEnabled() {
+			return jsplugin.FetchResponse{}, errors.New("request rejected")
+		}
 		return jsplugin.FetchResponse{}, err
 	}
 	if request.Method == http.MethodPost && request.BodyStream != nil {
@@ -114,6 +157,22 @@ func sendPluginFetch(ctx context.Context, plugin *jsplugin.LoadedPlugin, client 
 	for name, value := range request.Headers {
 		req.Header.Set(name, value)
 	}
+	if core.DestinationAdmissionEnabled() {
+		address, err := core.DestinationAddress(req.URL.String())
+		if err != nil || request.Hook == "" || plugin.Engine == nil || executor.SourceSHA256 != plugin.Engine.SourceSHA256() || executor.SourceSHA256 != plugin.SourceSHA256() {
+			return jsplugin.FetchResponse{}, errors.New("request rejected")
+		}
+		admission := core.DestinationAdmission{Kind: "plugin_fetch", Method: req.Method, AddressSHA256: address, HostSHA256: core.DestinationHost(req.Host), Hook: request.Hook, Executor: executor}
+		if core.Destinations.CheckDestination(ctx, admission) != nil {
+			return jsplugin.FetchResponse{}, errors.New("request rejected")
+		}
+	}
+	client, err := GetHttpClientWithProxySettings(proxy, setting)
+	if err != nil {
+		return jsplugin.FetchResponse{}, err
+	}
+	noRedirects := *client
+	noRedirects.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	started := time.Now()
 	resp, err := noRedirects.Do(req)
 	if err != nil {

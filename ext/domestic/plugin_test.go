@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +29,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/requestplugin"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	kittypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -594,6 +597,100 @@ func TestRelayDestinationBeforeNetwork(t *testing.T) {
 	core.Destinations = old
 	assert.NoError(t, relaychannel.CheckDestination(nil, nil, "", "", "", ""), "default must not add nil/context dependencies")
 }
+
+func TestPluginFetchDestinationBeforeNetwork(t *testing.T) {
+	previous := core.Destinations
+	t.Cleanup(func() { core.Destinations = previous })
+	var calls, redirects atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirects.Add(1); w.WriteHeader(http.StatusNoContent) }))
+	defer second.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, second.URL, http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	service.InitHttpClient()
+	const source = `export const meta={apiVersion:1,key:"cmh-fetch-target",name:"Fetch target",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/chat/completions",upstream_path:"/relay"}],configSchema:{type:"object",properties:{url:{type:"string",title:{en:"Service URL",zh:"服务地址"},format:"url"},marker:{type:"string",title:{en:"Marker",zh:"标记"}}}}};
+export function ingress(ctx,req){utils.fetch({url:ctx.config.url});return {action:"continue"};}
+export function refresh(ctx){utils.fetch({url:ctx.baseUrl+"/credential",method:"POST"});return {credential:{fixture:true},expiresAt:utils.unixNow()+3600};}`
+	plugin, err := jsplugin.CompilePlugin(source, jsplugin.Options{})
+	require.NoError(t, err)
+	configuration := common.RawMessage(fmt.Sprintf(`{"url":%q,"marker":"first"}`, server.URL+"/service?deployment=one"))
+	fetchExecutor, err := service.RequestPluginFetchExecutor(plugin, configuration)
+	require.NoError(t, err)
+	urlHash, err := core.DestinationAddress(server.URL + "/service?deployment=one")
+	require.NoError(t, err)
+	parsed, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	approval := core.DestinationAdmission{Kind: "plugin_fetch", Method: "GET", AddressSHA256: urlHash, HostSHA256: core.DestinationHost(parsed.Host), Executor: fetchExecutor, Hook: "ingress"}
+	invoke := func(configValue common.RawMessage) error {
+		ctx := jsplugin.WithFetcher(t.Context(), service.RequestPluginFetcher(plugin, configValue))
+		_, err := plugin.CallTransform(ctx, jsplugin.TransformContext{Stage: "ingress", Config: configValue}, jsplugin.TransformRequest{Body: []byte(`{"model":"local"}`)})
+		return err
+	}
+	deny, err := NewDestinationPolicy(nil)
+	require.NoError(t, err)
+	core.Destinations = deny
+	require.Error(t, invoke(configuration))
+	assert.Zero(t, calls.Load())
+	policy, err := NewDestinationPolicy([]core.DestinationAdmission{approval})
+	require.NoError(t, err)
+	core.Destinations = policy
+	require.NoError(t, invoke(configuration))
+	assert.Equal(t, int32(1), calls.Load())
+	_, directErr := service.RequestPluginFetcher(plugin, configuration)(t.Context(), jsplugin.FetchRequest{URL: server.URL + "/service?deployment=one", Method: "GET", Hook: "report"})
+	require.Error(t, directErr)
+	assert.Equal(t, int32(1), calls.Load(), "ingress target approval must not authorize report")
+	replacement, err := jsplugin.CompilePlugin(source+"\nexport const replacement=true;", jsplugin.Options{})
+	require.NoError(t, err)
+	_, directErr = service.RequestPluginFetcher(replacement, configuration)(t.Context(), jsplugin.FetchRequest{URL: server.URL + "/service?deployment=one", Method: "GET", Hook: "ingress"})
+	require.Error(t, directErr)
+	assert.Equal(t, int32(1), calls.Load(), "same key/version cannot authorize replacement source")
+	stream := &deniedFetchBody{}
+	_, directErr = service.RequestPluginFetcher(plugin, configuration)(t.Context(), jsplugin.FetchRequest{URL: server.URL + "/service?deployment=one", Method: "POST", Hook: "ingress", BodyStream: stream, BodySize: 1})
+	require.Error(t, directErr)
+	assert.Zero(t, stream.reads, "denied fetch body cannot be read before destination approval")
+	changedConfig := common.RawMessage(fmt.Sprintf(`{"url":%q,"marker":"second"}`, server.URL+"/service?deployment=one"))
+	require.Error(t, invoke(changedConfig))
+	assert.Equal(t, int32(1), calls.Load(), "same URL cannot authorize different original instance capability")
+	credentialExecutor, err := service.PluginFetchExecutor(plugin, server.URL, "", kitdto.ChannelSettings{})
+	require.NoError(t, err)
+	credentialURL, err := core.DestinationAddress(server.URL + "/credential")
+	require.NoError(t, err)
+	credentialApproval := core.DestinationAdmission{Kind: "plugin_fetch", Method: "POST", AddressSHA256: credentialURL, HostSHA256: core.DestinationHost(parsed.Host), Executor: credentialExecutor, Hook: "refresh"}
+	ctx := service.PluginCredentialHookContext(t.Context(), plugin, server.URL, "")
+	_, err = plugin.CallRefresh(ctx, jsplugin.CredentialContext{BaseURL: server.URL, Credential: common.RawMessage(`{"fixture":true}`)})
+	require.Error(t, err)
+	assert.Equal(t, int32(1), calls.Load(), "request-service approval cannot authorize credential fetch")
+	policy, err = NewDestinationPolicy([]core.DestinationAdmission{credentialApproval})
+	require.NoError(t, err)
+	core.Destinations = policy
+	_, err = plugin.CallRefresh(ctx, jsplugin.CredentialContext{BaseURL: server.URL, Credential: common.RawMessage(`{"fixture":true}`)})
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load())
+	redirectConfig := common.RawMessage(fmt.Sprintf(`{"url":%q}`, server.URL+"/redirect"))
+	redirectExecutor, err := service.RequestPluginFetchExecutor(plugin, redirectConfig)
+	require.NoError(t, err)
+	redirectHash, err := core.DestinationAddress(server.URL + "/redirect")
+	require.NoError(t, err)
+	redirectApproval := approval
+	redirectApproval.AddressSHA256 = redirectHash
+	redirectApproval.Executor = redirectExecutor
+	policy, err = NewDestinationPolicy([]core.DestinationAdmission{redirectApproval})
+	require.NoError(t, err)
+	core.Destinations = policy
+	require.NoError(t, invoke(redirectConfig))
+	assert.Zero(t, redirects.Load(), "utils.fetch must retain redirect response instead of following to a new target")
+}
+
+type deniedFetchBody struct{ reads int }
+
+func (p *deniedFetchBody) Read([]byte) (int, error) { p.reads++; return 0, io.EOF }
 
 func TestParamNormalizePluginHostContract(t *testing.T) {
 	source, err := os.ReadFile(filepath.Join("..", "..", "plugins", "tasks", "cmh-param-normalize", "plugin.js"))
