@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 本轮起点已推 `283065e78`：main/develop一致，H1纯合同与规则v0.8CI两次success；本轮实际H1-A候选/目录接线及三库测试即将提交。
+- 已推 `e48db5f27`：main/develop一致，CI两次success（43386321414 / 43386307002）。H1-A实际候选/目录接线真三库与专项回归通过；仍未安装core.Models，不把部分接线当完整防线。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -41,7 +41,9 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 未提交文件：纯白名单、插件与证据/RFC、新UI验收脚本；提交时精确路径，不 `git add -A`扫数据库/缓存。
+- 接续优先：补齐publication的pricing/vendor/endpoint及owner元数据按允许候选过滤（已读model/pricing.go、model/model_meta.go），沿用已批准RFC，不另问预算；再接渠道写前有效快照与预扣/重试/长连接/实际plugin制品计划。新首批测试集中在host_admission_test.go，扩展该文件不要散落同功能测试。
+- 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
+- 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 
 ## 禁止误报
 
