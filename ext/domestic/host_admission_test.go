@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -210,6 +211,74 @@ func runHostAdmissionRequestBoundary(t *testing.T, channels []model.Channel, gat
 	core.Models = noop
 	assert.Nil(t, relay.CheckRequestAdmission(nil, nil), "default boundary must not create new context or DB dependencies")
 	core.Models = gate
+}
+
+func runHostBoundProviderAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
+	t.Helper()
+	previousRegistry := jsplugin.DefaultRegistry
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
+	const source = `export const meta={apiVersion:1,key:"cmh-host-bound",name:"Host bound",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/chat/completions",upstream_path:"/generate",converter:"none"}],channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"standard"}}}};`
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	binding, mapping := `{"task_plugin_key":"cmh-host-bound"}`, `{"public-chat":"approved-target"}`
+	base := "https://fixture.invalid"
+	channel := model.Channel{Id: 95002, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Key: "fixture", Models: "public-chat", Group: "default", BaseURL: &base, Setting: &binding, ModelMapping: &mapping, OtherSettings: `{"plugin_config":{"tier":"standard"}}`}
+	core.Models = noop
+	require.NoError(t, model.DB.Create(&channel).Error)
+	require.NoError(t, channel.AddAbilities(model.DB))
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id = ?", channel.Id).Delete(&model.Channel{}).Error)
+	}()
+	identity, err := model.PluginExecutorIdentity(&channel, plugin, registry.Generation().Number, "provider", "/v1/chat/completions")
+	require.NoError(t, err)
+	public, err := New([]string{"public-chat"}, []string{"61"})
+	require.NoError(t, err)
+	upstream, err := New([]string{"approved-target"}, nil)
+	require.NoError(t, err)
+	gate, err := NewGate(public, upstream, []core.ExecutorIdentity{identity})
+	require.NoError(t, err)
+	core.Models = gate
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	service.GetChannelConstraints(c).AddFilter(hostdto.ChannelFilter{Kind: hostdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, &channel, "public-chat"))
+	info := &relaycommon.RelayInfo{OriginModelName: "public-chat", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id, ChannelType: channel.Type}}
+	require.Nil(t, relay.CheckRequestAdmission(c, info))
+	selectedParams, _ := common.GetContextKey(c, constant.ContextKeyChannelParamOverride)
+	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{"temperature": 0})
+	require.NotNil(t, relay.CheckRequestAdmission(c, info), "runtime-added affinity overrides currently require a separately supported execution envelope")
+	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, selectedParams)
+	c.Set("request_plugin_plan", struct{}{})
+	require.NotNil(t, relay.CheckRequestAdmission(c, info), "retained plan remains unknown even after current request-plugin settings are empty")
+	delete(c.Keys, "request_plugin_plan")
+	planContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	planContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(planContext, constant.ContextKeyUsingGroup, "default")
+	planContext.Set("request_plugin_plan", struct{}{})
+	require.NotNil(t, middleware.SetupContextForSelectedChannel(planContext, &channel, "public-chat"))
+	_, publishedKey := planContext.Get(string(constant.ContextKeyChannelKey))
+	assert.False(t, publishedKey, "retained unknown plan must reject before selected credential publication")
+	// A new registry generation with the same key/version but changed source
+	// must not substitute for the exact provider already pinned on this request.
+	_, err = registry.Register(source+"\nexport const revision=2;", jsplugin.Options{})
+	require.NoError(t, err)
+	require.Nil(t, relay.CheckRequestAdmission(c, info), "retained approved pinned source does not silently switch to new registry artifact")
+	changed := `{"plugin_config":{"tier":"premium"}}`
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("settings", changed).Error)
+	require.NotNil(t, relay.CheckRequestAdmission(c, info), "fresh config cannot authorize a different frozen hook config")
+	changedChannel := channel
+	changedChannel.OtherSettings = changed
+	freshIdentity, err := model.PluginExecutorIdentity(&changedChannel, plugin, uint64(identity.Generation), "provider", "/v1/chat/completions")
+	require.NoError(t, err)
+	bothGate, err := NewGate(public, upstream, []core.ExecutorIdentity{identity, freshIdentity})
+	require.NoError(t, err)
+	core.Models = bothGate
+	require.NotNil(t, relay.CheckRequestAdmission(c, info), "even independently approved fresh config cannot replace frozen selected config")
 }
 
 func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, noop core.ModelGate) {
@@ -818,6 +887,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeAnthropic))
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
 	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
+	runHostBoundProviderAdmission(t, gate, oldGate)
 	runHostAdmissionSockets(t, channels[1], gate, oldGate)
 	runHostAdmissionWrites(t, gate, oldGate)
 	owners, err := model.GetPreferredModelOwnerChannelTypes([]string{"gpt-4o-mini"}, []string{"default"})

@@ -764,12 +764,28 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 			}
 		}
 		if actualPlugin {
-			admission.Executor = core.ExecutorIdentity{}
+			if plan, exists := c.Get("request_plugin_plan"); exists && plan != nil {
+				return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+			}
+			var pinned jsplugin.PinnedPlugin
+			role := "task"
+			if providerPlugin != nil {
+				pinned, _ = providerPlugin.(jsplugin.PinnedPlugin)
+				role = "provider"
+			} else if value, exists := c.Get(jsplugin.ContextKeyPinnedPlugin); exists {
+				pinned, _ = value.(jsplugin.PinnedPlugin)
+			}
+			projected, err := model.ChannelPluginAdmission(channel, modelName, core.AdmissionAttempt, pinned, role, c.Request.URL.Path)
+			if err != nil {
+				return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+			}
+			admission = projected
+			c.Set("cmh_plugin_channel_other", channel.Other)
 		}
 		if err := core.Models.Check(c.Request.Context(), admission); err != nil {
 			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		}
-		if matches, _ := model.ChannelSatisfiesFilters(channel, modelName, service.GetChannelConstraints(c).Filters); !matches {
+		if matches, _ := model.ChannelSatisfiesHostFilters(channel, modelName, service.GetChannelConstraints(c).Filters); !matches {
 			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		}
 	}

@@ -137,6 +137,10 @@ type Engine struct {
 	exports map[string]struct{}
 }
 
+// SourceSHA256 identifies the exact code this engine executes, independently of
+// caller labels or a LoadedPlugin wrapper that may reference it.
+func (e *Engine) SourceSHA256() string { return e.sourceSHA256 }
+
 // hookKey names a cached hook handle. Contract hooks are an export and at
 // most two members (protocols.<name>.<hook>); longer paths only come from
 // fixture requests and are resolved on every call.

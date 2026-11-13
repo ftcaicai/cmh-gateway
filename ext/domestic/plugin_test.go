@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	hostdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/ext/core"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
 	"github.com/stretchr/testify/assert"
@@ -35,6 +38,7 @@ export function ingress() { return {action: "continue"}; }`
 		require.NoError(t, err)
 		compiled[i] = plugin
 		assert.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte(raw))), plugin.SourceSHA256())
+		assert.Equal(t, plugin.SourceSHA256(), plugin.Engine.SourceSHA256())
 		assert.Equal(t, "cmh-source-identity", plugin.Meta.Key)
 		assert.Equal(t, "1.0.0", plugin.Meta.Version)
 		for _, previous := range compiled[:i] {
@@ -242,6 +246,77 @@ func TestPluginSourceHookVetoBeforeCapacity(t *testing.T) {
 	close(release)
 	require.NoError(t, <-finished)
 	require.Len(t, probe.seen, 1)
+}
+
+func TestBoundPluginProjection(t *testing.T) {
+	previousGate, previousRegistry := core.Models, jsplugin.DefaultRegistry
+	t.Cleanup(func() { core.Models, jsplugin.DefaultRegistry = previousGate, previousRegistry })
+	const source = `export const meta = {apiVersion:1,key:"cmh-bound",name:"Bound provider",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/chat/completions",upstream_path:"/generate",converter:"none"}],channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"standard"},enabled:{type:"boolean",title:{en:"Enabled",zh:"启用"},default:false}}}};`
+	plugin, err := jsplugin.CompilePlugin(source, jsplugin.Options{})
+	require.NoError(t, err)
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	registered, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	binding, mapping := `{"task_plugin_key":"cmh-bound"}`, `{"public-chat":"approved-target"}`
+	base := "https://fixture.invalid"
+	channel := &model.Channel{Id: 95001, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Models: "public-chat", Group: "default", BaseURL: &base, Setting: &binding, ModelMapping: &mapping, OtherSettings: `{"plugin_config":{"tier":"standard","enabled":false}}`}
+	identity, err := model.PluginExecutorIdentity(channel, plugin, registry.Generation().Number, "provider", "/v1/chat/completions")
+	require.NoError(t, err)
+	assert.Equal(t, plugin.SourceSHA256(), identity.SourceSHA256)
+	assert.Len(t, identity.ConfigFingerprint, 64)
+	public, err := New([]string{"public-chat"}, []string{"61"})
+	require.NoError(t, err)
+	upstream, err := New([]string{"approved-target"}, nil)
+	require.NoError(t, err)
+	gate, err := NewGate(public, upstream, []core.ExecutorIdentity{identity})
+	require.NoError(t, err)
+	core.Models = gate
+	pinned := jsplugin.PinnedPlugin{Plugin: registered, Generation: registry.Generation()}
+	admission, err := model.ChannelPluginAdmission(channel, "public-chat", core.AdmissionAttempt, pinned, "provider", "/v1/chat/completions")
+	require.NoError(t, err)
+	assert.NoError(t, gate.Check(t.Context(), admission))
+	for _, change := range []func(*model.Channel){
+		func(ch *model.Channel) { ch.OtherSettings = `{"plugin_config":{"tier":"premium","enabled":false}}` },
+		func(ch *model.Channel) { v := "https://changed.invalid"; ch.BaseURL = &v },
+		func(ch *model.Channel) { v := `{"public-chat":"changed-target"}`; ch.ModelMapping = &v },
+	} {
+		changed := *channel
+		change(&changed)
+		next, err := model.PluginExecutorIdentity(&changed, plugin, registry.Generation().Number, "provider", "/v1/chat/completions")
+		require.NoError(t, err)
+		assert.NotEqual(t, identity.ConfigFingerprint, next.ConfigFingerprint)
+		candidate := admission
+		candidate.Executor = next
+		assert.ErrorIs(t, gate.Check(t.Context(), candidate), ErrAdmissionDenied)
+	}
+	roleIdentity, err := model.PluginExecutorIdentity(channel, plugin, registry.Generation().Number, "task", "/v1/tasks/cmh-bound")
+	if err == nil {
+		assert.NotEqual(t, identity.ConfigFingerprint, roleIdentity.ConfigFingerprint)
+	}
+	bad := *channel
+	bad.OtherSettings = `{"plugin_config":null}`
+	_, err = model.PluginExecutorIdentity(&bad, plugin, registry.Generation().Number, "provider", "/v1/chat/completions")
+	require.Error(t, err)
+	altered, err := jsplugin.Compile(source+"\nexport const changed=true;", jsplugin.Options{})
+	require.NoError(t, err)
+	wrapperCopy := *plugin
+	wrapperCopy.Engine = altered
+	_, err = model.PluginExecutorIdentity(channel, &wrapperCopy, registry.Generation().Number, "provider", "/v1/chat/completions")
+	require.Error(t, err, "wrapper source digest must bind the actual Engine")
+	wrongBinding := *channel
+	wrong := `{"task_plugin_key":"some-other-plugin"}`
+	wrongBinding.Setting = &wrong
+	_, err = model.ChannelPluginAdmission(&wrongBinding, "public-chat", core.AdmissionAttempt, pinned, "provider", "/v1/chat/completions")
+	require.Error(t, err)
+	filters := []hostdto.ChannelFilter{{Kind: hostdto.FilterTaskPluginIdentity, RequestPath: "/v1/chat/completions"}}
+	assert.Equal(t, identity, model.ChannelModelAdmission(channel, "public-chat", core.AdmissionCandidate, filters...).Executor)
+	_, err = registry.Register(source+"\nexport const updated=1;", jsplugin.Options{})
+	require.NoError(t, err)
+	assert.ErrorIs(t, gate.Check(t.Context(), model.ChannelModelAdmission(channel, "public-chat", core.AdmissionCandidate, filters...)), ErrAdmissionDenied, "candidate has current generation only; old pinned selection cannot be promised through candidate filters")
+	retained, err := model.ChannelPluginAdmission(channel, "public-chat", core.AdmissionAttempt, pinned, "provider", "/v1/chat/completions")
+	require.NoError(t, err)
+	assert.NoError(t, gate.Check(t.Context(), retained), "already selected exact approved pinned artifact remains independently checkable")
 }
 
 func TestParamNormalizePluginHostContract(t *testing.T) {

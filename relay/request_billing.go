@@ -63,6 +63,79 @@ func CheckRequestAdmission(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 		filters = append(filters, hostdto.ChannelFilter{Kind: hostdto.FilterTaskPluginIdentity, TaskPluginKey: pinned.Plugin.Meta.Key})
 	}
 	admission := model.ChannelModelAdmission(channel, info.OriginModelName, core.AdmissionAttempt, filters...)
+	var pinned jsplugin.PinnedPlugin
+	role := "task"
+	if value, exists := common.GetContextKey(c, constant.ContextKeyProviderPlugin); exists && value != nil {
+		var ok bool
+		pinned, ok = value.(jsplugin.PinnedPlugin)
+		if !ok {
+			return rejected
+		}
+		role = "provider"
+	} else if value, exists := c.Get(jsplugin.ContextKeyPinnedPlugin); exists {
+		pinned, _ = value.(jsplugin.PinnedPlugin)
+	}
+	if pinned.Plugin != nil {
+		if plan, exists := c.Get("request_plugin_plan"); exists && plan != nil {
+			return rejected
+		}
+		if c.Request == nil {
+			return rejected
+		}
+		admission, err = model.ChannelPluginAdmission(channel, info.OriginModelName, core.AdmissionAttempt, pinned, role, c.Request.URL.Path)
+		if err != nil {
+			return rejected
+		}
+		setting, settingOK := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+		other, otherOK := common.GetContextKeyType[dto.ChannelOtherSettings](c, constant.ContextKeyChannelOtherSetting)
+		base, baseOK := common.GetContextKey(c, constant.ContextKeyChannelBaseUrl)
+		channelOther, otherPresent := c.Get("cmh_plugin_channel_other")
+		if !settingOK || !otherOK || !baseOK || !otherPresent {
+			return rejected
+		}
+		baseURL, baseString := base.(string)
+		otherValue, otherString := channelOther.(string)
+		if !baseString || !otherString {
+			return rejected
+		}
+		selected := *channel
+		selected.BaseURL, selected.Other = &baseURL, otherValue
+		encoded, encodeErr := common.Marshal(setting)
+		if encodeErr != nil {
+			return rejected
+		}
+		rawSetting := string(encoded)
+		selected.Setting = &rawSetting
+		encoded, encodeErr = common.Marshal(other)
+		if encodeErr != nil {
+			return rejected
+		}
+		selected.OtherSettings = string(encoded)
+		rawMapping := common.GetContextKeyString(c, constant.ContextKeyChannelModelMapping)
+		selected.ModelMapping = &rawMapping
+		for _, control := range []struct {
+			key    constant.ContextKey
+			target **string
+		}{
+			{constant.ContextKeyChannelParamOverride, &selected.ParamOverride},
+			{constant.ContextKeyChannelHeaderOverride, &selected.HeaderOverride},
+		} {
+			value, exists := common.GetContextKey(c, control.key)
+			if !exists {
+				return rejected
+			}
+			encoded, encodeErr := common.Marshal(value)
+			if encodeErr != nil {
+				return rejected
+			}
+			raw := string(encoded)
+			*control.target = &raw
+		}
+		selectedAdmission, selectedErr := model.ChannelPluginAdmission(&selected, info.OriginModelName, core.AdmissionAttempt, pinned, role, c.Request.URL.Path)
+		if selectedErr != nil || selectedAdmission.Executor != admission.Executor || selectedAdmission.Model != admission.Model {
+			return rejected
+		}
+	}
 	// The handler consumes the selected context mapping, not this fresh DB row.
 	// A policy witness for a repaired row must not authorize an older context
 	// that would still send a different upstream model.

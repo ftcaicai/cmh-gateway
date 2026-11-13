@@ -19,7 +19,7 @@
 | R3 | 已登录回跳 | 前端桥接 | `web/src/routes/(auth)/sign-in.tsx` | 22、43–46 | 2026-11-13 | 回源确认登录后的 beforeLoad 使用同一安全导航选项 | `rfc/2026-11-13-cross-app-login-return.md` | ftcaicai |
 | R3 | 桥接边界回归 | 测试 | `web/src/features/auth/lib/auth-redirect.test.ts` | 23–27、67–92 | 2026-11-13 | 复用既有测试文件验证路径边界及不安全回跳；计入官方文件与行数预算 | `rfc/2026-11-13-cross-app-login-return.md` | ftcaicai |
 | R4 | 自有插件工厂清单 | 测试 | `plugins/builtin_plugins_test.go` | requestPluginHooks 字典中的 cmh-param-normalize 条目 | 2026-11-13 | 保留精确目录集合断言并验证自有 outbound 工厂插件 | `rfc/2026-11-13-plugin-factory-inventory.md` | ftcaicai |
-| H1-A | 候选与目录准入 | 准入型 | `model/channel_constraint.go` | ChannelSatisfiesFilters / filterCandidateIDs / ResolveChannelModel / ChannelModelAdmission | 2026-11-13 | 共享映射解析与候选身份投影；DB/cache/pin候选在原过滤前准入 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-A | 候选与目录准入 | 准入型 | `model/channel_constraint.go` | ChannelSatisfiesFilters / ChannelSatisfiesHostFilters / filterCandidateIDs / ResolveChannelModel / ChannelModelAdmission / PluginExecutorIdentity / ChannelPluginAdmission | 2026-11-13 | 共享映射解析与候选身份投影；DB/cache/pin候选在原过滤前准入 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 模型能力目录准入 | 准入型 | `model/ability.go` | GetGroupEnabledModels / filterAbilitiesByConstraints / IsModelAdmittedForPublication | 2026-11-13 | 按允许候选过滤客户目录；已安装门禁的查询错误fail-closed | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 客户静态模型目录 | 准入型 | `controller/model.go` | DashboardListModels / RetrieveModel | 2026-11-13 | 默认透传，激活时批量过滤静态/插件目录和单模型retrieve；ListModels经分组能力投影复用 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 官方模型映射复用 | 准入桥接 | `relay/helper/model_mapped.go` | ModelMappedHelper | 2026-11-13 | 从原循环提取host解析API，保持默认mapping/selfmap语义；不代表预扣/派发前完整接线 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
@@ -30,13 +30,13 @@
 | H1-A | 控制器变更前准入 | 准入型 | `controller/channel.go` | AddChannel / UpdateChannel / normalizeChannel | 2026-11-13 | 规范化后、凭据检查与首次Key写之前预验；激活时Key+补丁+Ability通过UpdateWithAdmissionKey同事务 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-A | 上游模型自动与手工应用 | 准入型 | `controller/channel_upstream_update.go` | updateChannelUpstreamModelSettings / checkAndPersistChannelUpstreamModelUpdates / applyChannelUpstreamModelUpdates | 2026-11-13 | 将选定模型delta应用于锁内当前行、持久化前准入；能力同步同事务，原noop路径保留 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | 分发与凭据选择前准入 | 准入型 | `middleware/distributor.go` | Distribute / SetupContextForSelectedChannel | 2026-11-13 | 公开名覆盖pin分支；选中渠道DB刷新及实际执行者复核在Key取用前；Setup错误不再忽略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
-| H1-B | 估价与预扣前准入 | 准入型 | `relay/request_billing.go` | CheckRequestAdmission / PrepareRequestBilling | 2026-11-13 | 当前持久化身份复核，拒绝发生在token估算/免费跳过/预扣前；不改资金生命周期 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-B | 估价与预扣前准入 | 准入型 | `relay/request_billing.go` | CheckRequestAdmission / PrepareRequestBilling | 2026-11-13 | 当前持久化身份复核，拒绝发生在token估算/免费跳过/预扣前；type61精确pinned源/角色/path/有效配置与冻结context比对，不用fresh配置授权旧context；不改资金生命周期 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | 重试追加预留前准入 | 准入型 | `controller/relay.go` | Relay重试循环getChannel后 | 2026-11-13 | 以本次选择身份快照复核，先于PrepareTieredBillingForSelectedGroup，保留原退款策略 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | Responses长连接事件准入 | 准入型 | `relay/responses_websocket.go` | runCall / restoreConnectionContext / checkResponsesWSModelAccess | 2026-11-13 | 每create在ingress前复核、首次选中快照复用、锁定连接DB状态与冻结映射一致检查，重试topup前复核 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | Realtime每事件准入 | 准入型 | `relay/channel/openai/relay_realtime.go` | CheckRealtimeAdmission / OpenaiRealtimeHandler | 2026-11-13 | 约束固定握手模型、原始event模型字段，在plugin前与patch后计量/转发前复核；不改usage逻辑 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-B | Realtime握手前准入 | 准入型 | `relay/websocket.go` | WssHelper初始化ChannelMeta后、DoRequest前 | 2026-11-13 | 实际握手逻辑目标必须先通过固定模型准入，不能联网后才拒绝映射不一致 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | 不可变插件源身份 | 身份投影 | `pkg/jsplugin/registry.go` | LoadedPlugin.SourceSHA256 / CompilePlugin | 2026-11-13 | 编译时记录原始源字节SHA256，版本标签不代替制品身份；不自动批准或激活插件 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
-| H1-C | 共用插件hook源制品拒绝点 | 准入型（仅源身份） | `pkg/jsplugin/engine.go` | Compile / Engine.call | 2026-11-13 | Engine保存不可变原始源摘要，所有Call路径在slot/runtime/JS执行之前调用core.PluginHooks；默认noop，不含config/model/target授权 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | 共用插件hook源制品拒绝点 | 准入型（仅源身份） | `pkg/jsplugin/engine.go` | Compile / Engine.SourceSHA256 / Engine.call | 2026-11-13 | Engine保存不可变原始源摘要，所有Call路径在slot/runtime/JS执行之前调用core.PluginHooks；默认noop，不含config/model/target授权 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 

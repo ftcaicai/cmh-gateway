@@ -2,7 +2,9 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -72,6 +74,34 @@ func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase
 		return admission
 	}
 	admission.Model.Upstream = upstream
+	if ch.Type == constant.ChannelTypeTaskPlugin && phase != core.AdmissionChannelSave && len(filters) > 0 {
+		var setting kitdto.ChannelSettings
+		if ch.Setting != nil && common.UnmarshalJsonStr(*ch.Setting, &setting) == nil {
+			// Candidate filters carry no pinned generation. Use the current
+			// published source conservatively; an older pinned request may need
+			// a fresh selection after source replacement. Actual selected checks
+			// below use the exact pinned artifact, never this candidate witness.
+			generation := jsplugin.DefaultRegistry.Generation()
+			if loaded, ok := generation.Get(setting.TaskPluginKey); ok {
+				for _, filter := range filters {
+					role := ""
+					if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey == setting.TaskPluginKey || filter.Kind == dto.FilterTaskPluginEndpoint && !filter.TaskPluginRelayOnly && slices.Contains(filter.TaskPluginKeys, setting.TaskPluginKey) {
+						role = "task"
+					}
+					if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey == "" {
+						role = "provider"
+					}
+					if role != "" && filter.RequestPath != "" {
+						projected, err := ChannelPluginAdmission(ch, public, phase, jsplugin.PinnedPlugin{Generation: generation, Plugin: loaded}, role, filter.RequestPath)
+						if err == nil {
+							return projected
+						}
+						return admission
+					}
+				}
+			}
+		}
+	}
 	// Request constraints can pin a legacy plugin even for an undeclared model.
 	// This subset cannot attest that executor, so never label it builtin.
 	for _, filter := range filters {
@@ -111,6 +141,114 @@ func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase
 	return admission
 }
 
+// PluginExecutorIdentity attests a bound type-61 artifact and its routing controls.
+// Only the digest escapes: the envelope may contain private configuration.
+func PluginExecutorIdentity(ch *Channel, loaded *jsplugin.LoadedPlugin, generation uint64, role, pathScope string) (core.ExecutorIdentity, error) {
+	denied := errors.New("model admission denied")
+	if ch == nil || ch.Type != constant.ChannelTypeTaskPlugin || loaded == nil || loaded.Engine == nil ||
+		loaded.SourceSHA256() == "" || loaded.SourceSHA256() != loaded.Engine.SourceSHA256() ||
+		(role != "task" && role != "provider") || pathScope == "" || !strings.HasPrefix(pathScope, "/") || strings.ContainsAny(pathScope, "?#\\\\\r\n") {
+		return core.ExecutorIdentity{}, denied
+	}
+	var setting kitdto.ChannelSettings
+	var other kitdto.ChannelOtherSettings
+	if ch.Setting == nil || common.UnmarshalJsonStr(*ch.Setting, &setting) != nil || setting.TaskPluginKey != loaded.Meta.Key || len(setting.TaskExtendPluginKeys) != 0 || len(setting.RequestPlugins) != 0 ||
+		(ch.OtherSettings != "" && common.UnmarshalJsonStr(ch.OtherSettings, &other) != nil) {
+		return core.ExecutorIdentity{}, denied
+	}
+	if ch.OtherSettings != "" {
+		var object map[string]common.RawMessage
+		if common.UnmarshalJsonStr(ch.OtherSettings, &object) != nil || object == nil {
+			return core.ExecutorIdentity{}, denied
+		}
+	}
+	for _, instance := range request_plugin_setting.GetInstances() {
+		if instance.Enabled {
+			return core.ExecutorIdentity{}, denied
+		}
+	}
+	config := other.PluginConfig
+	if len(config) == 0 {
+		config = common.RawMessage(`{}`)
+	}
+	var object map[string]common.RawMessage
+	if common.Unmarshal(config, &object) != nil || object == nil {
+		return core.ExecutorIdentity{}, denied
+	}
+	// Provider routes are derived from this exact source and effective config,
+	// not the stored advanced-custom override. Keep the runtime envelope equal.
+	if role == "provider" {
+		other.AdvancedCustom = nil
+	}
+	other.PluginConfig = nil
+	controls := make([]map[string]any, 3)
+	for i, raw := range []string{ch.GetModelMapping(), stringPointerValue(ch.ParamOverride), stringPointerValue(ch.HeaderOverride)} {
+		controls[i] = make(map[string]any)
+		if raw != "" && common.UnmarshalJsonStr(raw, &controls[i]) != nil {
+			return core.ExecutorIdentity{}, denied
+		}
+		if controls[i] == nil {
+			controls[i] = make(map[string]any)
+		}
+	}
+	envelope := struct {
+		Version                                int
+		Role, PathScope, BaseURL, ChannelOther string
+		ChannelType                            int
+		Binding                                kitdto.ChannelSettings
+		Other                                  kitdto.ChannelOtherSettings
+		EffectiveConfig                        common.RawMessage
+		Controls                               []map[string]any
+	}{1, role, pathScope, ch.GetBaseURL(), ch.Other, ch.Type, setting, other, loaded.ChannelConfigFor(config), controls}
+	encoded, err := common.Marshal(envelope)
+	if err != nil {
+		return core.ExecutorIdentity{}, denied
+	}
+	digest := sha256.Sum256(encoded)
+	return core.ExecutorIdentity{Kind: "plugin", Key: loaded.Meta.Key, SourceSHA256: loaded.Engine.SourceSHA256(), ConfigFingerprint: fmt.Sprintf("%x", digest), Generation: int64(generation)}, nil
+}
+
+func stringPointerValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// ChannelPluginAdmission requires the exact pinned artifact, never a metadata owner.
+func ChannelPluginAdmission(ch *Channel, public string, phase core.AdmissionPhase, pinned jsplugin.PinnedPlugin, role, pathScope string) (core.Admission, error) {
+	admission := ChannelModelAdmission(ch, public, phase)
+	if pinned.Generation == nil || pinned.Plugin == nil {
+		return admission, errors.New("model admission denied")
+	}
+	published, ok := pinned.Generation.Get(pinned.Plugin.Meta.Key)
+	if !ok || published != pinned.Plugin || admission.Model.Upstream == "" {
+		return admission, errors.New("model admission denied")
+	}
+	executor, err := PluginExecutorIdentity(ch, pinned.Plugin, pinned.Generation.Number, role, pathScope)
+	if err != nil {
+		return admission, err
+	}
+	if role == "provider" {
+		if _, ok := pinned.Plugin.Meta.RelayRoute(pathScope, public); !ok {
+			return admission, errors.New("model admission denied")
+		}
+	} else {
+		for _, name := range []string{public, admission.Model.Upstream, reasoning.BaseModelName(public), reasoning.BaseModelName(admission.Model.Upstream)} {
+			canonical, found := pinned.Generation.CanonicalModel(name)
+			if found && slices.Contains(pinned.Plugin.Meta.Models, canonical) {
+				admission.Model.Declared = canonical
+				break
+			}
+		}
+		if admission.Model.Declared == "" {
+			return admission, errors.New("model admission denied")
+		}
+	}
+	admission.Executor = executor
+	return admission, nil
+}
+
 var filterEvalOrder = []dto.ChannelFilterKind{
 	dto.FilterRequestPath,
 	dto.FilterTaskPluginEndpoint,
@@ -126,6 +264,15 @@ func ChannelSatisfiesFilters(ch *Channel, modelName string, filters []dto.Channe
 		return false, ""
 	}
 	if core.ModelAdmissionEnabled() && core.Models.Check(context.Background(), ChannelModelAdmission(ch, modelName, core.AdmissionCandidate, filters...)) != nil {
+		return false, ""
+	}
+	return ChannelSatisfiesHostFilters(ch, modelName, filters)
+}
+
+// ChannelSatisfiesHostFilters applies protocol constraints after an exact pinned
+// executor has already passed admission. It grants no model-policy authority.
+func ChannelSatisfiesHostFilters(ch *Channel, modelName string, filters []dto.ChannelFilter) (bool, dto.ChannelFilterKind) {
+	if ch == nil {
 		return false, ""
 	}
 	for _, kind := range filterEvalOrder {
