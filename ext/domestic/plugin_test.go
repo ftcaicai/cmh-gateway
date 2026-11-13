@@ -57,6 +57,7 @@ export function ingress() { return {action: "continue"}; }`
 		compiled[i] = plugin
 		assert.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte(raw))), plugin.SourceSHA256())
 		assert.Equal(t, plugin.SourceSHA256(), plugin.Engine.SourceSHA256())
+		assert.Equal(t, []byte(raw), plugin.SourceBytes())
 		assert.Equal(t, "cmh-source-identity", plugin.Meta.Key)
 		assert.Equal(t, "1.0.0", plugin.Meta.Version)
 		for _, previous := range compiled[:i] {
@@ -801,6 +802,98 @@ export function parseBatchResult(){return [];}`
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
 	assert.Equal(t, int32(2), redirectCalls.Load())
+}
+
+func TestFrozenTaskRuntimeRestoration(t *testing.T) {
+	previousRegistry := jsplugin.DefaultRegistry
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	t.Cleanup(func() { jsplugin.DefaultRegistry = previousRegistry })
+	var calls atomic.Int32
+	var tier, revision, override string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		override = r.Header.Get("X-Frozen-Override")
+		tier = r.Header.Get("X-Frozen-Tier")
+		revision = r.Header.Get("X-Revision")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"IN_PROGRESS"}`))
+	}))
+	defer server.Close()
+	service.InitHttpClient()
+	const sourceA = `export const meta={apiVersion:1,key:"cmh-frozen-runtime",name:"Frozen runtime",version:"1.0.0",author:{name:"Test"},models:["local-task"],fetchMode:"per_task",channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"A"}}}};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit",body:{fixture:true}};}
+export function parseSubmitResponse(){return {taskId:"local"};}
+export function buildQueryRequest(ctx){if(ctx.config.tier!=="A")throw new Error("changed runtime");return {url:ctx.baseUrl+"/query",headers:{"X-Revision":"A"}};}
+export function signRequest(ctx,request){if(ctx.config.tier!=="A")throw new Error("changed signer config");return {headers:{"X-Frozen-Tier":ctx.config.tier}};}
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}`
+	plugin, err := registry.RegisterFactory(sourceA, jsplugin.Options{})
+	require.NoError(t, err)
+	copied := plugin.SourceBytes()
+	require.Equal(t, []byte(sourceA), copied)
+	copied[0] ^= 0xff
+	assert.Equal(t, []byte(sourceA), plugin.SourceBytes())
+	info := &relaycommon.RelayInfo{OriginModelName: "local-task", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 17, ChannelType: constant.ChannelTypeTaskPlugin, ChannelBaseUrl: server.URL, ApiKey: "not-to-be-archived", UpstreamModelName: "local-task", HeadersOverride: map[string]any{"X-Frozen-Override": "A"}, ChannelSetting: kitdto.ChannelSettings{TaskPluginKey: plugin.Meta.Key}, ChannelOtherSettings: kitdto.ChannelOtherSettings{PluginConfig: common.RawMessage(`{"tier":"A"}`)}}}
+	original := taskjsplugin.New(plugin)
+	original.Init(info)
+	artifact, err := original.CaptureContinuationArtifact(info)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(sourceA), artifact.Source)
+	assert.NotContains(t, string(artifact.RuntimeJSON), "not-to-be-archived")
+	info.ChannelOtherSettings.PluginConfig = common.RawMessage(`{"tier":"B"}`)
+	info.ChannelBaseUrl = "https://changed.invalid"
+	info.HeadersOverride["X-Frozen-Override"] = "B"
+	sourceB := strings.ReplaceAll(sourceA, `"X-Revision":"A"`, `"X-Revision":"B"`)
+	replacement, err := registry.RegisterFactory(sourceB, jsplugin.Options{})
+	require.NoError(t, err)
+	restored, err := taskjsplugin.RestoreContinuationArtifact(artifact)
+	require.NoError(t, err)
+	current, ok := registry.Get(plugin.Meta.Key)
+	require.True(t, ok)
+	assert.Same(t, replacement, current, "restoring old source must never publish it")
+	restored.Init(info)
+	task := &model.Task{TaskID: "persisted-task", ChannelId: 17, Properties: model.Properties{OriginModelName: "local-task"}, PrivateData: model.TaskPrivateData{UpstreamTaskID: "local-upstream"}}
+	response, err := restored.FetchTask(server.URL, "fixture-static-key", task, "")
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, int32(1), calls.Load())
+	assert.Equal(t, "A", tier)
+	assert.Equal(t, "A", revision)
+	assert.Equal(t, "A", override)
+	_, err = restored.FetchTask(server.URL, "fixture-static-key", task, "http://proxy-substitution.invalid")
+	require.Error(t, err)
+	assert.Equal(t, int32(1), calls.Load())
+	_, err = restored.FetchTask("https://changed.invalid", "fixture-static-key", task, "")
+	require.Error(t, err)
+	assert.Equal(t, int32(1), calls.Load())
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"local-task"}`))
+	require.NotNil(t, restored.ValidateRequestAndSetAction(c, info))
+	_, err = restored.BuildRequestBody(c, info)
+	require.Error(t, err)
+	_, err = restored.DoRequest(c, info, strings.NewReader(`{}`))
+	require.Error(t, err)
+	assert.Equal(t, int32(1), calls.Load(), "frozen continuation cannot submit new work")
+	previousDestinations := core.Destinations
+	denyTargets, err := NewDestinationPolicy(nil)
+	require.NoError(t, err)
+	core.Destinations = denyTargets
+	_, err = restored.FetchTask(server.URL, "fixture-static-key", task, "")
+	require.Error(t, err)
+	core.Destinations = previousDestinations
+	assert.Equal(t, int32(1), calls.Load(), "restore cannot bypass active target checks")
+	broken := artifact
+	broken.Source = []byte(sourceB)
+	_, err = taskjsplugin.RestoreContinuationArtifact(broken)
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	broken = artifact
+	broken.RuntimeJSON = []byte(strings.Replace(string(artifact.RuntimeJSON), `"Version":1`, `"Version":2`, 1))
+	_, err = taskjsplugin.RestoreContinuationArtifact(broken)
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	broken = artifact
+	broken.PluginKey = "other-plugin"
+	_, err = taskjsplugin.RestoreContinuationArtifact(broken)
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
 }
 
 func TestParamNormalizePluginHostContract(t *testing.T) {

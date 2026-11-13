@@ -132,7 +132,9 @@ func (a *TaskAdaptor) signTaskRequest(ctx context.Context, channelType int, base
 		return nil
 	}
 	config := json.RawMessage(nil)
-	if a.admittedSubmit && a.info != nil {
+	if a.continuation != nil {
+		config = a.continuation.Config
+	} else if a.admittedSubmit && a.info != nil {
 		config = a.plugin.ChannelConfigFor(a.info.ChannelOtherSettings.PluginConfig)
 	} else if a.info != nil && a.info.HasChannelMeta() && a.info.ChannelId != 0 {
 		if channel, err := model.CacheGetChannel(a.info.ChannelId); err == nil {

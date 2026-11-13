@@ -136,6 +136,7 @@ const maxTaskPluginPersistedJSONBytes = 1 << 20
 type TaskAdaptor struct {
 	plugin         *pluginruntime.LoadedPlugin
 	info           *relaycommon.RelayInfo
+	continuation   *taskContinuationRuntime
 	admittedSubmit bool
 	submitExecutor core.ExecutorIdentity
 	submitModel    core.ModelIdentity
@@ -163,8 +164,79 @@ type TaskAdaptor struct {
 	bodySHA256 string
 }
 
+// taskContinuationRuntime contains only execution controls, never ApiKey,
+// credential blobs, token keys or request payloads. Treat its bytes as sensitive.
+type taskContinuationRuntime struct {
+	Version                        int
+	ChannelID, ChannelType         int
+	BaseURL                        string
+	Setting                        kitdto.ChannelSettings
+	OtherSettings                  kitdto.ChannelOtherSettings
+	HeadersOverride, ParamOverride map[string]any
+	Config                         json.RawMessage
+	PublicModel, UpstreamModel     string
+}
+
+// CaptureContinuationArtifact snapshots the actual selected host state, not the
+// current registry or database. Durable storage and task ownership are the caller's.
+func (a *TaskAdaptor) CaptureContinuationArtifact(info *relaycommon.RelayInfo) (core.ContinuationArtifact, error) {
+	if a == nil || a.continuation != nil || info == nil || a.info != info || info.ChannelMeta == nil || info.ChannelId <= 0 || info.ChannelType != constant.ChannelTypeTaskPlugin || a.plugin == nil || a.plugin.Engine == nil || info.ChannelSetting.TaskPluginKey != a.plugin.Meta.Key || a.plugin.Engine.SourceSHA256() != a.plugin.SourceSHA256() {
+		return core.ContinuationArtifact{}, core.ErrContinuationUnavailable
+	}
+	if _, err := core.DestinationAddress(info.ChannelBaseUrl); err != nil || (!strings.HasPrefix(info.ChannelBaseUrl, "http://") && !strings.HasPrefix(info.ChannelBaseUrl, "https://")) || info.ChannelSetting.ValidateHTTPTransport() != nil || !a.plugin.Meta.HasTaskPart() {
+		return core.ContinuationArtifact{}, core.ErrContinuationUnavailable
+	}
+	source := a.plugin.SourceBytes()
+	if len(source) == 0 || len(source) > 2<<20 || !utf8.Valid(source) || bodySHA256(source) != a.plugin.SourceSHA256() {
+		return core.ContinuationArtifact{}, core.ErrContinuationUnavailable
+	}
+	runtime := taskContinuationRuntime{Version: 1, ChannelID: info.ChannelId, ChannelType: info.ChannelType, BaseURL: info.ChannelBaseUrl,
+		Setting: info.ChannelSetting, OtherSettings: info.ChannelOtherSettings, HeadersOverride: relaycommon.GetEffectiveHeaderOverride(info), ParamOverride: info.ParamOverride,
+		Config: a.plugin.ChannelConfigFor(info.ChannelOtherSettings.PluginConfig), PublicModel: info.OriginModelName, UpstreamModel: info.UpstreamModelName}
+	encoded, err := common.Marshal(runtime)
+	if err != nil || len(encoded) > 256<<10 {
+		return core.ContinuationArtifact{}, core.ErrContinuationUnavailable
+	}
+	return core.ContinuationArtifact{PluginKey: a.plugin.Meta.Key, SourceSHA256: a.plugin.SourceSHA256(), Source: source, RuntimeJSON: encoded}, nil
+}
+
+// RestoreContinuationArtifact compiles an unpublished artifact for continuation
+// only. It does not install a registry entry or bypass any active execution gate.
+func RestoreContinuationArtifact(artifact core.ContinuationArtifact) (*TaskAdaptor, error) {
+	if len(artifact.Source) == 0 || len(artifact.Source) > 2<<20 || !utf8.Valid(artifact.Source) || bodySHA256(artifact.Source) != artifact.SourceSHA256 || len(artifact.RuntimeJSON) == 0 || len(artifact.RuntimeJSON) > 256<<10 || !utf8.Valid(artifact.RuntimeJSON) {
+		return nil, core.ErrContinuationUnavailable
+	}
+	var runtime taskContinuationRuntime
+	var members map[string]common.RawMessage
+	if common.Unmarshal(artifact.RuntimeJSON, &members) != nil || members == nil || common.Unmarshal(artifact.RuntimeJSON, &runtime) != nil || runtime.Version != 1 || runtime.ChannelID <= 0 || runtime.ChannelType != constant.ChannelTypeTaskPlugin || runtime.Setting.TaskPluginKey != artifact.PluginKey {
+		return nil, core.ErrContinuationUnavailable
+	}
+	// Exact host-produced struct encoding rejects missing/unknown fields and
+	// ambiguous JSON representations instead of silently selecting defaults.
+	encoded, err := common.Marshal(runtime)
+	if err != nil || !bytes.Equal(encoded, artifact.RuntimeJSON) || runtime.Setting.ValidateHTTPTransport() != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	if _, err = core.DestinationAddress(runtime.BaseURL); err != nil || (!strings.HasPrefix(runtime.BaseURL, "http://") && !strings.HasPrefix(runtime.BaseURL, "https://")) {
+		return nil, core.ErrContinuationUnavailable
+	}
+	var config map[string]common.RawMessage
+	if common.Unmarshal(runtime.Config, &config) != nil || config == nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	plugin, err := pluginruntime.CompilePlugin(string(artifact.Source), pluginruntime.Options{})
+	if err != nil || !plugin.Meta.HasTaskPart() || plugin.Meta.Key != artifact.PluginKey || plugin.SourceSHA256() != artifact.SourceSHA256 || plugin.Engine.SourceSHA256() != artifact.SourceSHA256 {
+		return nil, core.ErrContinuationUnavailable
+	}
+	info := &relaycommon.RelayInfo{OriginModelName: runtime.PublicModel, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: runtime.ChannelID, ChannelType: runtime.ChannelType, ChannelBaseUrl: runtime.BaseURL, ChannelSetting: runtime.Setting, ChannelOtherSettings: runtime.OtherSettings, HeadersOverride: runtime.HeadersOverride, ParamOverride: runtime.ParamOverride, UpstreamModelName: runtime.UpstreamModel}}
+	return &TaskAdaptor{plugin: plugin, info: info, continuation: &runtime}, nil
+}
+
 func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{plugin: plugin} }
 func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
+	if a.continuation != nil {
+		return
+	}
 	a.info, a.admittedSubmit = info, false
 }
 
@@ -844,6 +916,9 @@ func (a *TaskAdaptor) GetChannelName() string { return a.plugin.Meta.Name }
 func (a *TaskAdaptor) FetchMode() string      { return a.plugin.Meta.FetchMode }
 
 func (a *TaskAdaptor) FetchBatchTasks(baseURL, key string, tasks []*model.Task, proxy string) (*http.Response, error) {
+	if a.continuation != nil && (baseURL != a.continuation.BaseURL || proxy != a.continuation.Setting.Proxy) {
+		return nil, core.ErrContinuationUnavailable
+	}
 	// The host batches only tasks one credential account submitted, so the
 	// first task's account polls them all.
 	var first *model.Task
@@ -875,6 +950,9 @@ func (a *TaskAdaptor) FetchBatchTasks(baseURL, key string, tasks []*model.Task, 
 }
 
 func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy string) (*http.Response, error) {
+	if a.continuation != nil && (baseURL != a.continuation.BaseURL || proxy != a.continuation.Setting.Proxy) {
+		return nil, core.ErrContinuationUnavailable
+	}
 	if task != nil && task.PrivateData.Key != "" {
 		key = task.PrivateData.Key
 	}
@@ -1641,6 +1719,10 @@ func (a *TaskAdaptor) applyUpstreamCredentials(ctx map[string]any, channelType i
 // serves (meta.channelTypes) the channel's raw other setting as channelOther.
 func (a *TaskAdaptor) applyChannelContext(ctx map[string]any, channelType int) {
 	ctx["config"] = map[string]any{}
+	if a.continuation != nil {
+		ctx["config"] = pluginruntime.RawJSON(a.continuation.Config)
+		return
+	}
 	if a.info == nil || !a.info.HasChannelMeta() || a.info.ChannelId == 0 || channelType == constant.ChannelTypeNewAPI {
 		return
 	}
@@ -1783,6 +1865,9 @@ func (a *TaskAdaptor) requestDescriptor(ctx context.Context, hook string, args .
 // checkSubmitAdmission precedes auth preparation as well as the submit hook.
 // It applies only to new submissions; persisted task polling keeps its contract.
 func (a *TaskAdaptor) checkSubmitAdmission(c *gin.Context, info *relaycommon.RelayInfo) error {
+	if a.continuation != nil {
+		return core.ErrContinuationUnavailable
+	}
 	if !core.ModelAdmissionEnabled() {
 		return nil
 	}

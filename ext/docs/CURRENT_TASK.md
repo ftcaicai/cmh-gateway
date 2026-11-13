@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `2dec61dd5`：main/develop一致，差异门禁两次success（43463913669 / 43463887927），本轮extension continuation archive待提交。48/6000规则已落实；完整Ubuntu CI证据见 `acceptance/p2/H1-closeout-approval.md`。分支保护未认证。所有Gate仍noop。
+- 最近已推 `070d7cad4`：main/develop一致，差异门禁两次success（43466261685 / 43466251595），本轮explicit frozen-runtime restore待提交。48/6000规则已落实；完整Ubuntu CI证据见 `acceptance/p2/H1-closeout-approval.md`。分支保护未认证。所有Gate仍noop。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -23,7 +23,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1-C本轮extension continuation档案：core task/user/channel绑定ref/artifact/purpose合同、Store AES256GCM随机nonce+schema/Binding/Ref/KeyIDAAD、immutableCreateConflict后authLoad、严格sourcehash+runtime对象exactbytes界限；显式未注册cmh_task_continuations migration，MySQL大文本容量。真实三库fresh/repeat2+已有数据repeat2/70KiB源码/独立重开连接Store恢复、错task/user/channel/ref/key/purpose拒、inputkeycopy+轮换旧读新写+buffercopy、密文移植/损坏拒且Save不修复全过（SQLite0.06/MySQL0.18/PG0.21包5.890s）；ext tests/vet/buildexit0，独立安全review无本未启用基础范围问题。证据 `acceptance/p2/H1-C-continuation-archive.md`。官方本轮0修改，未接poll/sourcecompile/taskref/启动密钥或资金逻辑。
+3. H1-C本轮显式runtimeCapture/Restore：LoadedPlugin精确sourcebytescopy、type61实际info运行控制v1 boundedhash/strictstruct+config/BaseURL/HTTPtransport验证；unpublished CompilePlugin恢复旧源不发布Registry。实际query sourceA/configA/headerA捕获后infoB/RegistryB，恢复仍A signer/override，Init不能改，base/proxy漂移拒0新请求，Validate/Build/Do拒newsubmit evennoop，active空target仍拒。篡改source/版本/key拒；相关tests/vet/buildexit0、独立review无限定基础范围阻断。证据 `acceptance/p2/H1-C-continuation-runtime.md`。没接archiveSave/taskRef/pollresolver/真实capture点，不能叫持久任务重启完成，allGate仍noop。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -33,7 +33,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前41官方文件/3061行，H1硬限48/6000，剩7文件/2939行；文件数80%范围复核保留，实施/官方测试均精确登记，不能凭估计保证全收口。分支保护未认证。
+- 门禁目前41官方文件/3158行，H1硬限48/6000，剩7文件/2842行；文件数80%范围复核保留，实施/官方测试均精确登记，不能凭估计保证全收口。分支保护未认证。
 
 ## 临时资源与作业
 
@@ -41,7 +41,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续host冻结投影/旧源恢复：纯加密archive+DTO已验，现需host版本化runtime投影（无APIKey/credentialblob，只保必要config/route/base/proxy/headers/param/targets身份）与unpublished CompilePlugin exactsource，不替全局Registry发布；提交前耐久Save并TaskPrivate只存safe ref，taskawarepoll/content/report Load。当前只有审计snapshot、版本表可删不能代档案，按ref+CredentialAccount分批。缺档要hold不落普通PollFailures自动退款/timeout终态，尚需设计完整恢复/人工修复边界，不能私改钱账。启动key来源/备份/跨节点GCM预算和旧key保留未落，纯constructor不算生产配置。另candidate generation/affinity/Save目录/type60/启动实际gate都未完。
+- 接续实际archiveSave/taskRef：Capture当前只有显式method，未来必须在已准入actualruntime/联网前耐久保存（noop普通submit仍cache可能不同，不能当历史证明），TaskPrivate仅safe ref；按taskbinding+ref+CredentialAccount恢复poll/content/report，分批隔离。source/config/target grant旧任务延续尚未接现有activegate，Restore未豁免。Restoredinfo无ApiKey且Init锁定，内容需显式account-bound key注入，不替账户。缺档要hold不落普通PollFailures/timeout退款，尚需完整恢复边界，金融仍同事务另RFC。启动key保管/备份/GCM预算未落；candidate generation/affinity/Save目录/type60/启动gate也未完。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 

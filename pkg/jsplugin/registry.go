@@ -392,12 +392,22 @@ type LoadedPlugin struct {
 	Engine *Engine
 
 	sourceSHA256 string
+	sourceBytes  string
 }
 
 // SourceSHA256 returns the lowercase hex SHA-256 of the exact compiled source bytes.
 // It is fixed at compilation, independently of the plugin's claimed version.
 func (p *LoadedPlugin) SourceSHA256() string {
 	return p.sourceSHA256
+}
+
+// SourceBytes returns a fresh copy of the exact compiled source, for trusted
+// encrypted continuation storage only. Never expose it through task DTOs/logs.
+func (p *LoadedPlugin) SourceBytes() []byte {
+	if p == nil {
+		return nil
+	}
+	return []byte(p.sourceBytes)
 }
 
 // UsesSubmitEventDelta reports whether SSE submissions go through
@@ -787,7 +797,7 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 	if err = validateProviderHooks(meta, engine); err != nil {
 		return nil, err
 	}
-	return &LoadedPlugin{Meta: meta, Engine: engine, sourceSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(source)))}, nil
+	return &LoadedPlugin{Meta: meta, Engine: engine, sourceSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(source))), sourceBytes: source}, nil
 }
 
 // taskOnlyMetaFields are the manifest fields only a task part reads.
