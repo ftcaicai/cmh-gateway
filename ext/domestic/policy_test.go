@@ -12,6 +12,74 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestOperatorManifestCompilation(t *testing.T) {
+	oldModels, oldDestinations := core.Models, core.Destinations
+	manifest := OperatorManifest{Version: 1, PublicModels: []string{"public-chat"}, UpstreamModels: []string{"approved-target"}, ChannelTypes: []int{1}}
+	wire, err := EncodeOperatorManifest(manifest)
+	require.NoError(t, err)
+	policies, err := ParseOperatorManifest(wire)
+	require.NoError(t, err)
+	require.Len(t, policies.Fingerprint, 64)
+	assert.Equal(t, oldModels, core.Models)
+	assert.Equal(t, oldDestinations, core.Destinations)
+	candidate := core.Admission{Phase: core.AdmissionDispatch, Model: core.ModelIdentity{Public: "public-chat", Upstream: "approved-target"}, Channel: core.ChannelIdentity{Known: true, ID: 1, Type: 1}, Executor: core.ExecutorIdentity{Kind: "builtin"}}
+	assert.NoError(t, policies.Models.Check(t.Context(), candidate))
+	candidate.Model.Upstream = "unapproved-target"
+	assert.ErrorIs(t, policies.Models.Check(t.Context(), candidate), ErrAdmissionDenied)
+	manifest.PublicModels[0] = "mutated"
+	candidate.Model.Upstream = "approved-target"
+	assert.NoError(t, policies.Models.Check(t.Context(), candidate), "compiled maps cannot share caller mutable arrays")
+	padding, err := ParseOperatorManifest(append([]byte(" \n"), append(wire, '\n')...))
+	require.NoError(t, err)
+	assert.Equal(t, policies.Fingerprint, padding.Fingerprint)
+	for _, bad := range [][]byte{[]byte(`null`), []byte(`{}`), []byte(strings.Replace(string(wire), `"Version":1`, `"Version":2`, 1)), []byte(strings.Replace(string(wire), `"Version":1`, `"Version":1,"Version":1`, 1)), []byte(strings.Replace(string(wire), `"Version":1`, `"Unexpected":"private-detail","Version":1`, 1)), []byte(strings.Replace(string(wire), `"Version":1`, `"Version": 1`, 1)), {0xff}, make([]byte, (1<<20)+1)} {
+		got, err := ParseOperatorManifest(bad)
+		require.Error(t, err)
+		assert.Nil(t, got)
+		assert.NotContains(t, err.Error(), "private-detail")
+	}
+	base := OperatorManifest{Version: 1, PublicModels: []string{"public-chat"}, UpstreamModels: []string{"approved-target"}, ChannelTypes: []int{1}}
+	for _, change := range []func(*OperatorManifest){func(m *OperatorManifest) { m.PublicModels = []string{string([]byte{0xff})} }, func(m *OperatorManifest) { m.UpstreamModels = []string{string([]byte{0xff})} }, func(m *OperatorManifest) { m.PublicModels = []string{"public-chat", "public-chat"} }, func(m *OperatorManifest) { m.PublicModels = []string{" public-chat"} }, func(m *OperatorManifest) { m.PublicModels = []string{"public-chat,other"} }, func(m *OperatorManifest) { m.ChannelTypes = []int{1, 1} }, func(m *OperatorManifest) { m.ChannelTypes = []int{0} }, func(m *OperatorManifest) { m.Executors = []core.ExecutorIdentity{{Kind: "builtin"}} }, func(m *OperatorManifest) { m.Destinations = []core.DestinationAdmission{{Kind: "unknown"}} }} {
+		changed := base
+		change(&changed)
+		_, err := EncodeOperatorManifest(changed)
+		require.Error(t, err)
+	}
+	_, _, executor, _ := admissionFixture(t)
+	executor.Generation = 0
+	pluginManifest := base
+	pluginManifest.Executors = []core.ExecutorIdentity{executor}
+	address, err := core.DestinationAddress("https://fixture.invalid/task")
+	require.NoError(t, err)
+	destination := core.DestinationAdmission{Kind: "plugin_fetch", Method: "POST", AddressSHA256: address, HostSHA256: core.DestinationHost("fixture.invalid"), Executor: executor, Hook: "report"}
+	pluginManifest.Destinations = []core.DestinationAdmission{destination}
+	pluginWire, err := EncodeOperatorManifest(pluginManifest)
+	require.NoError(t, err)
+	pluginPolicies, err := ParseOperatorManifest(pluginWire)
+	require.NoError(t, err)
+	assert.NoError(t, pluginPolicies.Models.CheckExecutor(t.Context(), executor))
+	assert.NoError(t, pluginPolicies.Destinations.CheckDestination(t.Context(), destination))
+	invalidDestination := pluginManifest
+	invalidDestination.Destinations = append([]core.DestinationAdmission{}, pluginManifest.Destinations...)
+	invalidDestination.Destinations[0].Hook = string([]byte{0xff})
+	_, err = EncodeOperatorManifest(invalidDestination)
+	require.Error(t, err)
+	duplicate := pluginManifest
+	duplicate.Executors = append(append([]core.ExecutorIdentity{}, duplicate.Executors...), executor)
+	_, err = EncodeOperatorManifest(duplicate)
+	require.Error(t, err)
+	generation := pluginManifest
+	generation.Executors = []core.ExecutorIdentity{executor}
+	generation.Executors[0].Generation = 1
+	_, err = EncodeOperatorManifest(generation)
+	require.Error(t, err)
+	empty, err := EncodeOperatorManifest(OperatorManifest{Version: 1})
+	require.NoError(t, err)
+	closed, err := ParseOperatorManifest(empty)
+	require.NoError(t, err)
+	assert.Error(t, closed.Models.Check(t.Context(), candidate))
+}
+
 func TestPolicyPublicationBoundary(t *testing.T) {
 	var nilPolicy *Policy
 	require.False(t, nilPolicy.AllowsModel("kimi-k3"))
