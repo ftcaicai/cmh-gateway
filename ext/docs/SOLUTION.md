@@ -1,6 +1,6 @@
 # 以 new-api 官方为基座建设新系统：完整方案（v0.5，2026-11-13）
 
-> **2026-11-13 实施复核纠正（优先于下文对应旧结论）**：独立审查已证实 H3/H7“四个唯一资金出口、函数入口 handled 即可保证资金一致性”的假设不成立，详见 `acceptance/p1/funding-lifecycle-audit.md`。H3/H7 尚未实施，150 行可行性未获证明，用户的同事务选择仍有效；不得将本文件的接管设想当作用户批准变更钱包归属。P0 实测亦已纠正 Cookie-only self 与 `/login` 假设：真实契约为 refresh Cookie→内存 Bearer，登录页 `/sign-in`。当前通过20项客户端测试、13项HTTP和7项Chrome DOM检查，但官方登录表单后的自动跨应用回跳仍未验，P0 不报全验完成。进度以 `CURRENT_TASK.md` 和验收证据为准。
+> **2026-11-13 实施复核纠正（优先于下文对应旧结论）**：独立审查已证实 H3/H7“四个唯一资金出口、函数入口 handled 即可保证资金一致性”的假设不成立，详见 `acceptance/p1/funding-lifecycle-audit.md`。H3/H7 尚未实施，150 行可行性未获证明，用户的同事务选择仍有效；不得将本文件的接管设想当作用户批准变更钱包归属。P0真实契约为refresh Cookie→内存Bearer、登录页 `/sign-in`。用户随后批准R3最小前端桥接，完整官方production构建+真实表单五项通过（含已登录回跳与官方dashboard仍SPA），见 `acceptance/p0/T0.2-bridge-pass.md`。全仓后端回归仍有Windows cleanup/HTTP2失败；新增工厂目录清单回归经用户批准R4精确修复后plugins+ext全通过，不等于全仓绿。P2三入口唯一门禁假设亦被复核否定（copy/tag/upstream-sync/客户目录/WS复用），见 `acceptance/p2/admission-surface-audit.md`；当前仅纯Policy与定向插件通过，未开放live gate。进度以 `CURRENT_TASK.md` 和验收证据为准。
 
 配套文件：`AGENTS.md`（新仓库宪法）、`OEM-MIGRATION-TASKS.md`（OEM 功能移植任务与验收）。
 本文件回答：为什么这样做、做成什么样、挂在哪里、怎么分期、怎么验收、风险在哪、还有什么没定。

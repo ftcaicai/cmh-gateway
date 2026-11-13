@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 已推 `b5a2864c8`：独立控制台、会话客户端、静态资源与品牌兜底修复；远程main/develop一致；此前CI在ab4c69bee两次success。
+- 已推 `2d4fc7721`：main/develop一致，R3与R4远程CI各两次success；当前干净工作树。R4修复完整plugins与ext测试通过，见对应RFC。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -21,9 +21,10 @@ R3最小前端例外已批准并完成5项真实Chrome表单验收；R4既有官
 
 ## 下一动作
 
-1. 插件代理 `4a627187-a387-4309-aa3f-e4c800618afd` 已完成：官方CLI lint通过，43/43 golden通过，真实CallTransform+补丁应用测试通过；默认无scope/开关全false，不自动注册或激活。父代理复跑全ext测试及CLI通过。
-2. R3回跳已经批准并完成五项真实Chrome表单验证；下一步处理工厂插件清单官方测试登记（需用户确认），并在纯官方基线复验Windows失败，不能笼统归为环境错误。
-3. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
+1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
+2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
+3. H1完整准入设计已汇总 `rfc/2026-11-13-admission-hook-budget.md`：20生产文件候选、累计约29文件，现1文件/40行剩余不足；提议RFC专项累计32文件/2500行并明确准入型多调用与core import例外，**待用户批准未实施**。
+4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 4. P2后续H1需完整旁路覆盖、模型公开名/最终上游/实际插件身份分开；150行/10文件预算未证实，不能增文件白名单把实现绕过去。
 
 ## 命令与环境
@@ -31,8 +32,8 @@ R3最小前端例外已批准并完成5项真实Chrome表单验收；R4既有官
 - Go1.26.10已缓存，调用使用临时 `GOSUMDB=sum.golang.google.cn GOPROXY=https://goproxy.cn,direct`。
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
-- 官方真实构建web/dist/index.html SHA256 AAA9C1A4B062FC05A6DDE3FA5006DCCC73911FAB3BEE4333F9462B8EE8B1D14B；entry JS index.112f5f678d.js SHA256 BD0DFFE7C917D577EE894327B3E37FAE45C3CE5C0F761239100E2D4AB3B0CE38。真实资源不能当临时占位随意删。
-- 门禁目前4官方文件/38行，exit0；未核对分支保护，CI成功不代表强制阻断merge。
+- 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
+- 门禁目前9官方文件/110行，exit0；剩1文件/40行。未核对分支保护，CI成功不代表强制阻断merge。
 
 ## 临时资源与作业
 
