@@ -871,7 +871,7 @@ func (a *TaskAdaptor) FetchBatchTasks(baseURL, key string, tasks []*model.Task, 
 	if err != nil {
 		return nil, err
 	}
-	return a.doFetchDescriptor(baseURL, key, proxy, descriptor)
+	return a.doFetchDescriptor(baseURL, key, proxy, descriptor, "buildBatchQueryRequest")
 }
 
 func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy string) (*http.Response, error) {
@@ -891,7 +891,7 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy str
 	if err != nil {
 		return nil, err
 	}
-	return a.doFetchDescriptor(baseURL, key, proxy, descriptor)
+	return a.doFetchDescriptor(baseURL, key, proxy, descriptor, "buildQueryRequest")
 }
 
 // hookFetcher sends a driver hook's utils.fetch requests to the hosts its
@@ -900,7 +900,40 @@ func (a *TaskAdaptor) hookFetcher(baseURL, proxy string) pluginruntime.Fetcher {
 	return service.PluginFetcher(a.plugin, baseURL, proxy, a.channelSetting())
 }
 
-func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor requestDescriptor) (*http.Response, error) {
+// checkQueryDestination authorizes the actual query transport after signing.
+// This is network capability approval, not a persisted task/model permission.
+func (a *TaskAdaptor) checkQueryDestination(req *http.Request, baseURL, proxy, hook string) error {
+	if !core.DestinationAdmissionEnabled() {
+		return nil
+	}
+	if req == nil || req.URL == nil || (hook != "buildQueryRequest" && hook != "buildBatchQueryRequest") {
+		return errors.New("request rejected")
+	}
+	executor, err := service.PluginFetchExecutor(a.plugin, baseURL, proxy, a.channelSetting())
+	if err != nil {
+		return errors.New("request rejected")
+	}
+	address, err := core.DestinationAddress(req.URL.String())
+	if err != nil {
+		return errors.New("request rejected")
+	}
+	host := req.Host
+	if host == "" {
+		host = req.URL.Host
+	}
+	admission := core.DestinationAdmission{Kind: "task_query", Method: req.Method, AddressSHA256: address,
+		HostSHA256: core.DestinationHost(host), Executor: executor, Hook: hook}
+	if core.Destinations.CheckDestination(req.Context(), admission) != nil {
+		return errors.New("request rejected")
+	}
+	return nil
+}
+
+func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor requestDescriptor, hooks ...string) (*http.Response, error) {
+	hook := ""
+	if len(hooks) == 1 {
+		hook = hooks[0]
+	}
 	if err := pluginruntime.ValidateRequestURL(descriptor.URL, baseURL, a.plugin.Meta.AllowedHosts); err != nil {
 		return nil, err
 	}
@@ -940,6 +973,9 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor r
 		return nil, err
 	}
 	if err := a.signTaskRequest(context.Background(), a.channelType(), baseURL, key, credential, method, req.URL, req.Header, bodySHA256(body)); err != nil {
+		return nil, err
+	}
+	if err := a.checkQueryDestination(req, baseURL, proxy, hook); err != nil {
 		return nil, err
 	}
 	client, err := service.GetHttpClientWithProxySettings(proxy, a.channelSetting())
@@ -989,6 +1025,10 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor r
 					next.Header[name] = slices.Clone(values)
 				}
 			}
+		}
+		if err := a.checkQueryDestination(next, baseURL, proxy, hook); err != nil {
+			redirectPolicyErr = err
+			return err
 		}
 		if client.CheckRedirect != nil {
 			if err := client.CheckRedirect(next, via); err != nil {

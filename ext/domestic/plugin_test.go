@@ -26,6 +26,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
+	taskjsplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/requestplugin"
@@ -34,6 +35,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -691,6 +693,115 @@ export function refresh(ctx){utils.fetch({url:ctx.baseUrl+"/credential",method:"
 type deniedFetchBody struct{ reads int }
 
 func (p *deniedFetchBody) Read([]byte) (int, error) { p.reads++; return 0, io.EOF }
+
+func TestTaskQueryDestinationBeforeNetwork(t *testing.T) {
+	fetchSetting := system_setting.GetFetchSetting()
+	previousFetch := *fetchSetting
+	fetchSetting.AllowPrivateIp = true
+	fetchSetting.AllowedPorts = []string{"1-65535"}
+	t.Cleanup(func() { *fetchSetting = previousFetch })
+	previous := core.Destinations
+	t.Cleanup(func() { core.Destinations = previous })
+	var firstCalls, redirectCalls atomic.Int32
+	next := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer next.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstCalls.Add(1)
+		if r.URL.Path == "/redirect" {
+			status := http.StatusFound
+			if r.Method == http.MethodPost {
+				status = http.StatusSeeOther
+			}
+			http.Redirect(w, r, next.URL+"/result", status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	service.InitHttpClient()
+	const source = `export const meta={apiVersion:1,key:"cmh-query-target",name:"Query target",version:"1.0.0",author:{name:"Test"},models:["local-task"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"};}
+export function parseSubmitResponse(){return {taskId:"local"};}
+export function buildQueryRequest(ctx){return {url:ctx.baseUrl+(ctx.state&&ctx.state.redirect?"/redirect":"/query"),method:ctx.state&&ctx.state.post?"POST":"GET",body:ctx.state&&ctx.state.post?{fixture:true}:undefined};}
+export function buildBatchQueryRequest(ctx,tasks){return {url:ctx.baseUrl+"/batch",method:"POST",body:{ids:tasks.map(t=>t.taskId)}};}
+export function parseTaskResult(){return {status:"SUCCESS"};}
+export function parseBatchResult(){return [];}`
+	plugin, err := jsplugin.CompilePlugin(source, jsplugin.Options{})
+	require.NoError(t, err)
+	capability, err := service.PluginFetchExecutor(plugin, server.URL, "", kitdto.ChannelSettings{})
+	require.NoError(t, err)
+	makeApproval := func(raw, method, hook string) core.DestinationAdmission {
+		hash, err := core.DestinationAddress(raw)
+		require.NoError(t, err)
+		host, err := url.Parse(raw)
+		require.NoError(t, err)
+		return core.DestinationAdmission{Kind: "task_query", Method: method, AddressSHA256: hash, HostSHA256: core.DestinationHost(host.Host), Executor: capability, Hook: hook}
+	}
+	task := &model.Task{TaskID: "task-local", Properties: model.Properties{OriginModelName: "not-currently-published"}, PrivateData: model.TaskPrivateData{UpstreamTaskID: "up-local"}}
+	adaptor := taskjsplugin.New(plugin)
+	deny, err := NewDestinationPolicy(nil)
+	require.NoError(t, err)
+	core.Destinations = deny
+	_, err = adaptor.FetchTask(server.URL, "fixture", task, "")
+	require.Error(t, err)
+	assert.Zero(t, firstCalls.Load())
+	single := makeApproval(server.URL+"/query", http.MethodGet, "buildQueryRequest")
+	policy, err := NewDestinationPolicy([]core.DestinationAdmission{single})
+	require.NoError(t, err)
+	core.Destinations = policy
+	response, err := adaptor.FetchTask(server.URL, "fixture", task, "")
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, int32(1), firstCalls.Load(), "existing task query does not need newly published model approval")
+	_, err = adaptor.FetchBatchTasks(server.URL, "fixture", []*model.Task{task}, "")
+	require.Error(t, err)
+	assert.Equal(t, int32(1), firstCalls.Load(), "single hook cannot authorize batch URL/method")
+	batch := makeApproval(server.URL+"/batch", http.MethodPost, "buildBatchQueryRequest")
+	policy, err = NewDestinationPolicy([]core.DestinationAdmission{batch})
+	require.NoError(t, err)
+	core.Destinations = policy
+	response, err = adaptor.FetchBatchTasks(server.URL, "fixture", []*model.Task{task}, "")
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, int32(2), firstCalls.Load())
+	task.PrivateData.PluginState = common.RawMessage(`{"redirect":true}`)
+	redirect := makeApproval(server.URL+"/redirect", http.MethodGet, "buildQueryRequest")
+	policy, err = NewDestinationPolicy([]core.DestinationAdmission{redirect})
+	require.NoError(t, err)
+	core.Destinations = policy
+	_, err = adaptor.FetchTask(server.URL, "fixture", task, "")
+	require.Error(t, err)
+	assert.Zero(t, redirectCalls.Load(), "redirect target must be approved before second network hop")
+	secondTarget := makeApproval(next.URL+"/result", http.MethodGet, "buildQueryRequest")
+	policy, err = NewDestinationPolicy([]core.DestinationAdmission{redirect, secondTarget})
+	require.NoError(t, err)
+	core.Destinations = policy
+	response, err = adaptor.FetchTask(server.URL, "fixture", task, "")
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, int32(1), redirectCalls.Load())
+	task.PrivateData.PluginState = common.RawMessage(`{"redirect":true,"post":true}`)
+	postStart := makeApproval(server.URL+"/redirect", http.MethodPost, "buildQueryRequest")
+	wrongMethod := makeApproval(next.URL+"/result", http.MethodPost, "buildQueryRequest")
+	policy, err = NewDestinationPolicy([]core.DestinationAdmission{postStart, wrongMethod})
+	require.NoError(t, err)
+	core.Destinations = policy
+	_, err = adaptor.FetchTask(server.URL, "fixture", task, "")
+	require.Error(t, err)
+	assert.Equal(t, int32(1), redirectCalls.Load(), "POST approval cannot authorize GET rewritten by303")
+	policy, err = NewDestinationPolicy([]core.DestinationAdmission{postStart, secondTarget})
+	require.NoError(t, err)
+	core.Destinations = policy
+	response, err = adaptor.FetchTask(server.URL, "fixture", task, "")
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, int32(2), redirectCalls.Load())
+}
 
 func TestParamNormalizePluginHostContract(t *testing.T) {
 	source, err := os.ReadFile(filepath.Join("..", "..", "plugins", "tasks", "cmh-param-normalize", "plugin.js"))

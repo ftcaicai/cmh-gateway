@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -526,6 +527,8 @@ export function convertStreamEvent(ctx,event){if(ctx.state.stream)return {events
 
 func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
 	t.Helper()
+	previousDestinations := core.Destinations
+	defer func() { core.Destinations = previousDestinations }()
 	previousRegistry := jsplugin.DefaultRegistry
 	registry := jsplugin.NewRegistry()
 	jsplugin.DefaultRegistry = registry
@@ -604,11 +607,32 @@ export function parseTaskResult(){return {status:"SUCCESS"};}`
 	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("settings", `{"plugin_config":{"tier":"stale-cache"}}`).Error)
 	model.InitChannelCache()
 	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("settings", stored.OtherSettings).Error)
+	capability, err := service.PluginFetchExecutor(plugin, base, "", info.ChannelSetting)
+	require.NoError(t, err)
+	lookupHash, err := core.DestinationAddress(base + "/lookup")
+	require.NoError(t, err)
+	baseURL, err := url.Parse(base)
+	require.NoError(t, err)
+	lookupTarget := core.DestinationAdmission{Kind: "plugin_fetch", Method: "GET", AddressSHA256: lookupHash, HostSHA256: core.DestinationHost(baseURL.Host), Executor: capability, Hook: "buildSubmitRequest"}
+	fetchOnly, err := NewDestinationPolicy([]core.DestinationAdmission{lookupTarget})
+	require.NoError(t, err)
+	core.Destinations = fetchOnly
 	adaptor := taskjsplugin.New(plugin)
 	adaptor.Init(info)
 	require.Nil(t, adaptor.ValidateRequestAndSetAction(c, info))
 	assert.Equal(t, int32(1), lookups.Load())
 	body, err := adaptor.BuildRequestBody(c, info)
+	require.NoError(t, err)
+	_, err = adaptor.DoRequest(c, info, body)
+	require.Error(t, err)
+	assert.Zero(t, submissions.Load(), "task submit must hit final relay target gate")
+	submitHash, err := core.DestinationAddress(base + "/submit")
+	require.NoError(t, err)
+	submitTarget := core.DestinationAdmission{Kind: "relay_http", Method: "POST", AddressSHA256: submitHash, HostSHA256: core.DestinationHost(baseURL.Host), Model: core.ModelIdentity{Public: "public-task", Upstream: "public-task"}, Channel: core.ChannelIdentity{Known: true, ID: stored.Id, Type: stored.Type}}
+	bothTargets, err := NewDestinationPolicy([]core.DestinationAdmission{lookupTarget, submitTarget})
+	require.NoError(t, err)
+	core.Destinations = bothTargets
+	body, err = adaptor.BuildRequestBody(c, info)
 	require.NoError(t, err)
 	response, err := adaptor.DoRequest(c, info, body)
 	require.NoError(t, err)

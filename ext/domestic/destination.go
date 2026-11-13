@@ -36,15 +36,23 @@ func NewDestinationPolicy(approvals []core.DestinationAdmission) (*DestinationPo
 }
 
 func validDestination(admission core.DestinationAdmission) bool {
-	if admission.Kind == "plugin_fetch" {
+	if admission.Kind == "plugin_fetch" || admission.Kind == "task_query" {
 		if admission.Channel != (core.ChannelIdentity{}) || admission.Model != (core.ModelIdentity{}) || admission.Executor.Kind != "plugin" || admission.Hook == "" || len(admission.Hook) > 128 || !utf8.ValidString(admission.Hook) || strings.ContainsFunc(admission.Hook, unicode.IsControl) {
 			return false
 		}
 		if _, valid := approvedExecutorIdentity(admission.Executor); !valid {
 			return false
 		}
-		if admission.Method != "GET" && admission.Method != "HEAD" && admission.Method != "POST" {
-			return false
+		if admission.Kind == "plugin_fetch" {
+			if admission.Method != "GET" && admission.Method != "HEAD" && admission.Method != "POST" {
+				return false
+			}
+		} else {
+			switch admission.Method {
+			case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+			default:
+				return false
+			}
 		}
 	} else {
 		if admission.Executor != (core.ExecutorIdentity{}) || admission.Hook != "" || !admission.Channel.Known || admission.Channel.ID <= 0 || admission.Channel.Type <= 0 {
