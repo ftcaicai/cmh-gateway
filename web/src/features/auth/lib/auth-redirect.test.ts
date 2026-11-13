@@ -20,7 +20,11 @@ import { describe, expect, test } from 'vitest'
 
 import type { AuthUser } from '@/stores/auth-store'
 
-import { getSavedLanguage, sanitizeAuthRedirect } from './auth-redirect'
+import {
+  getAuthRedirectNavigation,
+  getSavedLanguage,
+  sanitizeAuthRedirect,
+} from './auth-redirect'
 
 const origin = 'https://dashboard.example.com'
 
@@ -58,6 +62,33 @@ describe('authentication redirect validation', () => {
     expect(sanitizeAuthRedirect('/dashboard', 'not-an-origin')).toBe(null)
     expect(sanitizeAuthRedirect('/dashboard', 'file:///tmp/app')).toBe(null)
   })
+})
+
+describe('cross-application authentication navigation', () => {
+  test.each([
+    ['/cmh', '/cmh', true],
+    ['/cmh?tab=usage#recent', '/cmh?tab=usage#recent', true],
+    ['/cmh%2Fevil', '/cmh%2Fevil', false],
+    ['/cmh/?tab=usage#recent', '/cmh/?tab=usage#recent', true],
+    ['/cmh/whoami', '/cmh/whoami', true],
+    [`${origin}/cmh/whoami`, '/cmh/whoami', true],
+    ['/cmh/../dashboard', '/dashboard', false],
+    ['/cmh-evil', '/cmh-evil', false],
+    ['/dashboard?next=/cmh/', '/dashboard?next=/cmh/', false],
+    ['//attacker.example/cmh/', '/dashboard', false],
+    ['https://attacker.example/cmh/', '/dashboard', false],
+    ['/\\attacker.example/cmh/', '/dashboard', false],
+    ['javascript:alert(1)', '/dashboard', false],
+    [undefined, '/dashboard', false],
+  ])(
+    'maps %s to safe href %s with document navigation %s',
+    (input, href, reloadDocument) => {
+      expect(getAuthRedirectNavigation(input, origin)).toEqual({
+        href,
+        reloadDocument,
+      })
+    }
+  )
 })
 
 describe('saved authentication language', () => {

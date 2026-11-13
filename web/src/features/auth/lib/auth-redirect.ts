@@ -78,3 +78,11 @@ export function sanitizeAuthRedirect(
 
   return `${redirectURL.pathname}${redirectURL.search}${redirectURL.hash}`
 }
+
+export function getAuthRedirectNavigation(
+  value: unknown,
+  origin: string
+): { href: string; reloadDocument: boolean } {
+  const href = sanitizeAuthRedirect(value, origin) ?? '/dashboard'
+  return { href, reloadDocument: /^\/cmh(?:\/|[?#]|$)/.test(href) }
+}

@@ -1,6 +1,6 @@
 # CMH parameter normalization
 
-This is an offline, request-processing-only plugin artifact. It exports only the `outbound` stage hook and config validation; it does not declare a task driver, provider relay routes, models, channel types, credentials, fetch targets, persistent data, usage facts or pricing rules. It is not automatically embedded, registered or enabled by adding this directory. This change performs no live upload, instance registration, activation or channel binding.
+This request-processing-only plugin exports only `outbound` and config validation. It declares no task driver, provider routes, models, channel types, credentials, fetch targets, persistent data, usage facts or pricing rules. **The official `plugins/embed.go` embeds the entire tasks directory and registers every subdirectory as a factory at startup: this plugin IS automatically embedded and factory-registered in a rebuilt gateway.** That does not create an enabled request-processing instance; scope and effect require an explicitly enabled instance configuration. This change performs no production upload, request-instance activation or channel binding. Earlier documentation claiming no automatic embedding/registration was incorrect; the full-backend regression exposed the fixed factory-key inventory mismatch, tracked in `ext/docs/rfc/2026-11-13-plugin-factory-inventory.md`.
 
 ## Conservative scope
 

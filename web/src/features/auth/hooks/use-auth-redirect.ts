@@ -21,6 +21,7 @@ import i18n from 'i18next'
 import { useCallback, useEffect, useRef } from 'react'
 
 import {
+  getAuthRedirectNavigation,
   getSavedLanguage,
   sanitizeAuthRedirect,
 } from '@/features/auth/lib/auth-redirect'
@@ -63,9 +64,10 @@ export function useAuthRedirect() {
         await i18n.changeLanguage(savedLang)
       }
 
-      const targetPath =
-        sanitizeAuthRedirect(redirectTo, window.location.origin) ?? '/dashboard'
-      await navigate({ href: targetPath, replace: true })
+      await navigate({
+        ...getAuthRedirectNavigation(redirectTo, window.location.origin),
+        replace: true,
+      })
     },
     [navigate, sessionID]
   )

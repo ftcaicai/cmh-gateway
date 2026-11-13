@@ -24,11 +24,32 @@ assert.equal(officialScripts,true)
 await ev(`(()=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;for(const [name,value] of [['username','cmhuitest'],['password',${JSON.stringify(password)}]]){const el=document.querySelector('input[name='+name+']');set.call(el,value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))}return true})()`)
 await ev("document.querySelector('button[type=submit]').click()")
 await until("location.pathname==='/cmh/whoami'",'official form submitted and redirect URL selected')
-// Wait on the gateway's completed successful login, not a fixed UI sleep.
-const established=await ev("fetch('/api/user/auth/refresh',{method:'POST'}).then(r=>r.json()).then(j=>!!j.data?.access_token)")
-assert.equal(established,true)
-const view=await ev("({path:location.pathname,usernameRendered:!!document.querySelector('[data-testid=auth-state]')?.textContent.includes('cmhuitest'),body:document.body.innerText.slice(0,700),scripts:[...document.scripts].map(s=>new URL(s.src||location.href).pathname).filter(p=>p.includes('/static/')).slice(0,5)})")
-console.log(JSON.stringify({officialFormLoaded:true,officialFormLoginSucceeded:true,redirectPath:view.path,cmhUsernameRendered:view.usernameRendered,renderedShell:view.scripts.some(p=>p.startsWith('/cmh/'))?'cmh':'official',bodyPreview:view.body,limits:'local HTTP; snapshot after URL transition. Full CMH render must be separately awaited or its absence treated as failure.'},null,2))
-try{await until("document.querySelector('[data-testid=auth-state]')?.textContent.includes('cmhuitest')",'CMH after official login');console.log('AUTOMATIC_CROSS_APP_RETURN=PASS')}
-catch{console.log('AUTOMATIC_CROSS_APP_RETURN=FAIL_OFFICIAL_SPA_STILL_OWNS_DOCUMENT');process.exitCode=1}
+// Wait for the real app identity, not just URL changes or another refresh call.
+try {
+  await until("document.querySelector('[data-testid=auth-state]')?.textContent.includes('cmhuitest')",'CMH after official login')
+  assert.equal(await ev("[...document.scripts].some(s=>new URL(s.src||location.href).pathname.startsWith('/cmh/static/'))"),true)
+  console.log('AUTOMATIC_CROSS_APP_RETURN=PASS')
+  await cdp('Page.navigate',{url:base+'/sign-in?redirect=%2Fcmh%2Fwhoami'})
+  await until("location.pathname==='/cmh/whoami' && document.querySelector('[data-testid=auth-state]')?.textContent.includes('cmhuitest')",'already-authenticated sign-in return')
+  console.log('AUTHENTICATED_SIGNIN_RETURN=PASS')
+  await cdp('Page.reload')
+  await until("document.querySelector('[data-testid=auth-state]')?.textContent.includes('cmhuitest')",'console reload')
+  console.log('CONSOLE_RELOAD_SESSION=PASS')
+  assert.equal(await ev("fetch('/api/user/auth/logout',{method:'POST'}).then(r=>r.status)"),200)
+  await cdp('Page.reload')
+  await until("location.pathname==='/sign-in' && !!document.querySelector('input[name=username]')",'official sign-in after logout')
+  console.log('LOGOUT_RETURNS_REAL_SIGNIN=PASS')
+  await cdp('Page.navigate',{url:base+'/sign-in?redirect=%2Fdashboard'})
+  await until("location.pathname==='/sign-in' && !!document.querySelector('input[name=username]')",'ordinary official sign-in form')
+  await ev(`(()=>{window.__cmhNavigationRegression='same-official-document';const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;for(const [name,value] of [['username','cmhuitest'],['password',${JSON.stringify(password)}]]){const el=document.querySelector('input[name='+name+']');set.call(el,value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))}return true})()`)
+  await ev("document.querySelector('button[type=submit]').click()")
+  await until("(location.pathname==='/dashboard' || location.pathname==='/dashboard/overview') && !document.querySelector('input[name=username]')",'ordinary dashboard return')
+  assert.equal(await ev("window.__cmhNavigationRegression"),'same-official-document')
+  assert.equal(await ev("[...document.scripts].some(s=>new URL(s.src||location.href).pathname.startsWith('/cmh/static/'))"),false)
+  console.log('OFFICIAL_DASHBOARD_STAYS_SPA=PASS')
+} catch (error) {
+  const view=await ev("({path:location.pathname,body:document.body.innerText.slice(0,700),scripts:[...document.scripts].map(s=>new URL(s.src||location.href).pathname).filter(p=>p.includes('/static/')).slice(0,5)})")
+  console.log(JSON.stringify({officialFormLoaded:true,redirectPath:view.path,bodyPreview:view.body,scripts:view.scripts,failure:error.message},null,2))
+  process.exitCode=1
+}
 ws.close()
