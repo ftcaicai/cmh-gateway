@@ -15,9 +15,12 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -37,6 +40,8 @@ type eventSource interface {
 // the body it ends with.
 type streamConverter struct {
 	ctx      context.Context
+	request  *gin.Context
+	info     *relaycommon.RelayInfo
 	adaptor  *Adaptor
 	hookCtx  jsplugin.HookContext
 	source   eventSource
@@ -71,6 +76,8 @@ func (a *Adaptor) newStreamConverter(c *gin.Context, info *relaycommon.RelayInfo
 	hookCtx.State = state
 	return &streamConverter{
 		ctx:          c.Request.Context(),
+		request:      c,
+		info:         info,
 		adaptor:      a,
 		hookCtx:      hookCtx,
 		upstream:     upstream,
@@ -92,11 +99,31 @@ func (s *streamConverter) streamSource(resp *http.Response) eventSource {
 	return &lineSource{reader: bufio.NewReader(body), sse: strings.HasPrefix(contentType, "text/event-stream")}
 }
 
+// checkExecution prevents a retained stream context from authorizing a changed
+// runtime, or a new approved runtime from reusing an older hook configuration.
+func (s *streamConverter) checkExecution() error {
+	if !core.ModelAdmissionEnabled() {
+		return nil
+	}
+	if err := s.adaptor.checkExecution(s.request, s.info); err != nil {
+		_ = s.Close()
+		return err
+	}
+	if s.hookCtx.BaseURL != s.info.ChannelBaseUrl || s.hookCtx.Path != s.request.Request.URL.Path || !bytes.Equal(s.hookCtx.Config, s.adaptor.config) {
+		_ = s.Close()
+		return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	return nil
+}
+
 // respond primes the conversion and answers the client: the event stream, or
 // the chunks or body of a non-streaming client. An error before the first
 // output still gets an error status unless a keep-alive ping went out, as
 // while the upstream headers are awaited.
 func (s *streamConverter) respond(c *gin.Context, header http.Header) (*http.Response, error) {
+	if err := s.checkExecution(); err != nil {
+		return nil, err
+	}
 	stopPinger := func() {}
 	if generalSettings := operation_setting.GetGeneralSetting(); s.clientStream && generalSettings.PingIntervalEnabled && !s.disablePing {
 		stopPinger = helper.StartStreamKeepAlive(c, time.Duration(generalSettings.PingIntervalSeconds)*time.Second)
@@ -109,6 +136,9 @@ func (s *streamConverter) respond(c *gin.Context, header http.Header) (*http.Res
 			return nil, err
 		}
 		return upstreamErrorResponse(upstreamErr, http.StatusInternalServerError), nil
+	}
+	if err = s.checkExecution(); err != nil {
+		return nil, err
 	}
 	header = header.Clone()
 	header.Del("Content-Length")
@@ -148,7 +178,9 @@ func (s *streamConverter) prime(timeout time.Duration) (*jsplugin.UpstreamError,
 	s.mutex.Lock()
 	closed := s.idleClosed
 	if s.clientStream || s.done || upstreamErr != nil || err != nil {
-		s.idle.Stop()
+		if s.idle != nil {
+			s.idle.Stop()
+		}
 		s.idle = nil
 	}
 	s.mutex.Unlock()
@@ -192,6 +224,9 @@ func (s *streamConverter) closeIdle() {
 // skips it, and it restarts the handler's streaming timeout as the upstream
 // data would.
 func (s *streamConverter) Read(p []byte) (int, error) {
+	if err := s.checkExecution(); err != nil {
+		return 0, err
+	}
 	for s.pending.Len() == 0 {
 		if s.done || s.hasBody {
 			s.stopIdle()
@@ -230,8 +265,14 @@ func (s *streamConverter) stopIdle() {
 // convertNext converts the next upstream event, or the end of the stream,
 // and queues the output the plugin returns.
 func (s *streamConverter) convertNext() (*jsplugin.UpstreamError, error) {
+	if err := s.checkExecution(); err != nil {
+		return nil, err
+	}
 	event, more, err := s.source.next()
 	if err != nil {
+		return nil, err
+	}
+	if err = s.checkExecution(); err != nil {
 		return nil, err
 	}
 	plugin := s.adaptor.plugin
@@ -245,6 +286,9 @@ func (s *streamConverter) convertNext() (*jsplugin.UpstreamError, error) {
 	}
 	if upstreamErr != nil || err != nil {
 		return upstreamErr, err
+	}
+	if err = s.checkExecution(); err != nil {
+		return nil, err
 	}
 	s.adaptor.addTools(result.Tools)
 	if err = s.queue(result); err != nil {
@@ -260,6 +304,9 @@ func (s *streamConverter) convertNext() (*jsplugin.UpstreamError, error) {
 		return nil, nil
 	}
 	for _, message := range result.Send {
+		if err = s.checkExecution(); err != nil {
+			return nil, err
+		}
 		if err = writeWebSocketMessage(s.session, message); err != nil {
 			return nil, err
 		}

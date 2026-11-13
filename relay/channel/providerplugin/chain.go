@@ -55,6 +55,10 @@ func (a *Adaptor) runChain(c *gin.Context, info *relaycommon.RelayInfo, first js
 		if err != nil {
 			return nil, err
 		}
+		if err = a.checkExecution(c, info); err != nil {
+			_ = resp.Body.Close()
+			return nil, err
+		}
 		canRenew := a.canRenew()
 		rejected := canRenew && a.rejected(c, info, resp)
 		outcome, err := a.readStep(c, info, resp, step, state, followUps == 0)
@@ -112,6 +116,9 @@ func bodyHash(body []byte) string {
 // auth, the channel's header overrides and signRequest apply to each one.
 // prepareRequest's header effects apply to the first request only.
 func (a *Adaptor) sendStep(c *gin.Context, info *relaycommon.RelayInfo, step jsplugin.ConvertedRequest, body []byte, contentType string, first bool) (*http.Response, error) {
+	if err := a.checkExecution(c, info); err != nil {
+		return nil, err
+	}
 	a.useTarget(step.Path, step.URL)
 	a.contentType = contentType
 	if !first {
@@ -165,6 +172,9 @@ func (a *Adaptor) sendStep(c *gin.Context, info *relaycommon.RelayInfo, step jsp
 	if err = a.sign(c.Request.Context(), info, req.Method, req.URL, req.Header); err != nil {
 		return nil, fmt.Errorf("sign request failed: %w", err)
 	}
+	if err = a.checkExecution(c, info); err != nil {
+		return nil, err
+	}
 	resp, err := channel.DoRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)
@@ -202,6 +212,10 @@ func (a *Adaptor) applyStepHeaders(header http.Header, stepHeaders map[string]st
 // or when its content type is an event stream; its conversion is the client
 // response. Any other response goes to convertResponse.
 func (a *Adaptor) readStep(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, step jsplugin.ConvertedRequest, state json.RawMessage, first bool) (stepOutcome, error) {
+	if err := a.checkExecution(c, info); err != nil {
+		_ = resp.Body.Close()
+		return stepOutcome{}, err
+	}
 	success := resp.StatusCode >= 200 && resp.StatusCode < 300
 	if success && step.NativeResponse {
 		return stepOutcome{response: resp}, nil
@@ -230,9 +244,15 @@ func (a *Adaptor) readStep(c *gin.Context, info *relaycommon.RelayInfo, resp *ht
 		return stepOutcome{}, fmt.Errorf("upstream response exceeds %d bytes", limit)
 	}
 	_ = resp.Body.Close()
+	if err = a.checkExecution(c, info); err != nil {
+		return stepOutcome{}, err
+	}
 	hookCtx := a.hookContext(c, info)
 	hookCtx.State = state
 	converted, upstreamErr, err := a.plugin.CallConvertResponse(c.Request.Context(), hookCtx, resp.StatusCode, firstValues(resp.Header), raw)
+	if admissionErr := a.checkExecution(c, info); admissionErr != nil {
+		return stepOutcome{}, admissionErr
+	}
 	switch {
 	case err == nil && upstreamErr != nil:
 		return stepOutcome{response: upstreamErrorResponse(upstreamErr, resp.StatusCode)}, nil
@@ -291,6 +311,10 @@ func (a *Adaptor) openWebSocket(c *gin.Context, info *relaycommon.RelayInfo, con
 	converter := a.newStreamConverter(c, info, converted.State, session, session)
 	converter.source = &webSocketSource{session: session, touch: converter.touch, limit: streamLineLimit()}
 	for _, message := range request.Messages {
+		if err = a.checkExecution(c, info); err != nil {
+			_ = session.Close()
+			return nil, err
+		}
 		if err = writeWebSocketMessage(session, message); err != nil {
 			_ = session.Close()
 			return nil, types.NewError(fmt.Errorf("upstream WebSocket write failed: %w", err), types.ErrorCodeDoRequestFailed)
@@ -301,6 +325,9 @@ func (a *Adaptor) openWebSocket(c *gin.Context, info *relaycommon.RelayInfo, con
 
 // dialWebSocket opens the upstream session of request.
 func (a *Adaptor) dialWebSocket(c *gin.Context, info *relaycommon.RelayInfo, request *jsplugin.WebSocketRequest) (*websocket.Conn, error) {
+	if err := a.checkExecution(c, info); err != nil {
+		return nil, err
+	}
 	a.useTarget(request.Path, request.URL)
 	a.contentType = ""
 	a.bodySHA256 = bodyHash(nil)
@@ -357,6 +384,9 @@ func (a *Adaptor) dialWebSocket(c *gin.Context, info *relaycommon.RelayInfo, req
 	}
 	if info.ChannelSetting.TLSInsecureSkipVerify {
 		dialer.TLSClientConfig = common2.InsecureTLSConfig
+	}
+	if err = a.checkExecution(c, info); err != nil {
+		return nil, err
 	}
 	session, resp, err := dialer.DialContext(c.Request.Context(), target.String(), header)
 	if err != nil {

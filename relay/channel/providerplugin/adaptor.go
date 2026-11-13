@@ -560,7 +560,12 @@ func (a *Adaptor) bind(c *gin.Context, info *relaycommon.RelayInfo) error {
 
 // checkExecution uses the values the provider hooks actually read. It never
 // rebuilds that selected state from the fresh DB row it is checking against.
-func (a *Adaptor) checkExecution(c *gin.Context, info *relaycommon.RelayInfo) error {
+func (a *Adaptor) checkExecution(c *gin.Context, info *relaycommon.RelayInfo) (executionErr error) {
+	defer func() {
+		if errors.Is(executionErr, model.ErrChannelAdmissionDenied) {
+			executionErr = types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	}()
 	if !core.ModelAdmissionEnabled() {
 		return nil
 	}

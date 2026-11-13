@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -372,6 +374,139 @@ export function refresh(ctx) { utils.fetch({url:ctx.baseUrl+"/refresh",method:"P
 	require.NoError(t, err)
 	core.Models = bothGate
 	require.NotNil(t, relay.CheckRequestAdmission(c, info), "even independently approved fresh config cannot replace frozen selected config")
+}
+
+func runHostProviderChainAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
+	t.Helper()
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 5
+	defer func() { constant.StreamingTimeout = oldTimeout }()
+	previousRegistry := jsplugin.DefaultRegistry
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
+	var calls, handshakes, messages atomic.Int32
+	var mode atomic.Int32
+	var channel model.Channel
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if websocket.IsWebSocketUpgrade(r) {
+			ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			handshakes.Add(1)
+			defer ws.Close()
+			if _, _, err = ws.ReadMessage(); err != nil {
+				return
+			}
+			messages.Add(1)
+			if mode.Load() == 3 {
+				if err = model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusManuallyDisabled).Error; err != nil {
+					t.Error(err)
+				}
+			}
+			_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"ok":true}`))
+			return
+		}
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if mode.Load() == 1 && r.URL.Path == "/first" {
+			if err := model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusManuallyDisabled).Error; err != nil {
+				t.Error(err)
+			}
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	service.InitHttpClient()
+	const source = `export const meta={apiVersion:1,key:"cmh-chain-admission",name:"Chain admission",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/chat/completions",upstream_path:"/first",converter:"plugin"}]};
+export function convertRequest(ctx,req){if(req.body.ws)return {websocket:{path:"/socket",messages:["start"]},state:{stream:req.stream}};return {path:"/first",body:req.body,state:{step:1}};}
+export function convertResponse(ctx,res){if(ctx.state.step===1)return {next:{path:"/second",method:"GET"},state:{step:2}};return {body:{ok:true}};}
+export function convertStreamEvent(ctx,event){if(ctx.state.stream)return {events:[{data:{ok:true}}],close:true};return {body:{ok:true},close:true};}`
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	base, binding := upstream.URL, `{"task_plugin_key":"cmh-chain-admission"}`
+	channel = model.Channel{Id: 95004, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Models: "public-chat", Group: "default", Key: "fixture", BaseURL: &base, Setting: &binding}
+	core.Models = noop
+	require.NoError(t, model.DB.Create(&channel).Error)
+	require.NoError(t, channel.AddAbilities(model.DB))
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id = ?", channel.Id).Delete(&model.Channel{}).Error)
+	}()
+	identity, err := model.PluginExecutorIdentity(&channel, plugin, registry.Generation().Number, "provider", "/v1/chat/completions")
+	require.NoError(t, err)
+	public, err := New([]string{"public-chat"}, []string{"61"})
+	require.NoError(t, err)
+	target, err := New([]string{"public-chat"}, nil)
+	require.NoError(t, err)
+	gate, err := NewGate(public, target, []core.ExecutorIdentity{identity})
+	require.NoError(t, err)
+	core.Models = gate
+	for _, scenario := range []struct {
+		name                               string
+		mode                               int32
+		ws                                 bool
+		denied                             bool
+		wantCalls, wantDials, wantMessages int32
+	}{{"chain allowed", 0, false, false, 2, 0, 0}, {"chain revoked after first", 1, false, true, 1, 0, 0}, {"websocket allowed", 2, true, false, 0, 1, 1}, {"websocket revoked before conversion", 3, true, true, 0, 1, 1}, {"stream pending revoked", 4, true, false, 0, 1, 1}} {
+		t.Run(scenario.name, func(t *testing.T) {
+			mode.Store(scenario.mode)
+			calls.Store(0)
+			handshakes.Store(0)
+			messages.Store(0)
+			require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusEnabled).Error)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			c.Request.Header.Set("Content-Type", "application/json")
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+			require.Nil(t, middleware.SetupContextForSelectedChannel(c, &channel, "public-chat"))
+			info := &relaycommon.RelayInfo{UsingGroup: "default", OriginModelName: "public-chat", RequestURLPath: c.Request.URL.Path, RelayMode: relayconstant.RelayModeChatCompletions, RelayFormat: kittypes.RelayFormatOpenAI}
+			info.InitChannelMeta(c)
+			if scenario.mode == 4 {
+				info.IsStream = true
+			}
+			adaptor := &providerplugin.Adaptor{}
+			adaptor.Init(info)
+			payload := `{"model":"public-chat"}`
+			if scenario.ws {
+				payload = `{"model":"public-chat","ws":true}`
+			}
+			var response any
+			var callErr error
+			require.NotPanics(t, func() { response, callErr = adaptor.DoRequest(c, info, strings.NewReader(payload)) }, "denied WebSocket conversion must close cleanly without nil-timer panic")
+			if scenario.denied {
+				require.Error(t, callErr)
+				wrapped := kittypes.NewOpenAIError(callErr, kittypes.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+				assert.Equal(t, http.StatusForbidden, wrapped.StatusCode)
+				assert.False(t, service.ShouldRetryRelayError(c, wrapped, 2), "revocation after partial chain work must not become retryable generic500")
+			} else {
+				require.NoError(t, callErr)
+				httpResponse, ok := response.(*http.Response)
+				require.True(t, ok)
+				if scenario.mode == 4 {
+					require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+					raw, readErr := io.ReadAll(httpResponse.Body)
+					require.Error(t, readErr)
+					assert.Empty(t, raw, "revoked pending converted events must not reach the caller")
+				} else {
+					raw, readErr := io.ReadAll(httpResponse.Body)
+					require.NoError(t, readErr)
+					assert.JSONEq(t, `{"ok":true}`, string(raw))
+				}
+				closeErr := httpResponse.Body.Close()
+				if scenario.mode == 4 && closeErr != nil {
+					assert.ErrorIs(t, closeErr, net.ErrClosed)
+				} else {
+					require.NoError(t, closeErr)
+				}
+			}
+			assert.Equal(t, scenario.wantCalls, calls.Load())
+			assert.Equal(t, scenario.wantDials, handshakes.Load())
+			assert.Equal(t, scenario.wantMessages, messages.Load())
+		})
+	}
 }
 
 func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
@@ -1111,6 +1246,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
 	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
 	runHostBoundProviderAdmission(t, gate, oldGate)
+	runHostProviderChainAdmission(t, gate, oldGate)
 	runHostTaskDriverAdmission(t, gate, oldGate)
 	runHostAdmissionSockets(t, channels[1], gate, oldGate)
 	runHostAdmissionWrites(t, gate, oldGate)

@@ -45,6 +45,8 @@
 | H1-C | Reply不可选制品预验 | 准入型 | `relay/requestplugin/reply.go` | replyCheck.run | 2026-11-13 | 每个实际reply batch的全部runnable实例先验再hook/释放正文，host拒绝不被optional吞，保留原中断结算 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Report worker消费前预验 | 准入型 | `relay/requestplugin/report.go` | reportJob.run | 2026-11-13 | ordinary/task共用worker消费时整组源+冻结实例配置预验，任一拒绝整个report不联网，不改请求钱账 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Report执行组回归 | 测试 | `relay/requestplugin/requestplugin_test.go` | TestReportExecutorPreflight | 2026-11-13 | 真实optional report双实例本地fetch计数；ordinary/task共用worker、消费时撤销与源/配置/路径变化拒绝 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Provider多步/WS派发准入 | 准入型 | `relay/channel/providerplugin/chain.go` | sendStep / readStep / dialWebSocket / openWebSocket | 2026-11-13 | 每step签名联网/响应转换前、每次dial与初始message前复用actual runtime检查；不等于最终目的地审批 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Provider流转换/回写准入 | 准入型 | `relay/channel/providerplugin/stream.go` | streamConverter runtime check / Read / convertNext | 2026-11-13 | actual info与冻结hook配置一致复核，在读事件前后、转换/queue/回写与pending输出前检查；保留原中断计费 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -94,4 +96,6 @@ relay/requestplugin/plan.go
 relay/requestplugin/reply.go
 relay/requestplugin/report.go
 relay/requestplugin/requestplugin_test.go
+relay/channel/providerplugin/chain.go
+relay/channel/providerplugin/stream.go
 ```
