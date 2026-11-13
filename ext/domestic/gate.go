@@ -26,6 +26,23 @@ type executorApproval struct {
 
 var _ core.ModelGate = (*Gate)(nil)
 var _ core.PluginHookGate = (*Gate)(nil)
+var _ core.ExecutorGate = (*Gate)(nil)
+
+// CheckExecutor is plugin-only exact tuple approval. The host binds instance,
+// role and stage scope into ConfigFingerprint; this grants no model authority.
+func (g *Gate) CheckExecutor(ctx context.Context, executor core.ExecutorIdentity) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	approval, valid := approvedExecutorIdentity(executor)
+	if g == nil || !valid || approval.kind != "plugin" {
+		return ErrAdmissionDenied
+	}
+	if _, approved := g.approvals[approval]; !approved {
+		return ErrAdmissionDenied
+	}
+	return nil
+}
 
 // CheckHook is a source-only veto. Passing it grants no model, channel,
 // configuration or network authority: those require their own exact checks.

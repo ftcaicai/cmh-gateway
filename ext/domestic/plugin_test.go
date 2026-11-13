@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,9 +19,16 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	hostdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/ext/core"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
+	"github.com/QuantumNous/new-api/relay/requestplugin"
+	kittypes "github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -317,6 +327,99 @@ func TestBoundPluginProjection(t *testing.T) {
 	retained, err := model.ChannelPluginAdmission(channel, "public-chat", core.AdmissionAttempt, pinned, "provider", "/v1/chat/completions")
 	require.NoError(t, err)
 	assert.NoError(t, gate.Check(t.Context(), retained), "already selected exact approved pinned artifact remains independently checkable")
+}
+
+func TestRequestStageExecutorPreflight(t *testing.T) {
+	previousRegistry, previousExecutors := jsplugin.DefaultRegistry, core.Executors
+	previousInstances, err := common.Marshal(request_plugin_setting.GetInstances())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		jsplugin.DefaultRegistry = previousRegistry
+		core.Executors = previousExecutors
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(previousInstances)}))
+	})
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	var fetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	service.InitHttpClient()
+	const source = `export const meta={apiVersion:1,key:"cmh-stage",name:"Stage",version:"1.0.0",author:{name:"Test"},optional:true,configSchema:{type:"object",properties:{url:{type:"string",title:{en:"Service URL",zh:"服务地址"},format:"url"},value:{type:"string",title:{en:"Value",zh:"值"}}}}};
+export function ingress(ctx,req){utils.fetch({url:ctx.config.url});return {action:"continue"};}`
+	_, err = registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	instances := []request_plugin_setting.Instance{
+		{ID: "first", Name: "First", Plugin: "cmh-stage", Enabled: true, Global: true, Config: common.RawMessage(fmt.Sprintf(`{"url":%q,"value":"one"}`, server.URL))},
+		{ID: "second", Name: "Second", Plugin: "cmh-stage", Enabled: true, Global: true, Config: common.RawMessage(fmt.Sprintf(`{"url":%q,"value":"two"}`, server.URL))},
+	}
+	encoded, err := common.Marshal(instances)
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(encoded)}))
+	call := requestplugin.Call{Stage: requestplugin.StageIngress, Path: "/v1/chat/completions", Format: "openai", Model: "public-chat", Body: []byte(`{"model":"public-chat","messages":[]}`)}
+	probe := &executorCapture{}
+	core.Executors = probe
+	out := requestplugin.NewPlan().Run(t.Context(), call)
+	require.Nil(t, out.Failed)
+	assert.Equal(t, int32(2), fetches.Load())
+	require.Len(t, probe.seen, 2)
+	assert.NotEqual(t, probe.seen[0].ConfigFingerprint, probe.seen[1].ConfigFingerprint, "instance/config scopes require different exact approvals")
+	public, upstream, _, _ := admissionFixture(t)
+	firstOnly, err := NewGate(public, upstream, probe.seen[:1])
+	require.NoError(t, err)
+	core.Executors = firstOnly
+	fetches.Store(0)
+	deniedPlan := requestplugin.NewPlan()
+	out = deniedPlan.Run(t.Context(), call)
+	require.NotNil(t, out.Failed, "optional=true cannot swallow host admission veto")
+	late := call
+	late.Late = true
+	lateOutcome := deniedPlan.Run(t.Context(), late)
+	require.NotNil(t, lateOutcome.Failed, "denied preflight must not mark instances already executed")
+	assert.Zero(t, fetches.Load(), "preflight later denied instance before earlier approved hook can fetch")
+	assert.Equal(t, call.Body, out.Body, "no stage effects may commit before full scoped preflight")
+	require.NoError(t, i18n.Init())
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, call.Path, strings.NewReader(string(call.Body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	_, _, apiErr := requestplugin.Ingress(c, kittypes.RelayFormatOpenAI)
+	require.NotNil(t, apiErr)
+	assert.False(t, service.ShouldRetryRelayError(c, apiErr, 2), "public caller must preserve nonoptional host veto")
+	assert.Zero(t, fetches.Load())
+	all, err := NewGate(public, upstream, probe.seen)
+	require.NoError(t, err)
+	core.Executors = all
+	out = requestplugin.NewPlan().Run(t.Context(), call)
+	require.Nil(t, out.Failed)
+	assert.Equal(t, int32(2), fetches.Load())
+	changed := call
+	changed.Path = "/v1/responses"
+	fetches.Store(0)
+	out = requestplugin.NewPlan().Run(t.Context(), changed)
+	require.NotNil(t, out.Failed)
+	assert.Zero(t, fetches.Load(), "approval must bind actual path/stage, not plugin name alone")
+	instances[1].Config = common.RawMessage(fmt.Sprintf(`{"url":%q,"value":"changed"}`, server.URL))
+	encoded, err = common.Marshal(instances)
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(encoded)}))
+	out = requestplugin.NewPlan().Run(t.Context(), call)
+	require.NotNil(t, out.Failed)
+	assert.Zero(t, fetches.Load(), "changing a raw instance config must invalidate stage approval")
+	unchecked := call
+	unchecked.Body = nil
+	out = requestplugin.NewPlan().Run(t.Context(), unchecked)
+	require.Nil(t, out.Failed)
+	assert.Zero(t, fetches.Load(), "nil stage body is unchecked, not an executed hook")
+}
+
+type executorCapture struct{ seen []core.ExecutorIdentity }
+
+func (p *executorCapture) CheckExecutor(_ context.Context, executor core.ExecutorIdentity) error {
+	p.seen = append(p.seen, executor)
+	return nil
 }
 
 func TestParamNormalizePluginHostContract(t *testing.T) {

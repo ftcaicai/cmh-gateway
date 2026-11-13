@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `e784538cb`：main/develop一致，CI两次success（43419246417 / 43419238023）；本轮task运行前后检查待提交。全局core.Models与PluginHooks仍默认noop。
+- 最近已推 `be91c56c5`：main/develop一致，CI两次success（43423100839 / 43423091509）；本轮request stage预验待提交。全局core.Models、PluginHooks与Executors仍默认noop。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -23,7 +23,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. H1-C本轮taskdriver实际检查已接：RelayTaskSubmit prelate TaskAttempt/preValidate/postValidate，TaskAdaptor实际info/source/config/group在decoder/auth/build前与descriptor.Model/RewriteModel后、cachedbody/DoRequest再验；cachedExecutor/Model绑定旧descriptor。submission hook和独立signRequest均用同一frozeninfo配置（不再取staleCache）。独立review发现cached直接send/签名cache/decoder先执行均修复；真实lookup未准config0、允许lookup1+signedsubmit1且X-Tierapproved；撤销/新配置另批准仍拒旧cached；rewrite不准lookup2但submit仍1/reserve0。最终三库8.851s，相关modules/test/vet/fullbuildexit0，证据 `acceptance/p2/H1-C-task-runtime.md`。不称完整controller钱账E2E/opaque目标/旧任务freeze完成，Gate未安装。
+3. H1-C本轮Plan.Run整stage预验：新增value-only ExecutorGate/fulltuple Gate桥，实际Engine+原Instance配置/role/path/stage hash；先全部scope预验再任一hook，host Outcome.Failed不被optional吞。真实2optional实例localfetch：second未准first也0网络；全准2；Path/config变0；sameplan late仍拒；publicIngress SkipRetry传播；nilbody原unchecked0hook。相关tests/vet/fullbuildexit0，独立只读review无本stage阻断缺陷，证据 `acceptance/p2/H1-C-stage-preflight.md`。不含reply/report/taskreport或全pipeline/modeltarget，所有Gate不安装。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -33,7 +33,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前31官方文件/2433行，H1专项硬上限32/2500（已明确批准），逐文件白名单不变。剩1文件/67行，文件/行均超80%，已独立范围复核；不压缩代码漏逻辑或偷增上限。未核验分支保护。
+- 门禁目前32官方文件/2463行，已到H1专项硬上限32文件（2500行剩37），最后一个为relay/requestplugin/plan.go。逐文件白名单不变。再接reply/report/chain等新官方文件前必须负责人明确规则决策；不压缩删校验凑额度或偷增上限。未核验分支保护。
 
 ## 临时资源与作业
 
@@ -41,7 +41,7 @@ R3桥接与R4精确工厂测试修复已获批准并通过。H1专项现已明�
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续优先剩余requestplugin有序chain不可选hostveto（包括ingress/reply/report/taskreport），最终URL/opaquebody模型/redirect/fetch、provider chain/WS，背景credential与既有任务冻结延续；candidate固定generation/affinityeffective关系、Save/目录无请求规格/type60歧义仍缺。task提交主路径已接，但任意同adaptor跨submit/query复用未认证（生产poll新建Initreset）。仅剩1file67rows，完整H1不能在此余量内声称完成；下一轮先以最小真实可读必需补丁/精确缺口提出负责人一次性预算或方向决策，不超硬限、不偷偷缩协议、不安装所有Gate。资金同事务仍独立RFC。
+- 接续是负责人规则决策：Plan stages已接，但reply.go390 CallReply、report.go376 CallReport/task_report独立target、provider chain.go114 sendStep/279 openWebSocket、最终URL/opaquebody模型/redirect/fetch、背景credential与既有任务冻结延续仍缺；candidate generation/affinity、Save目录/type60也未闭合。32文件已满不可再登记新官方文件，需一次性H1收口预算或明确改方向；不重复询问旧授权，不将现有部分Gate激活，不缩协议掩盖未完。资金同事务仍单独RFC。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 

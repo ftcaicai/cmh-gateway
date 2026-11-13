@@ -5,6 +5,7 @@ package requestplugin
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"maps"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/MoeForge/moego/regexp"
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -301,7 +303,33 @@ type Outcome struct {
 // rejection or failure of an instance whose plugin is not optional.
 func (p *Plan) Run(ctx context.Context, call Call) Outcome {
 	outcome := Outcome{Body: call.Body, Headers: call.Headers}
-	for _, instance := range p.scope(call.Stage, call.Group, call.Model, call.Bound) {
+	scoped := p.scope(call.Stage, call.Group, call.Model, call.Bound)
+	if core.ExecutorAdmissionEnabled() && call.Body != nil {
+		for _, instance := range scoped {
+			if call.Stage == StageIngress && call.Late && p.ingressRan[instance.ID] {
+				continue
+			}
+			plugin := p.plugins[instance.Plugin]
+			if plugin == nil || plugin.Engine == nil || plugin.Meta.Key != instance.Plugin || plugin.SourceSHA256() != plugin.Engine.SourceSHA256() {
+				outcome.Failed = &Failure{Instance: instance.ID, Class: "execution_admission", Detail: "request rejected"}
+				return outcome
+			}
+			// Keep the original configuration, including private keyword lists,
+			// inside a digest; never expose it through the admission boundary.
+			envelope := struct {
+				Version           int
+				Role, Path, Stage string
+				Instance          request_plugin_setting.Instance
+			}{1, "request_stage", call.Path, call.Stage, *instance}
+			encoded, err := common.Marshal(envelope)
+			executor := core.ExecutorIdentity{Kind: "plugin", Key: instance.Plugin, SourceSHA256: plugin.Engine.SourceSHA256(), ConfigFingerprint: fmt.Sprintf("%x", sha256.Sum256(encoded))}
+			if err != nil || core.Executors.CheckExecutor(ctx, executor) != nil {
+				outcome.Failed = &Failure{Instance: instance.ID, Class: "execution_admission", Detail: "request rejected"}
+				return outcome
+			}
+		}
+	}
+	for _, instance := range scoped {
 		if call.Stage == StageIngress {
 			if call.Late && p.ingressRan[instance.ID] {
 				continue

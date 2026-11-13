@@ -29,3 +29,21 @@ func PluginHookAdmissionEnabled() bool {
 	_, noop := PluginHooks.(noopPluginHookGate)
 	return !noop
 }
+
+// ExecutorGate checks an exact source/config tuple without inventing a model or
+// channel before selection. A passing tuple is not model/destination authority.
+type ExecutorGate interface {
+	CheckExecutor(context.Context, ExecutorIdentity) error
+}
+
+type noopExecutorGate struct{}
+
+func (noopExecutorGate) CheckExecutor(context.Context, ExecutorIdentity) error { return nil }
+
+// Executors is replaced only during startup; the default preserves host behavior.
+var Executors ExecutorGate = noopExecutorGate{}
+
+func ExecutorAdmissionEnabled() bool {
+	_, noop := Executors.(noopExecutorGate)
+	return !noop
+}

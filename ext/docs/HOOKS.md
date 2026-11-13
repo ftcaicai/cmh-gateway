@@ -41,6 +41,7 @@
 | H1-C | Task实际提交hook前后准入 | 准入型 | `relay/channel/task/jsplugin/adaptor.go` | checkSubmitAdmission / ValidateRequestAndSetAction / buildSubmit / DoRequest / applyChannelContext | 2026-11-13 | 实际已选配置在auth准备/build hook前复核并用于submission hook，descriptor模型变化后与cached复用再验；不改后台poll延续 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task attempt与价格前准入 | 准入型 | `relay/relay_task.go` | RelayTaskSubmit | 2026-11-13 | late TaskAttempt前、validation前后复核；拒绝先于新预扣，不改资金生命周期 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task提交签名配置冻结 | 准入桥接 | `relay/channel/task/jsplugin/credential.go` | signTaskRequest | 2026-11-13 | 已准submission签名用同一冻结info有效配置，不再从另一个cache快照取值；poll原路径不变 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Request stage不可选制品预验 | 准入型 | `relay/requestplugin/plan.go` | Plan.Run | 2026-11-13 | 本stage全部实际scope实例源/原配置/实例角色路径审批先于任何hook/effect；host拒绝不被optional吞掉；仅stage不等于reply/report | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -86,4 +87,5 @@ relay/channel/providerplugin/adaptor.go
 relay/channel/task/jsplugin/adaptor.go
 relay/relay_task.go
 relay/channel/task/jsplugin/credential.go
+relay/requestplugin/plan.go
 ```
