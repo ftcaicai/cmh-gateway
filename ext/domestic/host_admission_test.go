@@ -1,6 +1,7 @@
 package domestic
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,7 +21,9 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
 	hostdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/ext/continuation"
 	"github.com/QuantumNous/new-api/ext/core"
+	"github.com/QuantumNous/new-api/ext/migrations"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -525,9 +528,21 @@ export function convertStreamEvent(ctx,event){if(ctx.state.stream)return {events
 	}
 }
 
+type failingContinuationStore struct{ core.ContinuationStore }
+
+func (f *failingContinuationStore) Save(context.Context, core.ContinuationBinding, core.ContinuationArtifact) (core.ContinuationRef, error) {
+	return core.ContinuationRef{}, core.ErrContinuationUnavailable
+}
+
 func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
 	t.Helper()
 	previousDestinations := core.Destinations
+	previousContinuations := core.TaskContinuations
+	defer func() { core.TaskContinuations = previousContinuations }()
+	require.NoError(t, migrations.MigrateContinuation(model.DB))
+	defer func() { require.NoError(t, model.DB.Migrator().DropTable(&migrations.ContinuationRecord{})) }()
+	archive, err := continuation.New(model.DB, "fixture", map[string][]byte{"fixture": bytes.Repeat([]byte{0x51}, 32)})
+	require.NoError(t, err)
 	defer func() { core.Destinations = previousDestinations }()
 	previousRegistry := jsplugin.DefaultRegistry
 	registry := jsplugin.NewRegistry()
@@ -590,6 +605,10 @@ export function parseTaskResult(){return {status:"SUCCESS"};}`
 	info := &relaycommon.RelayInfo{OriginModelName: "public-task", UsingGroup: "default", Billing: probe, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
 	info.InitChannelMeta(c)
 	info.UpstreamModelName = "public-task"
+	info.UserId = 71
+	info.PublicTaskID = "synthetic-pre-submit-archive"
+	core.TaskContinuations = archive
+	c.Set(core.ContextKeyTaskContinuation, core.ContinuationRef{ID: "stale", Digest: "stale"})
 	bad := *info
 	badMeta := *info.ChannelMeta
 	bad.ChannelMeta = &badMeta
@@ -603,6 +622,11 @@ export function parseTaskResult(){return {status:"SUCCESS"};}`
 	assert.Zero(t, lookups.Load())
 	assert.Zero(t, submissions.Load())
 	assert.Zero(t, probe.reserve)
+	stale, _ := c.Get(core.ContextKeyTaskContinuation)
+	assert.Equal(t, core.ContinuationRef{}, stale)
+	var count int64
+	require.NoError(t, model.DB.Model(&migrations.ContinuationRecord{}).Count(&count).Error)
+	assert.Zero(t, count)
 	// Deliberately stale channel cache must not replace the checked runtime config.
 	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stored.Id).Update("settings", `{"plugin_config":{"tier":"stale-cache"}}`).Error)
 	model.InitChannelCache()
@@ -617,10 +641,50 @@ export function parseTaskResult(){return {status:"SUCCESS"};}`
 	fetchOnly, err := NewDestinationPolicy([]core.DestinationAdmission{lookupTarget})
 	require.NoError(t, err)
 	core.Destinations = fetchOnly
+	core.Models = noop
+	noGateAdaptor := taskjsplugin.New(plugin)
+	noGateAdaptor.Init(info)
+	require.NotNil(t, noGateAdaptor.ValidateRequestAndSetAction(c, info))
+	assert.Zero(t, lookups.Load())
+	assert.Zero(t, submissions.Load())
+	core.Models = gate
+	missingTaskState := *info
+	missingTaskState.TaskRelayInfo = nil
+	missingAdaptor := taskjsplugin.New(plugin)
+	missingAdaptor.Init(&missingTaskState)
+	require.NotPanics(t, func() { require.NotNil(t, missingAdaptor.ValidateRequestAndSetAction(c, &missingTaskState)) })
+	assert.Zero(t, lookups.Load())
+	core.TaskContinuations = &failingContinuationStore{ContinuationStore: archive}
+	failedArchiveAdaptor := taskjsplugin.New(plugin)
+	failedArchiveAdaptor.Init(info)
+	require.NotNil(t, failedArchiveAdaptor.ValidateRequestAndSetAction(c, info))
+	assert.Zero(t, lookups.Load())
+	assert.Zero(t, submissions.Load())
+	failedRef, _ := c.Get(core.ContextKeyTaskContinuation)
+	assert.Equal(t, core.ContinuationRef{}, failedRef)
+	core.TaskContinuations = archive
 	adaptor := taskjsplugin.New(plugin)
 	adaptor.Init(info)
 	require.Nil(t, adaptor.ValidateRequestAndSetAction(c, info))
 	assert.Equal(t, int32(1), lookups.Load())
+	snapshot := service.TaskExecutionSnapshotFromContext(c)
+	require.NotNil(t, snapshot)
+	require.NotNil(t, snapshot.Continuation)
+	bindingArchive := core.ContinuationBinding{TaskID: info.PublicTaskID, UserID: info.UserId, ChannelID: info.ChannelId}
+	archived, err := archive.Load(t.Context(), bindingArchive, *snapshot.Continuation, core.ContinuationPoll)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(source), archived.Source)
+	persisted := &model.Task{TaskID: info.PublicTaskID, UserId: info.UserId, ChannelId: info.ChannelId, PrivateData: model.TaskPrivateData{Execution: snapshot}}
+	require.NoError(t, model.DB.Create(persisted).Error)
+	defer func() { require.NoError(t, model.DB.Where("id = ?", persisted.ID).Delete(&model.Task{}).Error) }()
+	var reloaded model.Task
+	require.NoError(t, model.DB.First(&reloaded, persisted.ID).Error)
+	require.NotNil(t, reloaded.PrivateData.Execution)
+	assert.Equal(t, snapshot.Continuation, reloaded.PrivateData.Execution.Continuation)
+	encodedTask, err := common.Marshal(reloaded.PrivateData)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encodedTask), "export function")
+	assert.NotContains(t, string(encodedTask), `\"RuntimeJSON\"`)
 	body, err := adaptor.BuildRequestBody(c, info)
 	require.NoError(t, err)
 	_, err = adaptor.DoRequest(c, info, body)

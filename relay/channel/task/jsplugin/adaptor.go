@@ -1865,6 +1865,19 @@ func (a *TaskAdaptor) requestDescriptor(ctx context.Context, hook string, args .
 // checkSubmitAdmission precedes auth preparation as well as the submit hook.
 // It applies only to new submissions; persisted task polling keeps its contract.
 func (a *TaskAdaptor) checkSubmitAdmission(c *gin.Context, info *relaycommon.RelayInfo) error {
+	store := core.TaskContinuations
+	if store != nil {
+		// Every attempt must earn its own reference, including retries and the
+		// final dispatch recheck after the descriptor has selected its model.
+		if c != nil {
+			c.Set(core.ContextKeyTaskContinuation, core.ContinuationRef{})
+		}
+		// Noop admission may use cached channel configuration rather than the
+		// actual selected state, so it cannot certify an archived execution.
+		if !core.ModelAdmissionEnabled() || c == nil || c.Request == nil || c.Request.URL == nil || info == nil || info.ChannelMeta == nil || info.TaskRelayInfo == nil || strings.TrimSpace(info.PublicTaskID) == "" || info.UserId <= 0 || info.ChannelId <= 0 {
+			return core.ErrContinuationUnavailable
+		}
+	}
 	if a.continuation != nil {
 		return core.ErrContinuationUnavailable
 	}
@@ -1925,6 +1938,20 @@ func (a *TaskAdaptor) checkSubmitAdmission(c *gin.Context, info *relaycommon.Rel
 	}
 	if a.submit == nil {
 		a.submitExecutor, a.submitModel = actual.Executor, actual.Model
+	}
+	if store != nil {
+		// Hooks must use the same selected configuration that is captured,
+		// never a fresh cache lookup after this admission decision.
+		a.admittedSubmit = true
+		artifact, err := a.CaptureContinuationArtifact(info)
+		if err != nil {
+			return core.ErrContinuationUnavailable
+		}
+		ref, err := store.Save(c.Request.Context(), core.ContinuationBinding{TaskID: info.PublicTaskID, UserID: info.UserId, ChannelID: info.ChannelId}, artifact)
+		if err != nil || strings.TrimSpace(ref.ID) == "" || strings.TrimSpace(ref.Digest) == "" {
+			return core.ErrContinuationUnavailable
+		}
+		c.Set(core.ContextKeyTaskContinuation, ref)
 	}
 	return nil
 }

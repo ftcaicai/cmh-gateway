@@ -51,6 +51,8 @@
 | H1-C | Plugin fetch目的地准入 | 准入型 | `service/provider_plugin.go` | PluginFetchExecutor / RequestPluginFetchExecutor / PluginFetcher / RequestPluginFetcher / sendPluginFetch | 2026-11-13 | actual源+网络能力摘要与hook/URL/Host关系，在client/网络前检查；不伪造未选channel/model，保留原allowedHosts/TLS/proxy/redirect规则 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task内容最终目标准入 | 准入型 | `controller/video_proxy.go` | proxyTaskMedia / checkTaskContentDestination / taskMediaRedirectClient | 2026-11-14 | 绑定持久任务模型+实际渠道与最终URL/Host/method，发送及redirect前检查；不套新发布门禁或改变钱账 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task内容目标回归 | 测试 | `controller/task_generic_test.go` | TestTaskContentDestinationAdmission | 2026-11-14 | 真实loopback初始拒绝0、批准Range媒体以及第二redirect目标单独审批 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task延续引用持久化 | 值投影 | `model/task.go` | TaskExecutionSnapshot.Continuation | 2026-11-14 | existing private JSON只保存non-secret ref/digest，不新增表列或复制源/配置 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task已存档引用投影 | 值投影 | `service/task_plugin_audit.go` | TaskExecutionSnapshotFromContext | 2026-11-14 | 只有Save成功contextref才随既有controller插入TaskPrivate Execution，失败清空 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -106,4 +108,6 @@ relay/channel/api_request.go
 service/provider_plugin.go
 controller/video_proxy.go
 controller/task_generic_test.go
+model/task.go
+service/task_plugin_audit.go
 ```

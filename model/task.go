@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	commonRelay "github.com/QuantumNous/new-api/relay/common"
@@ -167,9 +168,10 @@ type TaskRequestPlugins struct {
 }
 
 type TaskExecutionSnapshot struct {
-	RequestID   string              `json:"request_id,omitempty"`
-	RequestPath string              `json:"request_path,omitempty"`
-	TaskPlugin  *TaskPluginSnapshot `json:"task_plugin,omitempty"`
+	RequestID    string                `json:"request_id,omitempty"`
+	RequestPath  string                `json:"request_path,omitempty"`
+	TaskPlugin   *TaskPluginSnapshot   `json:"task_plugin,omitempty"`
+	Continuation *core.ContinuationRef `json:"continuation,omitempty"`
 }
 
 // TaskPluginSnapshot contains credential-free identity only. Plugin source,

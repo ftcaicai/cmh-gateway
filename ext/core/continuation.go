@@ -51,5 +51,10 @@ type ContinuationStore interface {
 	Load(context.Context, ContinuationBinding, ContinuationRef, ContinuationPurpose) (ContinuationArtifact, error)
 }
 
-// No global installer is provided yet: an unconnected archive must not imply
-// persisted task polling/content/reporting have adopted frozen authority.
+// ContextKeyTaskContinuation holds only the successfully persisted reference.
+const ContextKeyTaskContinuation = "cmh_task_continuation"
+
+// TaskContinuations is optional and startup-only. Nil preserves host behavior.
+// Hosts must reject an installed archive without authoritative model admission;
+// merely installing a byte store cannot certify the selected execution state.
+var TaskContinuations ContinuationStore

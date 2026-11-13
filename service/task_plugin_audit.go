@@ -2,6 +2,7 @@ package service
 
 import (
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/gin-gonic/gin"
@@ -43,7 +44,12 @@ func TaskExecutionSnapshotFromContext(ctx *gin.Context) *model.TaskExecutionSnap
 		}
 	}
 
-	if snapshot.RequestID == "" && snapshot.RequestPath == "" && snapshot.TaskPlugin == nil {
+	if value, ok := ctx.Get(core.ContextKeyTaskContinuation); ok {
+		if ref, valid := value.(core.ContinuationRef); valid && ref.ID != "" && ref.Digest != "" {
+			snapshot.Continuation = &ref
+		}
+	}
+	if snapshot.RequestID == "" && snapshot.RequestPath == "" && snapshot.TaskPlugin == nil && snapshot.Continuation == nil {
 		return nil
 	}
 	return snapshot
