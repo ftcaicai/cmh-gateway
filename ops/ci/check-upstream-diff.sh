@@ -79,6 +79,13 @@ if [[ -n "$allowed_changed" ]]; then
   done <<<"$allowed_changed"
 fi
 
+# ---- dependency direction (ext/AGENTS.md §2.2) -----------------------------
+# No official-zone Go file may import ext/ or ext/<module>, except main.go's
+# single blank import that installs the hooks. ext/core is allowed everywhere.
+bad_imports=$(git grep -n -E '"github.com/QuantumNous/new-api/ext(/[^"]*)?"' -- '*.go' ':!ext/**' ':!main.go' \
+  | grep -v '/ext/core"' || true)
+main_ext_imports=$(grep -n -E '"github.com/QuantumNous/new-api/ext(/[^"]*)?"' main.go | grep -v -E '/ext/core"|^[0-9]+:\s*_ "github.com/QuantumNous/new-api/ext"' || true)
+
 # ---- report -----------------------------------------------------------------
 echo "baseline: $baseline"
 echo "official-zone files changed (whitelisted): $files_count / $max_files"
@@ -96,6 +103,16 @@ if (( files_count > max_files )); then
 fi
 if (( lines_count > max_lines )); then
   echo "::error::hook line budget exceeded: $lines_count > $max_lines"
+  status=1
+fi
+if [[ -n "$bad_imports" ]]; then
+  echo "::error::official-zone files import the extension zone (only ext/core is allowed):"
+  sed 's/^/  - /' <<<"$bad_imports"
+  status=1
+fi
+if [[ -n "$main_ext_imports" ]]; then
+  echo "::error::main.go may only blank-import ext (and import ext/core):"
+  sed 's/^/  - /' <<<"$main_ext_imports"
   status=1
 fi
 if (( status == 0 )); then
