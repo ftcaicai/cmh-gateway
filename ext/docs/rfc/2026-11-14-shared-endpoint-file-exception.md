@@ -18,7 +18,7 @@ JS插件无权改变host候选选择；ext.RouteRegistrar不能插进既有函�
 
 ## 请求的最窄授权
 
-**只给已有middleware/task_plugin.go一个额外官方文件例外**，允许累计49文件，**6000行累计硬限不变**；仅RouteTaskPluginEndpoint的generation视图传递与精确职责登记（PinTaskPluginEndpoint已有沿用预选generation代码，原则上不改）。预估生产增删不超过40行，测试继续复用ext/domestic/host_admission_test.go而非新增official测试文件；超过此函数范围或预估须再说明，不据此任意改整个middleware。
+**只给已有middleware/task_plugin.go一个额外官方文件例外**，允许累计49文件，**6000行累计硬限不变**；仅RouteTaskPluginEndpoint的generation视图传递，以及必要时PinTaskPluginEndpoint对已捕获context generation的复用（已有selected.Generation保持最高优先级，不改decoder/候选排序）。预估生产增删不超过40行，测试继续复用ext/domestic/host_admission_test.go而非新增official测试文件；超过此函数范围或预估须再说明，不据此任意改整个middleware。
 
 保持：core无业务边界、逐文件HOOKS登记、80%复核、独立只读审查、真实SQLite/MySQL/PostgreSQL、原候选优先级/权重/鉴权/计费不变、失败0对应网络/预扣断言。授权不含资金H3/H7、生产/收费调用、密钥、全局Gate激活，也不保证全部H1能在49文件内完成。
 
