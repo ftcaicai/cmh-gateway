@@ -1,13 +1,16 @@
 package model
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/samber/lo"
@@ -41,10 +44,117 @@ func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 }
 
 func GetGroupEnabledModels(group string) []string {
+	if core.ModelAdmissionEnabled() {
+		var abilities []Ability
+		if err := DB.Where(commonGroupCol+" = ? and enabled = ?", group, true).Find(&abilities).Error; err != nil {
+			return []string{}
+		}
+		channels, err := loadAbilityChannels(abilities)
+		if err != nil {
+			return []string{}
+		}
+		models := make([]string, 0, len(abilities))
+		seen := make(map[string]bool, len(abilities))
+		for _, ability := range abilities {
+			channel := channels[ability.ChannelId]
+			if seen[ability.Model] || channel == nil || channel.Status != common.ChannelStatusEnabled {
+				continue
+			}
+			if core.Models.Visible(context.Background(), ChannelModelAdmission(channel, ability.Model, core.AdmissionCandidate)) {
+				seen[ability.Model] = true
+				models = append(models, ability.Model)
+			}
+		}
+		return models
+	}
 	var models []string
 	// Find distinct models
 	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
 	return models
+}
+
+// IsModelAdmittedForPublication requires at least one enabled ability and its
+// enabled channel to pass publication admission. Optional channel types narrow
+// the witness for type-specific catalogs. Errors never publish a partial view.
+func IsModelAdmittedForPublication(name string, channelTypes ...int) bool {
+	if !core.ModelAdmissionEnabled() {
+		return true
+	}
+	var abilities []Ability
+	if err := DB.Where("model = ? and enabled = ?", name, true).Find(&abilities).Error; err != nil {
+		return false
+	}
+	channels, err := loadAbilityChannels(abilities)
+	if err != nil {
+		return false
+	}
+	for _, ability := range abilities {
+		channel := channels[ability.ChannelId]
+		if channel == nil || channel.Status != common.ChannelStatusEnabled || len(channelTypes) > 0 && !slices.Contains(channelTypes, channel.Type) {
+			continue
+		}
+		if core.Models.Visible(context.Background(), ChannelModelAdmission(channel, name, core.AdmissionCandidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+// AdmittedPublicationModels returns a fresh type/model index built from complete
+// authoritative query results. A query failure returns an empty index, never a
+// cached or partially evaluated catalog. The default needs no projection.
+func AdmittedPublicationModels() map[int]map[string]bool {
+	if !core.ModelAdmissionEnabled() {
+		return nil
+	}
+	visible := make(map[int]map[string]bool)
+	var abilities []Ability
+	if err := DB.Where("enabled = ?", true).Find(&abilities).Error; err != nil {
+		return visible
+	}
+	channels, err := loadAbilityChannels(abilities)
+	if err != nil {
+		return visible
+	}
+	for _, ability := range abilities {
+		channel := channels[ability.ChannelId]
+		if channel == nil || channel.Status != common.ChannelStatusEnabled {
+			continue
+		}
+		if !core.Models.Visible(context.Background(), ChannelModelAdmission(channel, ability.Model, core.AdmissionCandidate)) {
+			continue
+		}
+		if visible[channel.Type] == nil {
+			visible[channel.Type] = make(map[string]bool)
+		}
+		visible[channel.Type][ability.Model] = true
+	}
+	return visible
+}
+
+// loadAbilityChannels batches the authoritative channel lookup, without relying
+// on a potentially incomplete or stale routing cache.
+func loadAbilityChannels(abilities []Ability) (map[int]*Channel, error) {
+	channelsByID := make(map[int]*Channel)
+	if len(abilities) == 0 {
+		return channelsByID, nil
+	}
+	ids := make([]int, 0, len(abilities))
+	seen := make(map[int]bool, len(abilities))
+	for _, ability := range abilities {
+		if !seen[ability.ChannelId] {
+			seen[ability.ChannelId] = true
+			ids = append(ids, ability.ChannelId)
+		}
+	}
+	var channels []*Channel
+	if err := DB.Where("id IN ?", ids).Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	for _, channel := range channels {
+		channelsByID[channel.Id] = channel
+	}
+	return channelsByID, nil
 }
 
 func GetEnabledModels() []string {
@@ -174,7 +284,7 @@ func GetChannel(
 
 // filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters
 // predicate used by the memory-cache path. A failed channel lookup fails
-// closed when a task-plugin identity is required and fails open otherwise.
+// closed under admission or when a task-plugin identity is required.
 func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) []Ability {
 	if len(abilities) == 0 {
 		return nil
@@ -192,7 +302,7 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 
 	var channels []*Channel
 	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
-		if identityFilterRequiresKey(filters) {
+		if core.ModelAdmissionEnabled() || identityFilterRequiresKey(filters) {
 			return nil
 		}
 		return abilities

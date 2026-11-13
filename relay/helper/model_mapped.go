@@ -1,10 +1,10 @@
 package helper
 
 import (
-	"errors"
 	"fmt"
 
 	rootcommon "github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
@@ -25,36 +25,24 @@ func ModelMappedHelper(c *gin.Context, info *relaycommon.RelayInfo, request dto.
 			return fmt.Errorf("unmarshal_model_mapping_failed")
 		}
 
-		// 支持链式模型重定向，最终使用链尾的模型
-		currentModel := info.OriginModelName
-		visitedModels := map[string]bool{
-			currentModel: true,
+		currentModel, err := model.ResolveChannelModel(info.OriginModelName, modelMap)
+		if currentModel != info.OriginModelName {
+			info.IsModelMapped = true
 		}
-		for {
-			mappedModel, exists := modelMap[currentModel]
-			baseModel := hostreasoning.BaseModelName(currentModel)
-			if (!exists || mappedModel == "") && baseModel != currentModel {
-				mappedModel, exists = modelMap[baseModel]
+		if err != nil {
+			return err
+		}
+		if currentModel == info.OriginModelName {
+			// The original helper returns before touching the request for an
+			// initial self-map, including one found through the base-name key.
+			mapped, exists := modelMap[currentModel]
+			base := hostreasoning.BaseModelName(currentModel)
+			if (!exists || mapped == "") && base != currentModel {
+				mapped, exists = modelMap[base]
 			}
-			if exists && mappedModel != "" {
-				// 模型重定向循环检测，避免无限循环
-				if visitedModels[mappedModel] {
-					if mappedModel == currentModel {
-						if currentModel == info.OriginModelName {
-							info.IsModelMapped = false
-							return nil
-						}
-
-						info.IsModelMapped = true
-						break
-					}
-					return errors.New("model_mapping_contains_cycle")
-				}
-				visitedModels[mappedModel] = true
-				currentModel = mappedModel
-				info.IsModelMapped = true
-			} else {
-				break
+			if exists && mapped != "" && mapped == currentModel {
+				info.IsModelMapped = false
+				return nil
 			}
 		}
 		if info.IsModelMapped {

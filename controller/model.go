@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	extcore "github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
@@ -332,6 +333,18 @@ func DashboardListModels(c *gin.Context) {
 			modelsByChannel[channelType] = append([]string(nil), plugin.Meta.Models...)
 		}
 	}
+	if extcore.ModelAdmissionEnabled() {
+		admitted := model.AdmittedPublicationModels()
+		for channelType, names := range modelsByChannel {
+			visible := make([]string, 0, len(names))
+			for _, name := range names {
+				if admitted[channelType][name] {
+					visible = append(visible, name)
+				}
+			}
+			modelsByChannel[channelType] = visible
+		}
+	}
 	c.JSON(200, gin.H{
 		"success": true,
 		"data":    modelsByChannel,
@@ -347,7 +360,7 @@ func EnabledListModels(c *gin.Context) {
 
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
-	if aiModel, ok := openAIModelsMap[modelId]; ok {
+	if aiModel, ok := openAIModelsMap[modelId]; ok && model.IsModelAdmittedForPublication(modelId) {
 		switch modelType {
 		case constant.ChannelTypeAnthropic:
 			c.JSON(200, dto.AnthropicModel{

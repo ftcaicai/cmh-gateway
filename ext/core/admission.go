@@ -80,3 +80,11 @@ func (noopModelGate) Visible(context.Context, Admission) bool               { re
 // Models defaults to upstream behavior. Only startup registration may replace
 // it; per-request replacement or environment lookup is not supported.
 var Models ModelGate = noopModelGate{}
+
+// ModelAdmissionEnabled distinguishes the upstream-compatible default from an
+// installed policy. Host code may avoid building projections or querying data
+// in the default case; it must not use this to bypass an installed policy.
+func ModelAdmissionEnabled() bool {
+	_, noop := Models.(noopModelGate)
+	return !noop
+}
