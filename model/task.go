@@ -151,12 +151,14 @@ type TaskPrivateData struct {
 // user, channel and token are on the task.
 type TaskRequestPlugins struct {
 	// Instances are the ids of the report instances that matched.
-	Instances   []string `json:"instances"`
-	Format      string   `json:"format"`
-	ChannelType int      `json:"channel_type,omitempty"`
-	Attempt     int      `json:"attempt,omitempty"`
-	Username    string   `json:"username,omitempty"`
-	TokenName   string   `json:"token_name,omitempty"`
+	Instances     []string                 `json:"instances"`
+	Frozen        bool                     `json:"frozen,omitempty"`
+	Continuations []TaskReportContinuation `json:"continuations,omitempty"`
+	Format        string                   `json:"format"`
+	ChannelType   int                      `json:"channel_type,omitempty"`
+	Attempt       int                      `json:"attempt,omitempty"`
+	Username      string                   `json:"username,omitempty"`
+	TokenName     string                   `json:"token_name,omitempty"`
 	// StartedAt is when the submission started, in Unix milliseconds.
 	StartedAt int64 `json:"started_at"`
 	// Request is the client body as a report shows it, inline media
@@ -165,6 +167,11 @@ type TaskRequestPlugins struct {
 	Media   []jsplugin.TransformMedia `json:"media,omitempty"`
 	// Record is the submission's public record.
 	Record []commonRelay.RequestPluginRecord `json:"record,omitempty"`
+}
+
+type TaskReportContinuation struct {
+	InstanceID string               `json:"instance_id"`
+	Ref        core.ContinuationRef `json:"ref"`
 }
 
 type TaskExecutionSnapshot struct {

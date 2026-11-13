@@ -57,6 +57,7 @@
 | H1-C | Archived任务轮询派发 | 准入/值投影 | `service/task_polling.go` | GetTaskContinuationFunc / DispatchPlatformUpdate / updateVideoSingleTask | 2026-11-14 | ref任务独立task-aware解析并复用原poll/CAS；Unavailable本次不计失败，不回当前factory；原timeout保持 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task-aware factory启动桥 | 值投影 | `main.go` | service.GetTaskContinuationFunc | 2026-11-14 | 注入relay task-bound resolver与frozenchannel，当前channel只取绑定匹配的现有credentialKey；不安装Models/Store | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Archived内容读取恢复 | 值投影/准入 | `controller/task.go` | projectTaskArtifacts / initTaskArtifactAdaptor / taskHasPluginExecution / TaskArtifactContent | 2026-11-14 | ref任务按content用途加载旧源与当前account key，不fallback currentRegistry；缺档固定503 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Task报告原源配置冻结 | 值投影/准入 | `relay/requestplugin/task_report.go` | TaskReport / freezeTaskReports / frozenTaskReportTargets / ReportTask | 2026-11-14 | 可选archive冻结实际source+originalInstance，private safe refs，整批恢复后queue；Frozen缺档/失败不回退当前settings | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -117,4 +118,5 @@ service/task_plugin_audit.go
 relay/relay_adaptor.go
 service/task_polling.go
 controller/task.go
+relay/requestplugin/task_report.go
 ```

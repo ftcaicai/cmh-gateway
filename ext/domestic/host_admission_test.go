@@ -35,11 +35,14 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/requestplugin"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	kittypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -536,6 +539,16 @@ func (f *failingContinuationStore) Save(context.Context, core.ContinuationBindin
 	return core.ContinuationRef{}, core.ErrContinuationUnavailable
 }
 
+type countedContinuationStore struct {
+	core.ContinuationStore
+	loads int
+}
+
+func (s *countedContinuationStore) Load(ctx context.Context, b core.ContinuationBinding, r core.ContinuationRef, p core.ContinuationPurpose) (core.ContinuationArtifact, error) {
+	s.loads++
+	return s.ContinuationStore.Load(ctx, b, r, p)
+}
+
 type cancellingContinuationStore struct {
 	core.ContinuationStore
 	cancel context.CancelFunc
@@ -973,6 +986,124 @@ export function parseBatchResult(ctx,body){return ctx.tasks.map(t=>({taskId:t.ta
 	assert.Zero(t, probe.reserve)
 	assert.Zero(t, probe.settle)
 	assert.Zero(t, probe.refund)
+	runFrozenTaskReport(t, archive, stored.Id, base, info.UserId)
+}
+
+func runFrozenTaskReport(t *testing.T, archive core.ContinuationStore, channelID int, _ string, userID int) {
+	t.Helper()
+	oldInstances, err := common.Marshal(request_plugin_setting.GetInstances())
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(oldInstances)}))
+	}()
+	oldTargets := core.Destinations
+	defer func() { core.Destinations = oldTargets }()
+	var reportsReceived atomic.Int32
+	received := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		reportsReceived.Add(1)
+		received <- string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	const source = `export const meta={apiVersion:1,key:"cmh-frozen-report",name:"Frozen report",version:"1.0.0",author:{name:"Test"},configSchema:{type:"object",properties:{url:{type:"string",title:{en:"Service URL",zh:"服务地址"},format:"url"},marker:{type:"string",title:{en:"Marker",zh:"标记"}}}}};
+export function report(ctx,record){utils.fetch({url:ctx.config.url,method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({source:"A",marker:ctx.config.marker})});}`
+	plugin, err := jsplugin.DefaultRegistry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	instances := []request_plugin_setting.Instance{{ID: "frozen-report", Name: "Frozen", Plugin: plugin.Meta.Key, Enabled: true, Global: true, Config: common.RawMessage(fmt.Sprintf(`{"url":%q,"marker":"original-A"}`, server.URL))}}
+	encoded, err := common.Marshal(instances)
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(encoded)}))
+	core.TaskContinuations = archive
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/report", nil)
+	common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "default")
+	_, _, _, apiErr := requestplugin.SubmitIngress(ctx, kittypes.RelayFormatTask, "public-task")
+	require.Nil(t, apiErr)
+	info := &relaycommon.RelayInfo{UserId: userID, OriginModelName: "public-task", UsingGroup: "default", TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: "synthetic-report-frozen"}, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channelID, ChannelType: constant.ChannelTypeTaskPlugin, UpstreamModelName: "public-task"}}
+	core.TaskContinuations = &failingContinuationStore{ContinuationStore: archive}
+	failed := requestplugin.TaskReport(ctx, info)
+	require.NotNil(t, failed)
+	require.True(t, failed.Frozen)
+	assert.Empty(t, failed.Continuations)
+	core.TaskContinuations = archive
+	stored := requestplugin.TaskReport(ctx, info)
+	require.NotNil(t, stored)
+	require.True(t, stored.Frozen)
+	require.Len(t, stored.Continuations, 1)
+	task := &model.Task{TaskID: info.PublicTaskID, UserId: userID, ChannelId: channelID, Status: model.TaskStatusSuccess, Group: "default", Properties: model.Properties{OriginModelName: "public-task"}, PrivateData: model.TaskPrivateData{RequestPlugins: stored}}
+	require.NoError(t, model.DB.Create(task).Error)
+	defer func() { require.NoError(t, model.DB.Where("id = ?", task.ID).Delete(&model.Task{}).Error) }()
+	var reloaded model.Task
+	require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
+	require.True(t, reloaded.PrivateData.RequestPlugins.Frozen)
+	assert.Equal(t, stored.Continuations, reloaded.PrivateData.RequestPlugins.Continuations)
+	_, err = jsplugin.DefaultRegistry.RegisterFactory(strings.Replace(source, `source:"A"`, `source:"B"`, 1), jsplugin.Options{})
+	require.NoError(t, err)
+	instances[0].Config = common.RawMessage(fmt.Sprintf(`{"url":%q,"marker":"current-B"}`, server.URL))
+	encoded, err = common.Marshal(instances)
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(encoded)}))
+	originalConfig := common.RawMessage(fmt.Sprintf(`{"url":%q,"marker":"original-A"}`, server.URL))
+	fetchIdentity, err := service.RequestPluginFetchExecutor(plugin, originalConfig)
+	require.NoError(t, err)
+	target, err := core.DestinationAddress(server.URL)
+	require.NoError(t, err)
+	parsed, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	policy, err := NewDestinationPolicy([]core.DestinationAdmission{{Kind: "plugin_fetch", Method: "POST", AddressSHA256: target, HostSHA256: core.DestinationHost(parsed.Host), Executor: fetchIdentity, Hook: "report"}})
+	require.NoError(t, err)
+	core.Destinations = policy
+	counted := &countedContinuationStore{ContinuationStore: archive}
+	core.TaskContinuations = counted
+	partial := reloaded
+	partialStored := *reloaded.PrivateData.RequestPlugins
+	partialStored.Instances = append(append([]string{}, partialStored.Instances...), "missing-second")
+	partial.PrivateData.RequestPlugins = &partialStored
+	requestplugin.ReportTask(&partial)
+	assert.Zero(t, counted.loads, "partial frozen target set must reject before loading or queueing first target")
+	core.TaskContinuations = archive
+	instances[0].Enabled = false
+	disabledSettings, err := common.Marshal(instances)
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(disabledSettings)}))
+	countedDisabled := &countedContinuationStore{ContinuationStore: archive}
+	core.TaskContinuations = countedDisabled
+	requestplugin.ReportTask(&reloaded)
+	assert.Zero(t, countedDisabled.loads)
+	core.TaskContinuations = archive
+	instances[0].Enabled = true
+	enabledSettings, err := common.Marshal(instances)
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: string(enabledSettings)}))
+	oversized := reloaded
+	oversizedStored := *reloaded.PrivateData.RequestPlugins
+	oversizedStored.Instances = make([]string, 17)
+	oversizedStored.Continuations = make([]model.TaskReportContinuation, 17)
+	oversized.PrivateData.RequestPlugins = &oversizedStored
+	countedLarge := &countedContinuationStore{ContinuationStore: archive}
+	core.TaskContinuations = countedLarge
+	requestplugin.ReportTask(&oversized)
+	assert.Zero(t, countedLarge.loads)
+	core.TaskContinuations = archive
+	requestplugin.ReportTask(&reloaded)
+	select {
+	case payload := <-received:
+		assert.Contains(t, payload, `"source":"A"`)
+		assert.Contains(t, payload, "original-A")
+		assert.NotContains(t, payload, "current-B")
+	case <-time.After(5 * time.Second):
+		t.Fatal("original frozen report was not delivered")
+	}
+	before := reportsReceived.Load()
+	core.TaskContinuations = nil
+	requestplugin.ReportTask(&reloaded)
+	assert.Equal(t, before, reportsReceived.Load())
+	core.TaskContinuations = archive
+	reloaded.PrivateData.RequestPlugins.Continuations = nil
+	requestplugin.ReportTask(&reloaded)
+	assert.Equal(t, before, reportsReceived.Load(), "Frozen empty cannot fallback to current report settings")
 }
 
 func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, noop core.ModelGate) {
