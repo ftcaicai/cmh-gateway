@@ -14,6 +14,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -576,8 +577,15 @@ func normalizePluginConfig(channel *model.Channel, plugin *jsplugin.LoadedPlugin
 	return nil
 }
 
-// validateChannel 通用的渠道校验函数
+// validateChannel retains the original full validation contract.
 func validateChannel(channel *model.Channel, isAdd bool) error {
+	return normalizeChannel(channel, isAdd, true)
+}
+
+// normalizeChannel can defer credential validation for save preflight. Save
+// handlers must admit the complete effective identity before credential checks
+// or a plugin's checkKey, which may make network requests.
+func normalizeChannel(channel *model.Channel, isAdd, checkCredentials bool) error {
 	if channel == nil {
 		return fmt.Errorf("channel cannot be empty")
 	}
@@ -684,8 +692,10 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		if channel.Key == "" && !service.ChannelSupportsPluginLogin(channel) {
 			return fmt.Errorf("channel cannot be empty")
 		}
-		if err := service.CheckSubmittedPluginCredentials(channel.Type, channel.GetSetting().TaskPluginKey, channel.Key, ""); err != nil {
-			return err
+		if checkCredentials {
+			if err := service.CheckSubmittedPluginCredentials(channel.Type, channel.GetSetting().TaskPluginKey, channel.Key, ""); err != nil {
+				return err
+			}
 		}
 
 		// 检查模型名称长度是否超过 255
@@ -822,6 +832,14 @@ func AddChannel(c *gin.Context) {
 		return
 	}
 
+	if core.ModelAdmissionEnabled() && addChannelRequest.Channel != nil {
+		// GetSetting repairs malformed persisted settings. Reject locally before
+		// the permission projection below can invoke that repair on request data.
+		if err := addChannelRequest.Channel.ValidateSettings(); err != nil {
+			common.ApiErrorT(c, "Invalid request")
+			return
+		}
+	}
 	// Binding a plugin needs the same permission on a New API channel as the
 	// type-61 channel dedicated to it.
 	if addChannelRequest.Channel != nil &&
@@ -838,9 +856,29 @@ func AddChannel(c *gin.Context) {
 		addChannelRequest.Channel.Type == constant.ChannelTypeTaskPlugin &&
 		(addChannelRequest.Channel.BaseURL == nil || strings.TrimSpace(*addChannelRequest.Channel.BaseURL) == "")
 	// 使用统一的校验函数
-	if err := validateChannel(addChannelRequest.Channel, true); err != nil {
+	if err := normalizeChannel(addChannelRequest.Channel, true, !core.ModelAdmissionEnabled()); err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if core.ModelAdmissionEnabled() {
+		// Every member of an add batch has this normalized identity. Account for
+		// Create's status default and the keyless-login disabled status before
+		// credential validation or a plugin network call.
+		effective := *addChannelRequest.Channel
+		if effective.Status == 0 {
+			effective.Status = common.ChannelStatusEnabled
+		}
+		if strings.TrimSpace(effective.Key) == "" && service.ChannelSupportsPluginLogin(&effective) {
+			service.PluginLoginNeededStatus(&effective)
+		}
+		if err := model.ValidateChannelAdmissionSnapshot(c.Request.Context(), &effective); err != nil {
+			common.ApiErrorT(c, "Invalid request")
+			return
+		}
+		if err := service.CheckSubmittedPluginCredentials(addChannelRequest.Channel.Type, addChannelRequest.Channel.GetSetting().TaskPluginKey, addChannelRequest.Channel.Key, ""); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	if err := checkPluginChannelKeys(c, addChannelRequest.Channel, addChannelRequest.Channel.Key, ""); err != nil {
 		common.ApiError(c, err)
@@ -936,6 +974,10 @@ func AddChannel(c *gin.Context) {
 		channelInputIndices = append(channelInputIndices, nil)
 	}
 	err = model.BatchInsertChannels(channels)
+	if errors.Is(err, model.ErrChannelAdmissionDenied) {
+		common.ApiErrorT(c, "Invalid request")
+		return
+	}
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -1211,6 +1253,30 @@ type ChannelStatusBatchRequest struct {
 	Status int   `json:"status"`
 }
 
+// channelAdmissionPatchSnapshot mirrors Updates(struct) for admission identity:
+// zero scalars and nil pointers preserve the stored values, while nonnil empty
+// mapping/setting pointers clear them. Active key edits persist atomically with
+// the patch through UpdateWithAdmissionKey; the default path remains upstream.
+func channelAdmissionPatchSnapshot(stored *model.Channel, patch *model.Channel) model.Channel {
+	effective := *stored
+	if patch.Type != 0 {
+		effective.Type = patch.Type
+	}
+	if patch.Status != 0 {
+		effective.Status = patch.Status
+	}
+	if patch.Models != "" {
+		effective.Models = patch.Models
+	}
+	if patch.ModelMapping != nil {
+		effective.ModelMapping = patch.ModelMapping
+	}
+	if patch.Setting != nil {
+		effective.Setting = patch.Setting
+	}
+	return effective
+}
+
 func UpdateChannel(c *gin.Context) {
 	channel := PatchChannel{}
 	rawBody, err := c.GetRawData()
@@ -1253,6 +1319,13 @@ func UpdateChannel(c *gin.Context) {
 	originChannel, err := model.GetChannelById(channel.Id, true)
 	if err != nil {
 		common.ApiError(c, err)
+		return
+	}
+	// Admit before getters on the stored channel: malformed legacy settings
+	// may otherwise be repaired as an implicit write by GetSetting.
+	effective := channelAdmissionPatchSnapshot(originChannel, &channel.Channel)
+	if err := model.ValidateChannelAdmissionSnapshot(c.Request.Context(), &effective); err != nil {
+		common.ApiErrorT(c, "Invalid request")
 		return
 	}
 	originProxy := originChannel.GetSetting().Proxy
@@ -1418,25 +1491,50 @@ func UpdateChannel(c *gin.Context) {
 	// A new key is made from the key stored when the channel's key lock is
 	// held, the lock a credential refresh also takes to write its result.
 	var keyBefore, keyAfter string
-	if keyChanged {
-		stored, err := model.UpdateChannelLocked(channel.Id, func(stored *model.Channel) error {
-			next, err := nextKey(stored.Key)
+	if keyChanged && core.ModelAdmissionEnabled() {
+		keyBefore, keyAfter, err = channel.UpdateWithAdmissionKey(func(stored string) (string, error) {
+			next, err := nextKey(stored)
 			if err != nil {
-				return err
+				return "", err
 			}
-			if err := service.CheckSubmittedPluginCredentials(keptType, keptPluginKey, next, stored.Key); err != nil {
-				return err
+			if err := service.CheckSubmittedPluginCredentials(keptType, keptPluginKey, next, stored); err != nil {
+				return "", err
 			}
-			keyBefore, stored.Key = stored.Key, next
-			return nil
+			return next, nil
 		})
-		if err != nil {
-			common.ApiError(c, err)
-			return
+	} else {
+		if keyChanged {
+			stored, keyErr := model.UpdateChannelLocked(channel.Id, func(stored *model.Channel) error {
+				effective := channelAdmissionPatchSnapshot(stored, &channel.Channel)
+				if err := model.ValidateChannelAdmissionSnapshot(c.Request.Context(), &effective); err != nil {
+					return err
+				}
+				next, err := nextKey(stored.Key)
+				if err != nil {
+					return err
+				}
+				if err := service.CheckSubmittedPluginCredentials(keptType, keptPluginKey, next, stored.Key); err != nil {
+					return err
+				}
+				keyBefore, stored.Key = stored.Key, next
+				return nil
+			})
+			if errors.Is(keyErr, model.ErrChannelAdmissionDenied) {
+				common.ApiErrorT(c, "Invalid request")
+				return
+			}
+			if keyErr != nil {
+				common.ApiError(c, keyErr)
+				return
+			}
+			keyAfter = stored.Key
 		}
-		keyAfter = stored.Key
+		err = channel.Update()
 	}
-	err = channel.Update()
+	if errors.Is(err, model.ErrChannelAdmissionDenied) {
+		common.ApiErrorT(c, "Invalid request")
+		return
+	}
 	if err != nil {
 		common.ApiError(c, err)
 		return

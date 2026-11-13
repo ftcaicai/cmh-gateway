@@ -15,6 +15,7 @@ import (
 	"github.com/MoeForge/moego/regexp"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -580,7 +581,58 @@ func sendChannelRequest(channel *model.Channel, request *http.Request) (*http.Re
 	return client.Do(request)
 }
 
-func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool) error {
+func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool, originModels ...[]string) error {
+	if core.ModelAdmissionEnabled() {
+		// The network discovery and selection happened before this short write
+		// transaction. Rebase only their selected model delta onto the locked row,
+		// retaining its current type, mapping, binding and unrelated settings.
+		var addModels, removeModels []string
+		if updateModels {
+			if len(originModels) == 0 {
+				return common.NewMessage("Invalid request")
+			}
+			addModels = subtractModelNames(channel.GetModels(), originModels[0])
+			removeModels = subtractModelNames(originModels[0], channel.GetModels())
+		}
+		var effective model.Channel
+		_, err := model.UpdateChannelOtherInfo(channel.Id, func(stored *model.Channel) (map[string]any, error) {
+			if stored.OtherSettings != channel.OtherSettings {
+				// Discovery and operator selection were calculated from this exact
+				// settings snapshot. A newer ignore/pending edit must be retried,
+				// not overwritten by the older response.
+				return nil, common.NewMessage("Invalid request")
+			}
+			effective = *stored
+			var currentSettings dto.ChannelOtherSettings
+			if stored.OtherSettings != "" {
+				if err := common.UnmarshalJsonStr(stored.OtherSettings, &currentSettings); err != nil {
+					return nil, common.NewMessage("Invalid request")
+				}
+			}
+			currentSettings.UpstreamModelUpdateLastCheckTime = settings.UpstreamModelUpdateLastCheckTime
+			currentSettings.UpstreamModelUpdateIgnoredModels = settings.UpstreamModelUpdateIgnoredModels
+			currentSettings.UpstreamModelUpdateLastDetectedModels = settings.UpstreamModelUpdateLastDetectedModels
+			currentSettings.UpstreamModelUpdateLastRemovedModels = settings.UpstreamModelUpdateLastRemovedModels
+			effective.SetOtherSettings(currentSettings)
+			updates := map[string]any{"settings": effective.OtherSettings}
+			if updateModels {
+				effective.Models = strings.Join(applySelectedModelChanges(stored.GetModels(), addModels, removeModels), ",")
+				updates["models"] = effective.Models
+			}
+			if err := model.ValidateChannelAdmissionSnapshot(context.Background(), &effective); err != nil {
+				return nil, common.NewMessage("Invalid request")
+			}
+			return updates, nil
+		})
+		if errors.Is(err, model.ErrChannelAdmissionDenied) {
+			return common.NewMessage("Invalid request")
+		}
+		if err != nil {
+			return err
+		}
+		*channel = effective
+		return nil
+	}
 	channel.SetOtherSettings(settings)
 	updates := map[string]any{
 		"settings": channel.OtherSettings,
@@ -615,8 +667,8 @@ func checkAndPersistChannelUpstreamModelUpdates(
 		return false, 0, fetchErr
 	}
 
+	originModels := normalizeModelNames(channel.GetModels())
 	if allowAutoApply && settings.UpstreamModelUpdateAutoSyncEnabled && len(pendingAddModels) > 0 {
-		originModels := normalizeModelNames(channel.GetModels())
 		mergedModels := mergeModelNames(originModels, pendingAddModels)
 		if len(mergedModels) > len(originModels) {
 			channel.Models = strings.Join(mergedModels, ",")
@@ -629,10 +681,10 @@ func checkAndPersistChannelUpstreamModelUpdates(
 	}
 	settings.UpstreamModelUpdateLastRemovedModels = pendingRemoveModels
 
-	if err = updateChannelUpstreamModelSettings(channel, *settings, modelsChanged); err != nil {
+	if err = updateChannelUpstreamModelSettings(channel, *settings, modelsChanged, originModels); err != nil {
 		return false, autoAdded, err
 	}
-	if modelsChanged {
+	if modelsChanged && !core.ModelAdmissionEnabled() {
 		err = channel.UpdateAbilities(nil)
 		model.BumpSyncTopic(model.SyncTopicChannels)
 		if err != nil {
@@ -1092,11 +1144,11 @@ func applyChannelUpstreamModelUpdates(
 	settings.UpstreamModelUpdateLastRemovedModels = remainingRemoveModels
 	settings.UpstreamModelUpdateLastCheckTime = common.GetTimestamp()
 
-	if err := updateChannelUpstreamModelSettings(channel, settings, modelsChanged); err != nil {
+	if err := updateChannelUpstreamModelSettings(channel, settings, modelsChanged, originModels); err != nil {
 		return nil, nil, nil, nil, false, err
 	}
 
-	if modelsChanged {
+	if modelsChanged && !core.ModelAdmissionEnabled() {
 		err := channel.UpdateAbilities(nil)
 		model.BumpSyncTopic(model.SyncTopicChannels)
 		if err != nil {

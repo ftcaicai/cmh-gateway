@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -24,6 +26,7 @@ import (
 	"github.com/samber/lo"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 type Channel struct {
@@ -380,6 +383,9 @@ const channelOtherInfoAttempts = 5
 // one node, the channel's key lock also keeps the locked updates of this
 // process out.
 func UpdateChannelOtherInfo(channelID int, update func(channel *Channel) (map[string]any, error)) (written bool, err error) {
+	if core.ModelAdmissionEnabled() {
+		return updateChannelOtherInfoWithAdmission(channelID, update)
+	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		lock := sqliteChannelKeyLock(channelID)
 		lock.Lock()
@@ -422,6 +428,231 @@ func UpdateChannelOtherInfo(channelID int, update func(channel *Channel) (map[st
 		}
 	}
 	return false, ErrChannelOtherInfoBusy
+}
+
+// updateChannelOtherInfoWithAdmission validates the assignments, not the mutable
+// callback input. GORM binds map values directly; Field.Set's conversions alone
+// would not prove what a database persists (notably expressions and valuers).
+func updateChannelOtherInfoWithAdmission(channelID int, update func(*Channel) (map[string]any, error)) (bool, error) {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		lock := sqliteChannelKeyLock(channelID)
+		lock.Lock()
+		defer lock.Unlock()
+	}
+	var written, routingChanged bool
+	// The generic map can contain credentials; never interpolate a failed write.
+	err := DB.Session(&gorm.Session{Logger: gormlogger.Discard}).Transaction(func(tx *gorm.DB) error {
+		var stored Channel
+		if err := lockForUpdate(tx).First(&stored, "id = ?", channelID).Error; err != nil {
+			return err
+		}
+		callback := stored
+		// A shallow copy aliases these identity strings and quarantine maps.
+		if stored.ModelMapping != nil {
+			value := *stored.ModelMapping
+			callback.ModelMapping = &value
+		}
+		if stored.Setting != nil {
+			value := *stored.Setting
+			callback.Setting = &value
+		}
+		callback.ChannelInfo.MultiKeyStatusList = maps.Clone(stored.ChannelInfo.MultiKeyStatusList)
+		callback.ChannelInfo.MultiKeyDisabledReason = maps.Clone(stored.ChannelInfo.MultiKeyDisabledReason)
+		callback.ChannelInfo.MultiKeyDisabledTime = maps.Clone(stored.ChannelInfo.MultiKeyDisabledTime)
+		columns, err := update(&callback)
+		if err != nil || columns == nil {
+			return err
+		}
+		stmt := &gorm.Statement{DB: tx}
+		if err := stmt.Parse(&Channel{}); err != nil {
+			return err
+		}
+		assignments := make(map[string]any, len(columns)+1)
+		effective := stored
+		quarantineOnly := true
+		rebuildAbilities := false
+		for key, value := range columns {
+			// SQL expressions/subqueries in even a non-identity assignment can
+			// introduce additional assignments outside the projected map.
+			if _, expression := value.(clause.Expression); expression {
+				return ErrChannelAdmissionDenied
+			}
+			if _, expression := value.(gorm.Valuer); expression {
+				return ErrChannelAdmissionDenied
+			}
+			if _, subquery := value.(*gorm.DB); subquery {
+				return ErrChannelAdmissionDenied
+			}
+			field := stmt.Schema.LookUpField(key)
+			// Unknown spellings can address case-insensitive SQL identifiers on
+			// some engines. Do not guess, or let them alias an identity column.
+			if field == nil || field.DBName == "" {
+				return ErrChannelAdmissionDenied
+			}
+			column := field.DBName
+			if _, duplicate := assignments[column]; duplicate {
+				return ErrChannelAdmissionDenied
+			}
+			switch column {
+			case "id", "type", "status":
+				if _, opaque := value.(driver.Valuer); opaque {
+					return ErrChannelAdmissionDenied
+				}
+				rv := reflect.ValueOf(value)
+				var integer int
+				if !rv.IsValid() {
+					return ErrChannelAdmissionDenied
+				}
+				switch rv.Kind() {
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					n := rv.Int()
+					integer = int(n)
+					if int64(integer) != n {
+						return ErrChannelAdmissionDenied
+					}
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					n := rv.Uint()
+					integer = int(n)
+					if integer < 0 || uint64(integer) != n {
+						return ErrChannelAdmissionDenied
+					}
+				default:
+					return ErrChannelAdmissionDenied
+				}
+				value = integer
+				switch column {
+				case "id":
+					if integer != channelID {
+						return ErrChannelAdmissionDenied
+					}
+				case "type":
+					effective.Type = integer
+				case "status":
+					effective.Status = integer
+				}
+			case "models":
+				models, ok := value.(string)
+				if !ok {
+					return ErrChannelAdmissionDenied
+				}
+				effective.Models = models
+			case "model_mapping", "setting":
+				var text *string
+				switch v := value.(type) {
+				case nil:
+				case string:
+					text = &v
+				case *string:
+					if v != nil {
+						copy := *v
+						text = &copy
+					}
+				default:
+					return ErrChannelAdmissionDenied
+				}
+				value = nil
+				if text != nil {
+					value = *text
+				}
+				if column == "model_mapping" {
+					effective.ModelMapping = text
+				} else {
+					effective.Setting = text
+				}
+			case "channel_info":
+				info, ok := value.(ChannelInfo)
+				if !ok {
+					// Do not grant a quarantine exemption to opaque JSON/valuers.
+					quarantineOnly = false
+				} else {
+					effective.ChannelInfo = info
+				}
+			}
+			assignments[column] = value
+			switch column {
+			case "status", "channel_info", "other_info":
+			case "id", "type", "models", "model_mapping", "setting":
+				// Only actual identity deltas disqualify a restrictive write.
+			default:
+				quarantineOnly = false
+			}
+			if column == "models" || column == "group" || column == "type" || column == "priority" || column == "weight" || column == "tag" {
+				rebuildAbilities = true
+			}
+		}
+		assignments["other_info"] = callback.OtherInfo
+		if callback.OtherInfo != stored.OtherInfo {
+			var beforeInfo, afterInfo map[string]any
+			beforeInfo, afterInfo = make(map[string]any), make(map[string]any)
+			if stored.OtherInfo != "" && common.UnmarshalJsonStr(stored.OtherInfo, &beforeInfo) != nil ||
+				callback.OtherInfo != "" && common.UnmarshalJsonStr(callback.OtherInfo, &afterInfo) != nil {
+				quarantineOnly = false
+			}
+			delete(beforeInfo, "status_reason")
+			delete(beforeInfo, "status_time")
+			delete(afterInfo, "status_reason")
+			delete(afterInfo, "status_time")
+			quarantineOnly = quarantineOnly && reflect.DeepEqual(beforeInfo, afterInfo)
+		}
+		quarantineOnly = quarantineOnly && stored.Type == effective.Type && stored.Models == effective.Models &&
+			reflect.DeepEqual(stored.ModelMapping, effective.ModelMapping) && reflect.DeepEqual(stored.Setting, effective.Setting) &&
+			(effective.Status != common.ChannelStatusEnabled || stored.Status == common.ChannelStatusEnabled) &&
+			channelKeyQuarantineDoesNotExpand(stored, effective)
+		if !quarantineOnly {
+			if err := ValidateChannelAdmissionSnapshot(tx.Statement.Context, &effective); err != nil {
+				return err
+			}
+		}
+		if err := tx.Model(&Channel{}).Where("id = ?", channelID).Updates(assignments).Error; err != nil {
+			return err
+		}
+		written = true
+		routingChanged = rebuildAbilities || stored.Status != effective.Status ||
+			!reflect.DeepEqual(stored.ModelMapping, effective.ModelMapping) || !reflect.DeepEqual(stored.Setting, effective.Setting)
+		if rebuildAbilities {
+			// Include all non-identity assignments with their DB semantics.
+			var persisted Channel
+			if err := tx.First(&persisted, "id = ?", channelID).Error; err != nil {
+				return err
+			}
+			return persisted.UpdateAbilities(tx)
+		}
+		if stored.Status != effective.Status {
+			return tx.Model(&Ability{}).Where("channel_id = ?", channelID).Update("enabled", effective.Status == common.ChannelStatusEnabled).Error
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if written && routingChanged {
+		BumpSyncTopic(SyncTopicChannels)
+	}
+	return written, nil
+}
+
+// channelKeyQuarantineDoesNotExpand recognizes only key-status restrictions,
+// not arbitrary channel_info edits or restoration of any previously blocked key.
+func channelKeyQuarantineDoesNotExpand(before, after Channel) bool {
+	old, next := before.ChannelInfo, after.ChannelInfo
+	if old.IsMultiKey != next.IsMultiKey || old.MultiKeySize != next.MultiKeySize ||
+		old.MultiKeyMode != next.MultiKeyMode || old.MultiKeyPollingIndex != next.MultiKeyPollingIndex {
+		return false
+	}
+	for index, status := range old.MultiKeyStatusList {
+		if status != common.ChannelStatusEnabled {
+			nextStatus, exists := next.MultiKeyStatusList[index]
+			if !exists || nextStatus == common.ChannelStatusEnabled {
+				return false
+			}
+		}
+	}
+	for index := range next.MultiKeyStatusList {
+		if index < 0 || index >= len(before.GetKeys()) {
+			return false
+		}
+	}
+	return true
 }
 
 func GetAllChannels(startIdx int, num int, selectAll bool, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
@@ -755,58 +986,111 @@ func (channel *Channel) Update() error {
 // nil pointers preserve the stored value; nonnil empty mapping/setting clears
 // it. Future projection changes must extend this explicit merge as well.
 func (channel *Channel) updateWithAdmission() error {
+	_, _, err := channel.updateWithAdmissionKey(nil)
+	return err
+}
+
+// UpdateWithAdmissionKey atomically edits the admitted channel and its key.
+// next must perform local validation only: it runs while the stored row is locked.
+// Without an installed policy this API fails closed, rather than bypassing admission.
+// Returned keys are for post-commit credential revocation, never for logs or responses.
+func (channel *Channel) UpdateWithAdmissionKey(next func(string) (string, error)) (before, after string, err error) {
+	if !core.ModelAdmissionEnabled() || next == nil {
+		return "", "", ErrChannelAdmissionDenied
+	}
+	return channel.updateWithAdmissionKey(next)
+}
+
+func (channel *Channel) updateWithAdmissionKey(next func(string) (string, error)) (before, after string, err error) {
+	if next != nil {
+		pollingLock := GetChannelPollingLock(channel.Id)
+		pollingLock.Lock()
+		defer pollingLock.Unlock()
+	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		lock := sqliteChannelKeyLock(channel.Id)
 		lock.Lock()
 		defer lock.Unlock()
 	}
+	patch := *channel
+	patch.ChannelInfo.MultiKeyStatusList = maps.Clone(channel.ChannelInfo.MultiKeyStatusList)
+	patch.ChannelInfo.MultiKeyDisabledReason = maps.Clone(channel.ChannelInfo.MultiKeyDisabledReason)
+	patch.ChannelInfo.MultiKeyDisabledTime = maps.Clone(channel.ChannelInfo.MultiKeyDisabledTime)
 	var stored Channel
-	err := DB.Transaction(func(tx *gorm.DB) error {
-		if err := lockForUpdate(tx).First(&stored, "id = ?", channel.Id).Error; err != nil {
+	db := DB
+	if next != nil {
+		// A failed key/identity/ability write must not expose the key through SQL logs.
+		db = db.Session(&gorm.Session{Logger: gormlogger.Discard})
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&stored, "id = ?", patch.Id).Error; err != nil {
 			return err
 		}
+		before, after = stored.Key, stored.Key
+		if next != nil {
+			var err error
+			after, err = next(stored.Key)
+			if err != nil {
+				return err
+			}
+		}
 		effective := stored
-		if channel.Type != 0 {
-			effective.Type = channel.Type
+		if patch.Type != 0 {
+			effective.Type = patch.Type
 		}
-		if channel.Status != 0 {
-			effective.Status = channel.Status
+		if patch.Status != 0 {
+			effective.Status = patch.Status
 		}
-		if channel.Models != "" {
-			effective.Models = channel.Models
+		if patch.Models != "" {
+			effective.Models = patch.Models
 		}
-		if channel.ModelMapping != nil {
-			effective.ModelMapping = channel.ModelMapping
+		if patch.ModelMapping != nil {
+			effective.ModelMapping = patch.ModelMapping
 		}
-		if channel.Setting != nil {
-			effective.Setting = channel.Setting
+		if patch.Setting != nil {
+			effective.Setting = patch.Setting
 		}
-		if channel.ChannelInfo.IsMultiKey {
-			channel.ChannelInfo.MultiKeySize = len(stored.GetKeys())
-			for idx := range channel.ChannelInfo.MultiKeyStatusList {
-				if idx >= channel.ChannelInfo.MultiKeySize {
-					delete(channel.ChannelInfo.MultiKeyStatusList, idx)
+		effective.Key, effective.Keys = after, nil
+		if next != nil && reflect.ValueOf(patch.ChannelInfo).IsZero() {
+			patch.ChannelInfo = stored.ChannelInfo
+			patch.ChannelInfo.MultiKeyStatusList = maps.Clone(stored.ChannelInfo.MultiKeyStatusList)
+			patch.ChannelInfo.MultiKeyDisabledReason = maps.Clone(stored.ChannelInfo.MultiKeyDisabledReason)
+			patch.ChannelInfo.MultiKeyDisabledTime = maps.Clone(stored.ChannelInfo.MultiKeyDisabledTime)
+		}
+		if patch.ChannelInfo.IsMultiKey {
+			patch.ChannelInfo.MultiKeySize = len(effective.GetKeys())
+			for idx := range patch.ChannelInfo.MultiKeyStatusList {
+				if idx >= patch.ChannelInfo.MultiKeySize {
+					delete(patch.ChannelInfo.MultiKeyStatusList, idx)
 				}
 			}
 		}
 		if err := ValidateChannelAdmissionSnapshot(tx.Statement.Context, &effective); err != nil {
 			return err
 		}
-		if err := tx.Model(channel).Omit("key").Updates(channel).Error; err != nil {
+		if err := tx.Model(&patch).Omit("key").Updates(&patch).Error; err != nil {
 			return err
 		}
+		if next != nil && after != before {
+			if err := tx.Model(&Channel{}).Where("id = ?", patch.Id).Update("key", after).Error; err != nil {
+				return err
+			}
+		}
 		// Reload all written non-identity fields too before rebuilding abilities.
-		if err := tx.First(&stored, "id = ?", channel.Id).Error; err != nil {
+		if err := tx.First(&stored, "id = ?", patch.Id).Error; err != nil {
 			return err
 		}
 		return stored.UpdateAbilities(tx)
 	})
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	*channel = stored
+	if next != nil && after != before {
+		CacheUpdateChannelKey(channel.Id, after)
+	}
 	BumpSyncTopic(SyncTopicChannels)
-	return nil
+	return before, after, nil
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {

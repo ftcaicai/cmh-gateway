@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -100,12 +101,12 @@ func TestHostAdmissionMappingContract(t *testing.T) {
 
 func runHostAdmissionWrites(t *testing.T, gate *Gate, noop core.ModelGate) {
 	t.Helper()
-	approved, denied := `{"public-chat":"approved-target"}`, `{"public-chat":"unapproved-target"}`
+	approved, denied := `{"public-chat":"approved-target","gpt-4o-mini":"approved-target"}`, `{"public-chat":"unapproved-target"}`
 	tag := "admission-write-fixture"
 	makeChannel := func(id int, mapping *string) model.Channel {
 		return model.Channel{Id: id, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "admission-write", Key: "fixture", Models: "public-chat", Group: "default", ModelMapping: mapping, Tag: &tag}
 	}
-	ids := []int{92001, 92002, 92003, 92004, 92005}
+	ids := []int{92001, 92002, 92003, 92004, 92005, 92006}
 	defer func() {
 		core.Models = noop
 		require.NoError(t, model.DB.Where("channel_id IN ?", ids).Delete(&model.Ability{}).Error)
@@ -135,15 +136,190 @@ func runHostAdmissionWrites(t *testing.T, gate *Gate, noop core.ModelGate) {
 	assert.Zero(t, count, "failed ability creation must roll back its channel")
 	patch := model.Channel{Id: good.Id, ModelMapping: &denied}
 	require.Error(t, patch.Update())
+	written, err := model.UpdateChannelOtherInfo(good.Id, func(ch *model.Channel) (map[string]any, error) {
+		return map[string]any{"model_mapping": denied}, nil
+	})
+	require.Error(t, err)
+	assert.False(t, written)
+	written, err = model.UpdateChannelOtherInfo(good.Id, func(ch *model.Channel) (map[string]any, error) {
+		*ch.ModelMapping = approved
+		return map[string]any{"model_mapping": denied}, nil
+	})
+	require.Error(t, err, "callback in-memory allowed value cannot hide denied returned persistence column")
+	assert.False(t, written)
+	for _, updates := range []map[string]any{
+		{"ModelMapping": denied},
+		{"type": "1"},
+		{"model_mapping": gorm.Expr("?", approved)},
+		{"model_mapping": denied, "ModelMapping": approved},
+	} {
+		written, err = model.UpdateChannelOtherInfo(good.Id, func(ch *model.Channel) (map[string]any, error) { return updates, nil })
+		require.Error(t, err)
+		assert.False(t, written)
+	}
+	router := gin.New()
+	router.POST("/add", func(c *gin.Context) { c.Set("id", 1); c.Set("role", common.RoleRootUser); c.Next() }, controller.AddChannel)
+	addBody, err := common.Marshal(map[string]any{"mode": "batch", "channel": map[string]any{"type": constant.ChannelTypeOpenAI, "name": "admission-add-denied", "models": "not-published", "group": "default", "key": "first-fixture\nsecond-fixture"}})
+	require.NoError(t, err)
+	addResponse := httptest.NewRecorder()
+	addRequest := httptest.NewRequest(http.MethodPost, "/add", strings.NewReader(string(addBody)))
+	addRequest.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(addResponse, addRequest)
+	var addResult struct {
+		Success bool `json:"success"`
+	}
+	require.NoError(t, common.Unmarshal(addResponse.Body.Bytes(), &addResult))
+	assert.False(t, addResult.Success)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", "admission-add-denied").Count(&count).Error)
+	assert.Zero(t, count)
+	router.PUT("/channel", func(c *gin.Context) { c.Set("id", 1); c.Set("role", common.RoleRootUser); c.Next() }, controller.UpdateChannel)
+	payload, err := common.Marshal(map[string]any{"id": good.Id, "model_mapping": denied, "key": "must-not-persist"})
+	require.NoError(t, err)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/channel", strings.NewReader(string(payload)))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	var result struct {
+		Success bool `json:"success"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+	assert.False(t, result.Success)
 	stored, err := model.GetChannelById(good.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, approved, stored.GetModelMapping(), "partial patch uses merged stored type/status/models")
+	assert.Equal(t, "fixture", stored.Key, "controller admission must reject before the first key write")
+	atomicCallback := "cmh_admission_fail_edit_abilities"
+	require.NoError(t, model.DB.Callback().Create().Before("gorm:create").Register(atomicCallback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "abilities" {
+			tx.AddError(errors.New("fixture edit ability failure"))
+		}
+	}))
+	payload, err = common.Marshal(map[string]any{"id": good.Id, "model_mapping": approved, "name": "must-roll-back", "key": "must-roll-back-key"})
+	require.NoError(t, err)
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPut, "/channel", strings.NewReader(string(payload)))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(response, request)
+	require.NoError(t, model.DB.Callback().Create().Remove(atomicCallback))
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+	assert.False(t, result.Success)
+	stored, err = model.GetChannelById(good.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "fixture", stored.Key, "late ability failure must roll back the controller key replacement")
+	assert.NotEqual(t, "must-roll-back", stored.Name)
+	core.Models = noop
+	repair := makeChannel(92004, &denied)
+	require.NoError(t, repair.Insert())
+	core.Models = gate
+	payload, err = common.Marshal(map[string]any{"id": repair.Id, "model_mapping": approved, "key": "repaired-key"})
+	require.NoError(t, err)
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPut, "/channel", strings.NewReader(string(payload)))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(response, request)
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+	assert.True(t, result.Success, "repairing denied mapping and rotating key is one valid admitted edit")
+	stored, err = model.GetChannelById(repair.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, approved, stored.GetModelMapping())
+	assert.Equal(t, "repaired-key", stored.Key)
+	core.Models = noop
+	multi := makeChannel(92004, &approved)
+	multi.Id = 92006
+	multi.Key = "multi-fixture-a\nmulti-fixture-b"
+	multi.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2}
+	require.NoError(t, multi.Insert())
+	core.Models = gate
+	multiPatch := model.Channel{Id: multi.Id}
+	_, _, err = multiPatch.UpdateWithAdmissionKey(func(old string) (string, error) { return old + "\nmulti-fixture-c", nil })
+	require.NoError(t, err)
+	stored, err = model.GetChannelById(multi.Id, true)
+	require.NoError(t, err)
+	assert.True(t, stored.ChannelInfo.IsMultiKey)
+	assert.Equal(t, 3, stored.ChannelInfo.MultiKeySize)
 	patch = model.Channel{Id: good.Id, Name: "admission-renamed"}
 	require.NoError(t, patch.Update())
 	stored, err = model.GetChannelById(good.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, "admission-renamed", stored.Name)
 	assert.Equal(t, approved, stored.GetModelMapping())
+	revisionsBefore, err := model.GetLatestSyncRevisions()
+	require.NoError(t, err)
+	written, err = model.UpdateChannelOtherInfo(good.Id, func(ch *model.Channel) (map[string]any, error) {
+		return map[string]any{"ModelMapping": approved + " "}, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, written)
+	revisionsAfter, err := model.GetLatestSyncRevisions()
+	require.NoError(t, err)
+	assert.Greater(t, revisionsAfter[model.SyncTopicChannels], revisionsBefore[model.SyncTopicChannels], "mapping-only commit must publish channel synchronization")
+	written, err = model.UpdateChannelOtherInfo(good.Id, func(ch *model.Channel) (map[string]any, error) { return map[string]any{"model_mapping": approved}, nil })
+	require.NoError(t, err)
+	assert.True(t, written)
+	stored, err = model.GetChannelById(good.Id, true)
+	require.NoError(t, err)
+	pendingSettings := stored.GetOtherSettings()
+	pendingSettings.UpstreamModelUpdateLastDetectedModels = []string{"not-published"}
+	stored.SetOtherSettings(pendingSettings)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", good.Id).Update("settings", stored.OtherSettings).Error)
+	router.POST("/apply", func(c *gin.Context) { c.Set("id", 1); c.Set("role", common.RoleRootUser); c.Next() }, controller.ApplyChannelUpstreamModelUpdates)
+	applyBody, err := common.Marshal(map[string]any{"id": good.Id, "add_models": []string{"not-published"}})
+	require.NoError(t, err)
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/apply", strings.NewReader(string(applyBody)))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(response, request)
+	result.Success = true
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+	assert.False(t, result.Success)
+	stored, err = model.GetChannelById(good.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "public-chat", stored.Models)
+	assert.Equal(t, []string{"not-published"}, stored.GetOtherSettings().UpstreamModelUpdateLastDetectedModels)
+	pendingSettings = stored.GetOtherSettings()
+	pendingSettings.UpstreamModelUpdateLastDetectedModels = []string{"gpt-4o-mini"}
+	stored.SetOtherSettings(pendingSettings)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", good.Id).Update("settings", stored.OtherSettings).Error)
+	newerSettings := pendingSettings
+	newerSettings.UpstreamModelUpdateIgnoredModels = []string{"operator-new-ignore"}
+	newerRaw, err := common.Marshal(newerSettings)
+	require.NoError(t, err)
+	interleaved := false
+	var interleaveErr error
+	queryCallback := "cmh_admission_interleave_ignore"
+	require.NoError(t, model.DB.Callback().Query().After("gorm:query").Register(queryCallback, func(tx *gorm.DB) {
+		if !interleaved && tx.Statement.Table == "channels" {
+			interleaved = true
+			interleaveErr = model.DB.Model(&model.Channel{}).Where("id = ?", good.Id).Update("settings", string(newerRaw)).Error
+		}
+	}))
+	applyBody, err = common.Marshal(map[string]any{"id": good.Id, "add_models": []string{"gpt-4o-mini"}})
+	require.NoError(t, err)
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/apply", strings.NewReader(string(applyBody)))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(response, request)
+	require.NoError(t, model.DB.Callback().Query().Remove(queryCallback))
+	require.NoError(t, interleaveErr)
+	require.True(t, interleaved)
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+	assert.False(t, result.Success, "stale upstream selection must retry instead of overwriting newer settings")
+	stored, err = model.GetChannelById(good.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"operator-new-ignore"}, stored.GetOtherSettings().UpstreamModelUpdateIgnoredModels)
+	assert.Equal(t, "public-chat", stored.Models)
+	applyBody, err = common.Marshal(map[string]any{"id": good.Id, "add_models": []string{"gpt-4o-mini"}})
+	require.NoError(t, err)
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/apply", strings.NewReader(string(applyBody)))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(response, request)
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+	assert.True(t, result.Success, "approved delta uses current locked identity and succeeds")
+	var addedAbility model.Ability
+	require.NoError(t, model.DB.Where("channel_id = ? AND model = ?", good.Id, "gpt-4o-mini").First(&addedAbility).Error)
+	assert.True(t, addedAbility.Enabled)
 
 	// Invalid old rows can remain disabled, but cannot be republished in a tag
 	// batch. Seed through the explicit baseline/noop path to model existing data.
@@ -238,6 +414,15 @@ func runHostAdmissionWrites(t *testing.T, gate *Gate, noop core.ModelGate) {
 	require.NoError(t, err)
 	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
 	assert.Equal(t, common.ChannelStatusEnabled, stored.Status, "remaining key stays enabled but new execution is independently denied")
+	written, err = model.UpdateChannelOtherInfo(quarantine.Id, func(ch *model.Channel) (map[string]any, error) {
+		delete(ch.ChannelInfo.MultiKeyStatusList, 0)
+		return map[string]any{"channel_info": ch.ChannelInfo}, nil
+	})
+	require.Error(t, err, "restoring a disabled key cannot receive a restrictive-write exemption")
+	assert.False(t, written)
+	stored, err = model.GetChannelById(quarantine.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
 	assert.False(t, model.UpdateChannelStatus(quarantine.Id, "fixture-a", common.ChannelStatusEnabled, "fixture re-enable"), "quarantine cannot be lifted without admission")
 	// Explicit disable/cleanup cannot be blocked by a model that is no longer authorized.
 	patch = model.Channel{Id: good.Id, Status: common.ChannelStatusManuallyDisabled, ModelMapping: &denied}
@@ -268,11 +453,14 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	oldDB, oldLogDB := model.DB, model.LOG_DB
 	oldMainType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
 	oldMaster, oldMemory := common.IsMasterNode, common.MemoryCacheEnabled
+	oldRedis := common.RedisEnabled
+	common.RedisEnabled = false
 	oldSQLite := common.SQLitePath
 	common.SQLitePath = os.Getenv("SQLITE_PATH")
 	oldGate := core.Models
 	common.IsMasterNode = true
 	require.NoError(t, model.InitDB())
+	require.NoError(t, model.InitLogDB())
 	db := model.DB
 	var version string
 	switch common.MainDatabaseType() {
@@ -290,6 +478,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 		model.DB, model.LOG_DB = oldDB, oldLogDB
 		common.SetDatabaseTypes(oldMainType, oldLogType)
 		common.IsMasterNode, common.MemoryCacheEnabled = oldMaster, oldMemory
+		common.RedisEnabled = oldRedis
 		common.SQLitePath = oldSQLite
 	})
 
