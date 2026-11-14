@@ -450,14 +450,44 @@ type WebSocketPreparer interface {
 // request context, and reports a rejected handshake as a *types.NewAPIError
 // carrying the upstream status code (types.NewError preserves it).
 func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*websocket.Conn, error) {
+	conn, _, err := DoWssRequestWithAdmission(a, c, info, requestBody)
+	return conn, err
+}
+
+// ConnectedTargetAdmission can only be issued by a successful actual handshake.
+// It retains hashes, never a signed URL or credential headers.
+type ConnectedTargetAdmission struct {
+	admission core.DestinationAdmission
+	conn      *websocket.Conn
+	valid     bool
+}
+
+func (p *ConnectedTargetAdmission) Check(c *gin.Context, info *common.RelayInfo, conn *websocket.Conn) error {
+	if !core.DestinationAdmissionEnabled() {
+		return nil
+	}
+	rejected := types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	if p == nil || !p.valid || conn == nil || p.conn != conn || c == nil || c.Request == nil || info == nil || info.ChannelMeta == nil {
+		return rejected
+	}
+	if p.admission.Channel.ID != info.ChannelId || p.admission.Channel.Type != info.ChannelType || p.admission.Model.Public != info.OriginModelName || p.admission.Model.Upstream != info.UpstreamModelName || info.ChannelId != common2.GetContextKeyInt(c, appconstant.ContextKeyChannelId) || info.ChannelType != common2.GetContextKeyInt(c, appconstant.ContextKeyChannelType) || info.OriginModelName != common2.GetContextKeyString(c, appconstant.ContextKeyOriginalModel) {
+		return rejected
+	}
+	if core.Destinations.CheckDestination(c.Request.Context(), p.admission) != nil {
+		return rejected
+	}
+	return nil
+}
+
+func DoWssRequestWithAdmission(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*websocket.Conn, *ConnectedTargetAdmission, error) {
 	if preparer, ok := a.(WebSocketPreparer); ok {
 		if err := preparer.PrepareWebSocket(c, info); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
-		return nil, fmt.Errorf("get request url failed: %w", err)
+		return nil, nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	fullRequestURL = toWebSocketURL(fullRequestURL)
 	if targetURL, parseErr := url.Parse(fullRequestURL); parseErr == nil {
@@ -466,13 +496,13 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	targetHeader := http.Header{}
 	err = a.SetupRequestHeader(c, &targetHeader, info)
 	if err != nil {
-		return nil, fmt.Errorf("setup request header failed: %w", err)
+		return nil, nil, fmt.Errorf("setup request header failed: %w", err)
 	}
 	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
 	// 这样可以覆盖默认的 Authorization header 设置
 	headerOverride, err := processHeaderOverride(info, c)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for key, value := range headerOverride {
 		targetHeader.Set(key, value)
@@ -481,10 +511,10 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if _, signs := a.(RequestSigner); signs {
 		targetURL, parseErr := url.Parse(fullRequestURL)
 		if parseErr != nil {
-			return nil, fmt.Errorf("get request url failed: %w", parseErr)
+			return nil, nil, fmt.Errorf("get request url failed: %w", parseErr)
 		}
 		if err = signUpstreamRequest(a, c, info, http.MethodGet, targetURL, targetHeader); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		fullRequestURL = targetURL.String()
 	}
@@ -492,7 +522,7 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if info.ChannelSetting.Proxy != "" {
 		proxyURL, _, proxyErr := common2.ParseProxyURLRuntime(info.ChannelSetting.Proxy)
 		if proxyErr != nil {
-			return nil, proxyErr
+			return nil, nil, proxyErr
 		}
 		dialer.Proxy = http.ProxyURL(proxyURL)
 	}
@@ -500,7 +530,12 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		dialer.TLSClientConfig = common2.InsecureTLSConfig
 	}
 	if err = CheckDestination(c, info, http.MethodGet, fullRequestURL, targetHeader.Get("Host"), "relay_websocket"); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	address, captureErr := core.DestinationAddress(fullRequestURL)
+	var frozen core.DestinationAdmission
+	if captureErr == nil && info != nil && info.ChannelMeta != nil {
+		frozen = core.DestinationAdmission{Kind: "relay_websocket", Method: http.MethodGet, AddressSHA256: address, HostSHA256: core.DestinationHost(targetHeader.Get("Host")), Model: core.ModelIdentity{Public: info.OriginModelName, Upstream: info.UpstreamModelName}, Channel: core.ChannelIdentity{Known: true, ID: info.ChannelId, Type: info.ChannelType}}
 	}
 	targetConn, resp, err := dialer.DialContext(c.Request.Context(), fullRequestURL, targetHeader)
 	if err != nil {
@@ -511,9 +546,10 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 				_ = resp.Body.Close()
 			}
 		}
-		return nil, types.NewErrorWithStatusCode(fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err), types.ErrorCodeDoRequestFailed, statusCode)
+		return nil, nil, types.NewErrorWithStatusCode(fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err), types.ErrorCodeDoRequestFailed, statusCode)
 	}
-	return targetConn, nil
+	proof := &ConnectedTargetAdmission{conn: targetConn, admission: frozen, valid: captureErr == nil && frozen.Channel.ID > 0 && frozen.Channel.Type > 0 && frozen.Model.Public != "" && frozen.Model.Upstream != ""}
+	return targetConn, proof, nil
 }
 
 // toWebSocketURL maps an http(s) endpoint to ws(s). Realtime adaptors already

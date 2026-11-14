@@ -127,6 +127,7 @@ type responsesWSSession struct {
 	lockedContext   map[appconstant.ContextKey]any
 	lockedRoute     dto.AdvancedCustomRoute
 	lockedRawOther  string
+	targetAdmission *relaychannel.ConnectedTargetAdmission
 }
 
 func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner ResponsesWSRequestRunner) *types.NewAPIError {
@@ -353,6 +354,9 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		if apiErr = CheckRequestAdmission(c, info); apiErr != nil {
 			return apiErr
 		}
+		if err := s.targetAdmission.Check(c, info, s.getTarget()); err != nil {
+			return types.NewError(err, types.ErrorCodeAccessDenied)
+		}
 		if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
 			state.closeCode = websocket.CloseInternalServerErr
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
@@ -406,7 +410,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			adaptor := GetAdaptor(info.ApiType)
 			adaptor.Init(info)
-			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
+			target, targetAdmission, dialErr := relaychannel.DoWssRequestWithAdmission(adaptor, c, info, nil)
 			if dialErr != nil {
 				apiErr = service.NormalizeViolationFeeError(types.NewError(dialErr, types.ErrorCodeDoRequestFailed))
 				service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
@@ -423,7 +427,13 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				_ = target.Close()
 				return apiErr
 			}
+			if err := targetAdmission.Check(c, info, target); err != nil {
+				_ = target.Close()
+				return types.NewError(err, types.ErrorCodeAccessDenied)
+			}
+			s.targetAdmission = targetAdmission
 			if !s.setTarget(target) {
+				s.targetAdmission = nil
 				return types.NewError(context.Canceled, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
 			if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
