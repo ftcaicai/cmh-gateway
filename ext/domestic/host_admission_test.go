@@ -24,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/ext/continuation"
 	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/ext/migrations"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -1619,6 +1620,205 @@ func TestHostAdmissionCandidateAndCatalog(t *testing.T) {
 	}
 }
 
+// Embedding delegates the other ModelGate methods without duplicating policy.
+type hostPreselectionWitnessGate struct {
+	core.ModelGate
+	channelID  int
+	candidates []core.Admission
+}
+
+func (gate *hostPreselectionWitnessGate) Check(ctx context.Context, admission core.Admission) error {
+	if admission.Phase == core.AdmissionCandidate && admission.Channel.ID == gate.channelID {
+		gate.candidates = append(gate.candidates, admission)
+	}
+	return gate.ModelGate.Check(ctx, admission)
+}
+
+type hostPreselectionHookProbe struct {
+	core.PluginHookGate
+	calls []core.PluginHookIdentity
+}
+
+func (probe *hostPreselectionHookProbe) CheckHook(ctx context.Context, identity core.PluginHookIdentity) error {
+	probe.calls = append(probe.calls, identity)
+	return probe.PluginHookGate.CheckHook(ctx, identity)
+}
+
+func runHostSharedEndpointPreselection(t *testing.T, noop core.ModelGate) {
+	t.Helper()
+	require.NoError(t, i18n.Init())
+	oldGate, oldRegistry, oldHooks := core.Models, jsplugin.DefaultRegistry, core.PluginHooks
+	oldMemory := common.MemoryCacheEnabled
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	common.MemoryCacheEnabled = false
+	defer func() {
+		core.Models, jsplugin.DefaultRegistry, core.PluginHooks = oldGate, oldRegistry, oldHooks
+		common.MemoryCacheEnabled = oldMemory
+	}()
+
+	var networkCalls atomic.Int32
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		networkCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer stub.Close()
+
+	const path = "/v1/images/generations"
+	const sourceA = `export const meta={apiVersion:1,key:"cmh-preselection",name:"Preselection fixture",version:"1.0.0",author:{name:"Test"},models:["preselect-model"],fetchMode:"per_task",protocols:["openai_image"]};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"};}
+export function parseSubmitResponse(){return {taskId:"local"};}
+export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}
+export function listArtifacts(){return [];}
+export function buildContentRequest(){throw new Error("artifact_not_found");}
+export const protocols={openai_image:{decodeRequest:function(ctx){return {kind:"submit",model:ctx.model,requestBody:{decodeMarker:"A"}};},render:function(){return {data:[]};}}};`
+	pluginA, err := registry.RegisterFactory(sourceA, jsplugin.Options{})
+	require.NoError(t, err)
+	generationA := registry.Generation()
+	pluginB, err := jsplugin.CompilePlugin(strings.Replace(sourceA, `decodeMarker:"A"`, `decodeMarker:"B"`, 1), jsplugin.Options{})
+	require.NoError(t, err)
+	require.NotEqual(t, pluginA.SourceSHA256(), pluginB.SourceSHA256())
+
+	setting, base := `{"task_plugin_key":"cmh-preselection"}`, stub.URL
+	channel := model.Channel{Id: 95010, Name: "preselection", Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Models: "preselect-model", Group: "default", Key: "fixture", BaseURL: &base, Setting: &setting}
+	core.Models = noop
+	require.NoError(t, model.DB.Create(&channel).Error)
+	require.NoError(t, channel.AddAbilities(model.DB))
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id = ?", channel.Id).Delete(&model.Channel{}).Error)
+		model.InitChannelCache()
+	}()
+
+	public, err := New([]string{"preselect-model"}, []string{"61"})
+	require.NoError(t, err)
+	upstream, err := New([]string{"preselect-model"}, nil)
+	require.NoError(t, err)
+	identityA, err := model.PluginExecutorIdentity(&channel, pluginA, generationA.Number, "task", path)
+	require.NoError(t, err)
+	gateA, err := NewGate(public, upstream, []core.ExecutorIdentity{identityA})
+	require.NoError(t, err)
+	// The artifact is unpublished here. Only its exact source/config is used to
+	// construct the negative policy; generation numbers are not approval.
+	identityB, err := model.PluginExecutorIdentity(&channel, pluginB, generationA.Number, "task", path)
+	require.NoError(t, err)
+	gateB, err := NewGate(public, upstream, []core.ExecutorIdentity{identityB})
+	require.NoError(t, err)
+
+	for _, test := range []struct {
+		name        string
+		policy      *Gate
+		wantHandler bool
+	}{
+		{name: "approved_A_survives_registry_B", policy: gateA, wantHandler: true},
+		{name: "B_approval_cannot_authorize_pinned_A", policy: gateB},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Restore the factory A before each request. Each route then captures
+			// its current A generation; B is published during the abilities query.
+			require.NoError(t, registry.ReplaceOverrides(nil))
+			requestGenerationA := registry.Generation()
+			witness := &hostPreselectionWitnessGate{ModelGate: test.policy, channelID: channel.Id}
+			hooks := &hostPreselectionHookProbe{PluginHookGate: oldHooks}
+			core.Models, core.PluginHooks = witness, hooks
+			probe := &admissionBillingProbe{}
+			changed := false
+			const callbackName = "cmh:test_preselection_swap"
+			require.NoError(t, model.DB.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+				if changed || tx.Statement.Table != "abilities" {
+					return
+				}
+				changed = true
+				// No DB call, goroutine or sleep occurs inside this callback.
+				require.NoError(t, registry.ReplaceOverrides([]*jsplugin.LoadedPlugin{pluginB}))
+			}))
+			defer func() { require.NoError(t, model.DB.Callback().Query().Remove(callbackName)) }()
+
+			reached := false
+			router := gin.New()
+			router.POST(path, func(c *gin.Context) {
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+				common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+				common.SetContextKey(c, constant.ContextKeyUserId, 7)
+			}, middleware.RouteTaskPluginEndpoint(), middleware.PrepareTaskPluginEndpoint(), middleware.Distribute(), func(c *gin.Context) {
+				reached = true
+				if !test.wantHandler {
+					// This is a tripwire, not real funding: the rejected case must
+					// never reach the place where a relay would start reserving.
+					require.NoError(t, probe.Reserve(1))
+					return
+				}
+				value, exists := c.Get(jsplugin.ContextKeyPinnedPlugin)
+				require.True(t, exists)
+				pinned, ok := value.(jsplugin.PinnedPlugin)
+				require.True(t, ok)
+				assert.Same(t, pluginA, pinned.Plugin)
+				assert.Same(t, requestGenerationA, pinned.Generation)
+				assert.Equal(t, map[string]any{"decodeMarker": "A"}, c.MustGet("task_request"))
+				for _, filter := range service.GetChannelConstraints(c).Filters {
+					assert.NotNil(t, filter.PluginView)
+				}
+				assert.Equal(t, channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+				c.Status(http.StatusNoContent)
+			})
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"preselect-model","prompt":"fixture"}`))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+
+			require.True(t, changed, "the real abilities DB query must hit the replacement seam")
+			require.NotEmpty(t, witness.candidates)
+			assert.Equal(t, pluginA.SourceSHA256(), witness.candidates[0].Executor.SourceSHA256, "the FIRST preselection witness must be A; fallback final success alone is insufficient")
+			for _, candidate := range witness.candidates {
+				assert.Equal(t, pluginA.SourceSHA256(), candidate.Executor.SourceSHA256)
+			}
+			for _, hook := range hooks.calls {
+				assert.NotEqual(t, pluginB.SourceSHA256(), hook.SourceSHA256, "B's decoder must never run in this A-pinned request")
+			}
+			assert.Equal(t, test.wantHandler, reached)
+			if test.wantHandler {
+				assert.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+			} else {
+				assert.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+			}
+			assert.Zero(t, probe.reserve)
+			assert.Zero(t, probe.settle)
+			assert.Zero(t, probe.refund)
+			assert.Zero(t, networkCalls.Load())
+		})
+	}
+
+	// Direct Pin has no taskPluginEndpointSelection. Captured context A must
+	// take precedence over current B, but selected.Generation remains highest
+	// precedence in the production implementation.
+	require.NoError(t, registry.ReplaceOverrides([]*jsplugin.LoadedPlugin{pluginB}))
+	core.Models, core.PluginHooks = gateA, oldHooks
+	directReached := false
+	direct := gin.New()
+	direct.POST(path, func(c *gin.Context) {
+		c.Set("cmh_candidate_generation", generationA)
+	}, middleware.PinTaskPluginEndpoint(), middleware.PrepareTaskPluginEndpoint(), func(c *gin.Context) {
+		directReached = true
+		value, exists := c.Get(jsplugin.ContextKeyPinnedPlugin)
+		require.True(t, exists)
+		pinned, ok := value.(jsplugin.PinnedPlugin)
+		require.True(t, ok)
+		assert.Same(t, pluginA, pinned.Plugin)
+		assert.Same(t, generationA, pinned.Generation)
+		assert.Equal(t, map[string]any{"decodeMarker": "A"}, c.MustGet("task_request"))
+		c.Status(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"preselect-model","prompt":"fixture"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	direct.ServeHTTP(recorder, request)
+	assert.True(t, directReached)
+	assert.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	assert.Zero(t, networkCalls.Load())
+}
+
 func runHostPluginPublication(t *testing.T, noop core.ModelGate) {
 	t.Helper()
 	oldGate, oldRegistry := core.Models, jsplugin.DefaultRegistry
@@ -1815,6 +2015,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeAnthropic))
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
 	runHostPluginPublication(t, oldGate)
+	runHostSharedEndpointPreselection(t, oldGate)
 	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
 	runHostBoundProviderAdmission(t, gate, oldGate)
 	runHostProviderChainAdmission(t, gate, oldGate)

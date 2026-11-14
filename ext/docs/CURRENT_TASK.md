@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `a758574ae`：main/develop一致，差异门禁两次success（43496724567 / 43496716171）。当前核实sharedendpoint提前预选需要第49官方文件例外，**待负责人决定，未改规则或该官方文件**；申请见 `rfc/2026-11-14-shared-endpoint-file-exception.md`。所有Gate仍noop，TaskContinuations默认nil。
+- 最近已推规则merge `3348e9be8`：main/develop一致。负责人已明确批准唯一middleware/task_plugin.go第49文件例外≤40行，独立rules PR #2在全initial CI绿后合入；本轮14行实现与firstcandidate三库测试待最终提交。所有Gate仍noop，TaskContinuations默认nil。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -17,13 +17,13 @@
 
 R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，负责人明确选择“批准累计48文件/6000行收口预算（推荐）”，v0.9与CI已经独立rules PR #1落实；只限H1剩余执行链、目的地、后台延续和兼容缺口，逐文件登记/80%复核不变。直接继续，不再重复问同一预算；不含费用/生产/资金重构，额度不等于完成保证。
 
-资金同事务方案仍单独设计复核；H1审批不等于H3/H7审批或三库测试通过。
+负责人于2026-11-14另明确批准唯一middleware/task_plugin.go第49文件例外，限RouteTaskPluginEndpoint/必要Pin capturedgeneration且该文件≤40增删行；累计6000不变。v0.10与门禁已rules PR #2落实；不再重复问同一许可，不授权任意第49文件或第50文件/全局启用。资金同事务方案仍单独设计复核；H1审批不等于H3/H7审批或三库测试通过。
 
 ## 下一动作
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. 本轮extension LoadOperatorPolicies(map)：FILE与env/buildSHA明确partialfailclosed，两anchor冲突拒不得override；预Stat+OpenhandleStat regular/size与LimitRead<=1MiB，rawfileSHA匹配才Parse严格manifest，无processenv/defaultpath/lastgood/installer。真实临时文件env/build正控、newline tamper、missing/dir/hash/oversize拒globalunchanged；review发现FIFO Open先阻塞风险，主代理补preStat但不声称raceproof/UnixFIFO实测；exttests/vet/build过，证据 `acceptance/p2/H1-C-operator-loader.md`。官方本轮0改动/allGateStore未装。
+3. H1-C本轮sharedendpoint14行：规则PR #2先全CI绿合入3348后，Route局部generation写ctx+preselectionfilter.PluginView，Pin沿selected/captured/current；不改decoder/财务。真实publicRoute→Prepare→Distribute firstCandidateSHA A/B查询替换、GateBonly不能授权A exact503及directPin Acontext均三库通过package4.466s，ext全套/vet/model/relay/middleware相关/fullbuild过；初次负控缺i18n初始化panic仅补fixture后未放宽断言重跑。独立review无本范围阻断。证据 `acceptance/p2/H1-C-shared-endpoint-preselection.md`。全Gate/Store仍未装。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
@@ -33,7 +33,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前48官方文件/4063行，H1硬限48/6000，剩0新文件/1937行；文件硬限已到，不能新增第49官方文件或删测试规避；既有文件仍须范围登记/80%复核。分支保护未认证。
+- 门禁目前49官方文件/4077行，只有命名middleware/task_plugin.go第49例外（该file14/40行）才生效49上限，累计6000不变；剩0新文件/1923行，不含任意第50文件。既有范围登记/80%复核和独立review保留。分支保护未认证。
 
 ## 临时资源与作业
 
@@ -41,7 +41,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续task-scoped旧grant/其余兼容：explicitmanifest+anchoredloader已验但未在Register启用；pinnedview sharedendpoint提前预选仍未登记middleware/task_plugin.go，若不能在已登记范围复用，需49文件新决策，不擅自超48硬限。task旧source/config/targets grant、credentialrefresh、affinity/type60/legacy、keycustody备份GCM预算/fullactivation未完。金融同事务独立RFC未批准，缺档skip本次原timeout仍退款。优先真实收口已登记范围，不用纯配置parser当最终live验收。
+- 接续task-scoped旧grant/其余兼容：sharedendpoint已在命名49例外内实接/三库验，仍不代表所有协议已收口；explicitmanifest+anchoredloader未在Register启用。task旧source/config/targets grant、credentialrefresh、affinity/type60/legacy、keycustody备份GCM预算/fullactivation未完。资金同事务RFC独立未批准，缺档skip本次原timeout仍退款；不把本地tripwire冒充真实金融守恒。新增第50file或命名file>40line必须另决策，优先现有登记范围。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 

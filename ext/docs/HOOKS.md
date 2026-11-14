@@ -59,6 +59,7 @@
 | H1-C | Archived内容读取恢复 | 值投影/准入 | `controller/task.go` | projectTaskArtifacts / initTaskArtifactAdaptor / taskHasPluginExecution / TaskArtifactContent | 2026-11-14 | ref任务按content用途加载旧源与当前account key，不fallback currentRegistry；缺档固定503 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Task报告原源配置冻结 | 值投影/准入 | `relay/requestplugin/task_report.go` | TaskReport / freezeTaskReports / frozenTaskReportTargets / ReportTask | 2026-11-14 | 可选archive冻结实际source+originalInstance，private safe refs，整批恢复后queue；Frozen缺档/失败不回退当前settings | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Pinned候选typedview | 值DTO接口 | `dto/channel_constraints.go` | ChannelCandidateSnapshot / PluginCandidateView / ChannelFilter.PluginView | 2026-11-14 | key-free host snapshot+coreAdmission接口，真实generation保留于model私有wrapper，不引dto/jsplugin循环或name-number反查 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
+| H1-C | Shared endpoint提前预选同源 | 值投影/准入 | `middleware/task_plugin.go` | RouteTaskPluginEndpoint / PinTaskPluginEndpoint | 2026-11-14 | 预选filter携实际generation typedview，Pin沿selected/captured/current优先序；仅≤40行命名第49文件例外，不改decoder/排序/计费 | `rfc/2026-11-14-shared-endpoint-file-exception.md` | ftcaicai |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
@@ -121,4 +122,5 @@ service/task_polling.go
 controller/task.go
 relay/requestplugin/task_report.go
 dto/channel_constraints.go
+middleware/task_plugin.go
 ```

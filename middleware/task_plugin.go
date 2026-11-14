@@ -521,6 +521,7 @@ func RouteTaskPluginEndpoint() gin.HandlerFunc {
 	pinEndpoint := PinTaskPluginEndpoint()
 	return func(c *gin.Context) {
 		generation := pluginruntime.DefaultRegistry.Generation()
+		c.Set("cmh_candidate_generation", generation)
 		request, err := getModelFromRequest(c)
 		if err != nil || generation == nil {
 			pinEndpoint(c)
@@ -533,7 +534,7 @@ func RouteTaskPluginEndpoint() gin.HandlerFunc {
 			return
 		}
 
-		filter := dto.ChannelFilter{Kind: dto.FilterTaskPluginEndpoint, RequestPath: c.Request.URL.Path}
+		filter := dto.ChannelFilter{Kind: dto.FilterTaskPluginEndpoint, RequestPath: c.Request.URL.Path, PluginView: model.NewPluginCandidateView(generation)}
 		for _, candidate := range endpoint.Candidates {
 			filter.TaskPluginKeys = append(filter.TaskPluginKeys, candidate.Plugin.Meta.Key)
 			filter.TaskPluginChannelTypes = append(filter.TaskPluginChannelTypes, candidate.Plugin.Meta.ChannelTypes...)
@@ -595,12 +596,21 @@ func lookupTaskPluginEndpoint(generation *pluginruntime.RoutingGeneration, metho
 // through so the existing endpoint remains responsible for its validation.
 func PinTaskPluginEndpoint() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		generation := pluginruntime.DefaultRegistry.Generation()
+		var generation *pluginruntime.RoutingGeneration
 		if value, exists := c.Get(contextKeyTaskPluginEndpointSelection); exists {
 			if selected, ok := value.(taskPluginEndpointSelection); ok {
 				generation = selected.Generation
 			}
 		}
+		if generation == nil {
+			if value, exists := c.Get("cmh_candidate_generation"); exists {
+				generation, _ = value.(*pluginruntime.RoutingGeneration)
+			}
+		}
+		if generation == nil {
+			generation = pluginruntime.DefaultRegistry.Generation()
+		}
+		c.Set("cmh_candidate_generation", generation)
 		if generation == nil {
 			c.Next()
 			return
