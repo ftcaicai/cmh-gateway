@@ -1931,7 +1931,7 @@ func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, no
 		}
 		_ = relay.ResponsesWebSocketHelper(c, client, runner)
 	}))
-	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http"), nil)
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", nil)
 	require.NoError(t, err)
 	defer func() {
 		_ = client.Close()
@@ -2025,6 +2025,168 @@ func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, no
 	core.Models = noop
 	require.Nil(t, openai.CheckRealtimeAdmission(nil, nil, nil))
 	core.Models = gate
+	runHostProviderAdmissionSocket(t, noop)
+}
+
+func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
+	t.Helper()
+	previousRegistry, previousGate := jsplugin.DefaultRegistry, core.Models
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
+	plugin, err := registry.RegisterFactory(`export const meta={apiVersion:1,key:"cmh-ws-context",name:"WS context",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/responses",upstream_path:"/v1/responses",converter:"none"}],channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"standard"}}}};`, jsplugin.Options{})
+	require.NoError(t, err)
+	var dials, creates atomic.Int32
+	var blockHandshake atomic.Bool
+	handshakeEntered, releaseHandshake, targetClosed := make(chan struct{}, 1), make(chan struct{}), make(chan struct{}, 1)
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseHandshake) })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		blocked := blockHandshake.Load()
+		if blocked {
+			handshakeEntered <- struct{}{}
+			select {
+			case <-releaseHandshake:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		dials.Add(1)
+		defer ws.Close()
+		if blocked {
+			defer func() { targetClosed <- struct{}{} }()
+		}
+		for {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return
+			}
+			index := creates.Add(1)
+			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_provider_%d","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, index)
+			if ws.WriteMessage(websocket.TextMessage, []byte(terminal)) != nil {
+				return
+			}
+		}
+	}))
+	defer func() {
+		releaseOnce.Do(func() { close(releaseHandshake) })
+		upstream.Close()
+	}()
+	base, setting := upstream.URL, `{"task_plugin_key":"cmh-ws-context","responses_websocket_enabled":true}`
+	channel := model.Channel{Id: 95014, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Key: "fixture", Models: "public-chat", Group: "default", BaseURL: &base, Setting: &setting, Other: "frozen-other", OtherSettings: `{"plugin_config":{"tier":"standard"}}`}
+	core.Models = noop
+	require.NoError(t, model.DB.Create(&channel).Error)
+	require.NoError(t, channel.AddAbilities(model.DB))
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id = ?", channel.Id).Delete(&model.Channel{}).Error)
+		model.InitChannelCache()
+	}()
+	identity, err := model.PluginExecutorIdentity(&channel, plugin, registry.Generation().Number, "provider", "/v1/responses")
+	require.NoError(t, err)
+	public, err := New([]string{"public-chat"}, []string{"61"})
+	require.NoError(t, err)
+	upstreamModels, err := New([]string{"public-chat"}, nil)
+	require.NoError(t, err)
+	gate, err := NewGate(public, upstreamModels, []core.ExecutorIdentity{identity})
+	require.NoError(t, err)
+	core.Models = gate
+	model.InitChannelCache()
+	done := make(chan struct{}, 2)
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		client, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer client.Close()
+		defer func() { done <- struct{}{} }()
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = r
+		runner := func(request *http.Request, requestID string, handle func(*gin.Context) *kittypes.NewAPIError) *kittypes.NewAPIError {
+			turn, _ := gin.CreateTestContext(httptest.NewRecorder())
+			turn.Request = request
+			common.SetContextKey(turn, constant.ContextKeyUsingGroup, "default")
+			common.SetContextKey(turn, constant.ContextKeyUserGroup, "default")
+			common.SetContextKey(turn, constant.ContextKeyTokenGroup, "default")
+			common.SetContextKey(turn, constant.ContextKeyUserId, 1)
+			common.SetContextKey(turn, common.RequestIdKey, requestID)
+			service.GetChannelConstraints(turn).AddPin(hostdto.ChannelPin{ChannelId: channel.Id, Source: hostdto.PinSourceToken, Rank: hostdto.PinRankToken, RetryMode: hostdto.PinRetrySingleAttempt})
+			service.GetChannelConstraints(turn).AddFilter(hostdto.ChannelFilter{Kind: hostdto.FilterTaskPluginIdentity, RequestPath: "/v1/responses", PluginView: model.NewPluginCandidateView(registry.Generation())})
+			return handle(turn)
+		}
+		_ = relay.ResponsesWebSocketHelper(c, client, runner)
+	}))
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", nil)
+	require.NoError(t, err)
+	defer func() {
+		releaseOnce.Do(func() { close(releaseHandshake) })
+		_ = client.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("provider WebSocket session did not stop")
+		}
+		gateway.Close()
+	}()
+	create := func() map[string]any {
+		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"public-chat","input":"local provider fixture"}`)))
+		require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, wire, err := client.ReadMessage()
+		require.NoError(t, err)
+		var event map[string]any
+		require.NoError(t, common.Unmarshal(wire, &event))
+		return event
+	}
+	for range 2 {
+		event := create()
+		require.Equal(t, "response.completed", event["type"], "provider create: %v", event)
+	}
+	assert.Equal(t, int32(1), dials.Load(), "the second create reuses the approved handshake")
+	assert.Equal(t, int32(2), creates.Load())
+	for _, patch := range []map[string]any{{"other": "changed-other"}, {"settings": `{"plugin_config":{"tier":"changed"}}`}} {
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(patch).Error)
+		event := create()
+		assert.Equal(t, "error", event["type"], "fresh DB drift must not replace the frozen connection identity: %v", event)
+		assert.Equal(t, int32(2), creates.Load())
+		assert.Equal(t, int32(1), dials.Load())
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{"other": channel.Other, "settings": channel.OtherSettings}).Error)
+	}
+	// A real upstream handshake waits before its 101, after selection and
+	// pre-consume. Revoking here must close the returned target before create.
+	require.NoError(t, client.Close())
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first provider session did not stop")
+	}
+	blockHandshake.Store(true)
+	client, _, err = websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", nil)
+	require.NoError(t, err)
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"public-chat","input":"handshake barrier"}`)))
+	select {
+	case <-handshakeEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream handshake barrier was not reached")
+	}
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	releaseOnce.Do(func() { close(releaseHandshake) })
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, wire, err := client.ReadMessage()
+	require.NoError(t, err)
+	var event map[string]any
+	require.NoError(t, common.Unmarshal(wire, &event))
+	assert.Equal(t, "error", event["type"])
+	assert.Equal(t, int32(2), dials.Load(), "one additional handshake completed")
+	assert.Equal(t, int32(2), creates.Load(), "revoked handshake must send no additional create")
+	select {
+	case <-targetClosed:
+	case <-time.After(5 * time.Second):
+		t.Error("rejected target was not closed")
+	}
 }
 
 func runHostAdmissionWrites(t *testing.T, gate *Gate, noop core.ModelGate) {

@@ -126,6 +126,7 @@ type responsesWSSession struct {
 	lockedKeyIndex  int
 	lockedContext   map[appconstant.ContextKey]any
 	lockedRoute     dto.AdvancedCustomRoute
+	lockedRawOther  string
 }
 
 func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner ResponsesWSRequestRunner) *types.NewAPIError {
@@ -349,6 +350,9 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			recordResponsesWSPluginError(c, info, apiErr)
 			return apiErr
 		}
+		if apiErr = CheckRequestAdmission(c, info); apiErr != nil {
+			return apiErr
+		}
 		if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
 			state.closeCode = websocket.CloseInternalServerErr
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
@@ -415,6 +419,10 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				}
 				return apiErr
 			}
+			if apiErr = CheckRequestAdmission(c, info); apiErr != nil {
+				_ = target.Close()
+				return apiErr
+			}
 			if !s.setTarget(target) {
 				return types.NewError(context.Canceled, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
@@ -424,6 +432,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			s.lockedModel, s.lockedChannelID, s.lockedGroup = modelName, channel.Id, info.UsingGroup
 			s.lockedKey, s.lockedKeyIndex = info.ApiKey, info.ChannelMultiKeyIndex
+			s.lockedRawOther = c.GetString("cmh_plugin_channel_other")
 			s.lockedRoute, _ = connectionOtherSettings(c, channel).AdvancedCustom.MatchPathForModel(c.Request.URL.Path, modelName)
 			s.lockedContext = make(map[appconstant.ContextKey]any)
 			for _, key := range []appconstant.ContextKey{
@@ -790,6 +799,7 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	for key, value := range s.lockedContext {
 		c.Set(string(key), value)
 	}
+	c.Set("cmh_plugin_channel_other", s.lockedRawOther)
 	common.SetContextKey(c, appconstant.ContextKeyChannelSetting, setting)
 	common.SetContextKey(c, appconstant.ContextKeyChannelOtherSetting, otherSettings)
 	common.SetContextKey(c, appconstant.ContextKeyChannelParamOverride, channel.GetParamOverride())
