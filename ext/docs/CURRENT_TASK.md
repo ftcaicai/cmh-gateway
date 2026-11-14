@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `44b2c7381e143883dc93185cda7f14dca9b6bed5`，main/develop一致，门禁43579831327/43579824412 success。负责人在合成分阶段实施申请中明确选择“继续设计，不批准实施”：不扩官方区、不创建实施rules PR、不试做资金代码；不重复申请同一授权。有限资金方向及经济/恢复/memory-only设计批准保留。只读候选18必需＋6条件＝3既有＋15新增必需，组合64；全条件最多69官方路径，测试拟集中扩展区，这不是获批范围或行数预测。生产模型可靠计费上界尚未证明、资格为空；后续仅收敛接口/状态转换/故障验证规格，见 `acceptance/p1/funding-engineering-proof-gaps.md`。rc51同步、policy-only合成Serving与目录对照已验；整体P1/P2未完成。
+- 最近已推 `63dc7d4e5280bf6682fffc9566e860c23dd713b6`，main/develop一致，门禁43584246865/43584238804 success。H4/H6负责人明确选择“均保持设计，不批准实施”；不创建对应规则PR、不扩大预算、不试做接线、不重复申请同一授权。资金负责人亦明确选择“继续设计，不批准实施”：不扩官方区、不创建实施rules PR、不试做资金代码；不重复申请同一授权。有限资金方向及经济/恢复/memory-only设计批准保留。只读候选18必需＋6条件＝3既有＋15新增必需，组合64；全条件最多69官方路径，测试拟集中扩展区，这不是获批范围或行数预测。生产模型可靠计费上界尚未证明、资格为空；后续仅收敛接口/状态转换/故障验证规格，见 `acceptance/p1/funding-engineering-proof-gaps.md`。rc51同步、policy-only合成Serving与目录对照已验；整体P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -31,7 +31,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 ## 命令与环境
 
 - Go1.26.10已缓存，调用使用临时 `GOSUMDB=sum.golang.google.cn GOPROXY=https://goproxy.cn,direct`。
-- `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
+- 第54轮 `go test -p 2 ./ext/... -count=1` 与 `go vet -p 2 ./ext/...` exit0（domestic8.338s）；仅既有实现回归，不是资金/H4/H6验收。第55轮再次查询上游latest仍为v1.0.0-rc.51（2026-11-13发布）；未伪造新升级演练。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
 - 门禁目前49官方文件/4404行，只有命名middleware/task_plugin.go第49例外（该file14/40行）才生效49上限，累计6000不变；剩0新文件/1596行，不含任意第50文件。既有范围登记/80%复核和独立review保留。分支保护未认证。
