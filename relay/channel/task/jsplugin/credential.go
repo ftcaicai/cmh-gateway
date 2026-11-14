@@ -104,6 +104,9 @@ func (a *TaskAdaptor) taskCredentialLine(ctx context.Context, key string, task *
 	for index, line := range lines {
 		credential, ok := pluginruntime.ParseCredential(line)
 		if ok && credential.Plugin == a.plugin.Meta.Key && (account == "" || credential.AccountID == account) {
+			if a.continuation != nil {
+				return service.FreshPluginCredentialLineForContinuation(ctx, a.plugin, a.info.ChannelId, index, line, a.continuation.BaseURL, a.continuation.Setting.Proxy, a.continuation.Config)
+			}
 			return service.FreshPluginCredentialLine(ctx, a.plugin, a.info.ChannelId, index, line)
 		}
 	}

@@ -1819,6 +1819,220 @@ export const protocols={openai_image:{decodeRequest:function(ctx){return {kind:"
 	assert.Zero(t, networkCalls.Load())
 }
 
+func runHostContinuationCredentialRefresh(t *testing.T, noop core.ModelGate) {
+	t.Helper()
+	oldGate, oldRegistry, oldHooks := core.Models, jsplugin.DefaultRegistry, core.PluginHooks
+	oldMemory := common.MemoryCacheEnabled
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry, core.Models, common.MemoryCacheEnabled = registry, noop, false
+	defer func() {
+		core.Models, jsplugin.DefaultRegistry, core.PluginHooks = oldGate, oldRegistry, oldHooks
+		common.MemoryCacheEnabled = oldMemory
+	}()
+	var networkCalls atomic.Int32
+	var driftDuringHook atomic.Bool
+	var failRefresh atomic.Bool
+	updates := make(chan error, 1)
+	const channelID = 95011
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		networkCalls.Add(1)
+		if driftDuringHook.Load() {
+			updates <- model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("settings", `{"plugin_config":{"tier":"B"}}`).Error
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if failRefresh.Load() {
+			_, _ = w.Write([]byte(`{"fail":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer stub.Close()
+	const source = `export const meta={apiVersion:1,key:"cmh-cont-refresh",name:"Continuation refresh",version:"1.0.0",author:{name:"Test"},models:["refresh-model"],fetchMode:"per_task",channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier"}}}}};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"};}
+export function parseSubmitResponse(){return {taskId:"local"};}
+export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}
+export function login(){return {type:"done",credential:{marker:"initial"},accountId:"refresh-account"};}
+export function refresh(ctx){const response=utils.fetch({url:ctx.baseUrl+"/refresh",method:"POST",body:"{}"});if(response.body.fail)throw new Error("temporary fixture refresh failure");return {credential:{marker:"A",tier:ctx.config.tier},headers:{Authorization:"Bearer refreshed-A"},expiresAt:utils.unixNow()+3600,accountId:"refresh-account"};}`
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	config := common.RawMessage(`{"tier":"A"}`)
+	credential := jsplugin.Credential{Plugin: plugin.Meta.Key, Data: common.RawMessage(`{"marker":"initial"}`), AccountID: "refresh-account", ExpiresAt: time.Now().Add(20 * time.Second).Unix()}
+	line, err := credential.Line()
+	require.NoError(t, err)
+	setting, base := `{"task_plugin_key":"cmh-cont-refresh"}`, stub.URL
+	channel := model.Channel{Id: channelID, Type: constant.ChannelTypeTaskPlugin, Name: "continuation-refresh", Status: common.ChannelStatusEnabled, Models: "refresh-model", Group: "default", BaseURL: &base, Setting: &setting, OtherSettings: `{"plugin_config":{"tier":"A"}}`, Key: line}
+	require.NoError(t, model.DB.Create(&channel).Error)
+	defer func() {
+		require.NoError(t, model.DB.Where("id = ?", channelID).Delete(&model.Channel{}).Error)
+		model.InitChannelCache()
+	}()
+	hooks := &hostPreselectionHookProbe{PluginHookGate: oldHooks}
+	core.PluginHooks = hooks
+	call := func(ctx context.Context) (string, error) {
+		return service.FreshPluginCredentialLineForContinuation(ctx, plugin, channelID, 0, line, base, "", config)
+	}
+	reset := func() {
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Updates(map[string]any{"key": line, "settings": channel.OtherSettings, "setting": setting, "base_url": base}).Error)
+		hooks.calls = nil
+		networkCalls.Store(0)
+	}
+	key := func() string {
+		stored, err := model.GetChannelById(channelID, true)
+		require.NoError(t, err)
+		return stored.Key
+	}
+	fresh, err := call(t.Context())
+	require.NoError(t, err)
+	require.NotEqual(t, line, fresh)
+	parsed, ok := jsplugin.ParseCredential(fresh)
+	require.True(t, ok)
+	assert.JSONEq(t, `{"marker":"A","tier":"A"}`, string(parsed.Data))
+	assert.Equal(t, fresh, key())
+	assert.Equal(t, int32(1), networkCalls.Load())
+	require.Len(t, hooks.calls, 1)
+	assert.Equal(t, "refresh", hooks.calls[0].Export)
+	reused, err := call(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, fresh, reused)
+	assert.Equal(t, int32(1), networkCalls.Load())
+	assert.Len(t, hooks.calls, 1)
+
+	info := &relaycommon.RelayInfo{OriginModelName: "refresh-model", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channelID, ChannelType: constant.ChannelTypeTaskPlugin, ChannelBaseUrl: base, ChannelSetting: kitdto.ChannelSettings{TaskPluginKey: plugin.Meta.Key}, ChannelOtherSettings: kitdto.ChannelOtherSettings{PluginConfig: config}, UpstreamModelName: "refresh-model"}}
+	original := taskjsplugin.New(plugin)
+	original.Init(info)
+	artifact, err := original.CaptureContinuationArtifact(info)
+	require.NoError(t, err)
+	task := &model.Task{TaskID: "synthetic-cont-refresh", UserId: 7, ChannelId: channelID, Platform: constant.TaskPlatform(plugin.Meta.Key), Properties: model.Properties{OriginModelName: "refresh-model", UpstreamModelName: "refresh-model"}, PrivateData: model.TaskPrivateData{CredentialAccount: "refresh-account", Execution: &model.TaskExecutionSnapshot{TaskPlugin: &model.TaskPluginSnapshot{Key: plugin.Meta.Key}, Continuation: &core.ContinuationRef{ID: "fixture-ref", Digest: "fixture-digest"}}}}
+	reset()
+	restored, err := taskjsplugin.RestoreContinuationArtifact(artifact)
+	require.NoError(t, err)
+	require.NoError(t, restored.BindContinuationTask(task, core.ContinuationContent))
+	require.NoError(t, restored.AttachContinuationCredentials(t.Context(), task, &channel))
+	assert.NotEqual(t, line, key())
+	assert.Equal(t, int32(1), networkCalls.Load())
+
+	for _, test := range []struct {
+		name  string
+		drift func()
+	}{
+		{name: "source_same_key_version", drift: func() {
+			_, err := registry.RegisterFactory(source+"\nexport const sourceRevision=2;", jsplugin.Options{})
+			require.NoError(t, err)
+		}},
+		{name: "effective_config", drift: func() {
+			require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("settings", `{"plugin_config":{"tier":"B"}}`).Error)
+		}},
+		{name: "base_url", drift: func() {
+			require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("base_url", base+"/changed").Error)
+		}},
+		{name: "proxy", drift: func() {
+			require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("setting", `{"task_plugin_key":"cmh-cont-refresh","proxy":"http://127.0.0.1:1"}`).Error)
+		}},
+	} {
+		t.Run("continuation_refresh_"+test.name, func(t *testing.T) {
+			_, err := registry.RegisterFactory(source, jsplugin.Options{})
+			require.NoError(t, err)
+			reset()
+			test.drift()
+			result, err := call(t.Context())
+			require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+			assert.Empty(t, result)
+			assert.Equal(t, line, key())
+			assert.Empty(t, hooks.calls)
+			assert.Zero(t, networkCalls.Load())
+			frozen, err := taskjsplugin.RestoreContinuationArtifact(artifact)
+			require.NoError(t, err)
+			require.NoError(t, frozen.BindContinuationTask(task, core.ContinuationContent))
+			require.ErrorIs(t, frozen.AttachContinuationCredentials(t.Context(), task, &channel), core.ErrContinuationUnavailable)
+			assert.Equal(t, line, key())
+			assert.Empty(t, hooks.calls)
+			assert.Zero(t, networkCalls.Load())
+			freshCredential := credential
+			freshCredential.ExpiresAt = time.Now().Add(time.Hour).Unix()
+			freshLine, err := freshCredential.Line()
+			require.NoError(t, err)
+			require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("key", freshLine).Error)
+			result, err = service.FreshPluginCredentialLineForContinuation(t.Context(), plugin, channelID, 0, freshLine, base, "", config)
+			require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+			assert.Empty(t, result)
+			assert.Equal(t, freshLine, key())
+			assert.Empty(t, hooks.calls)
+			assert.Zero(t, networkCalls.Load())
+		})
+	}
+	_, err = registry.RegisterFactory(source, jsplugin.Options{})
+	require.NoError(t, err)
+	reset()
+	substituted := credential
+	substituted.AccountID = ""
+	substituted.ExpiresAt = time.Now().Add(time.Hour).Unix()
+	substitutedLine, err := substituted.Line()
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("key", substitutedLine).Error)
+	result, err := call(t.Context())
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	assert.Empty(t, result)
+	assert.Equal(t, substitutedLine, key())
+	assert.Empty(t, hooks.calls)
+	assert.Zero(t, networkCalls.Load())
+	for _, invalid := range []jsplugin.Credential{
+		{Plugin: plugin.Meta.Key, Data: common.RawMessage(`{}`), AccountID: credential.AccountID, ExpiresAt: time.Now().Add(-time.Hour).Unix()},
+		{Plugin: plugin.Meta.Key, Data: common.RawMessage(`{}`), AccountID: credential.AccountID, NeedsLogin: true},
+	} {
+		reset()
+		invalidLine, err := invalid.Line()
+		require.NoError(t, err)
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("key", invalidLine).Error)
+		result, err := call(t.Context())
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		assert.Empty(t, result)
+		assert.Empty(t, hooks.calls)
+		assert.Zero(t, networkCalls.Load())
+		assert.Equal(t, invalidLine, key())
+	}
+	for _, account := range []string{"different-account", ""} {
+		reset()
+		changedAccount := credential
+		changedAccount.AccountID = account
+		changedLine, err := changedAccount.Line()
+		require.NoError(t, err)
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("key", changedLine).Error)
+		result, err := service.FreshPluginCredentialLineForContinuation(t.Context(), plugin, channelID, 0, changedLine, base, "", config)
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		assert.Empty(t, result)
+		assert.Equal(t, changedLine, key())
+		assert.Equal(t, int32(1), networkCalls.Load())
+		assert.Len(t, hooks.calls, 1)
+	}
+	reset()
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	result, err = call(cancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, result)
+	assert.Empty(t, hooks.calls)
+	assert.Zero(t, networkCalls.Load())
+	assert.Equal(t, line, key())
+	driftDuringHook.Store(true)
+	result, err = call(t.Context())
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	assert.Empty(t, result)
+	require.NoError(t, <-updates)
+	assert.Equal(t, line, key())
+	require.Len(t, hooks.calls, 1)
+	assert.Equal(t, int32(1), networkCalls.Load(), "the completed vendor action cannot be rolled back, but its stale credential must not persist")
+	reset()
+	failRefresh.Store(true)
+	result, err = call(t.Context())
+	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+	assert.Empty(t, result)
+	require.NoError(t, <-updates)
+	assert.Equal(t, line, key())
+	assert.Len(t, hooks.calls, 1)
+	assert.Equal(t, int32(1), networkCalls.Load())
+}
+
 func runHostPluginPublication(t *testing.T, noop core.ModelGate) {
 	t.Helper()
 	oldGate, oldRegistry := core.Models, jsplugin.DefaultRegistry
@@ -2016,6 +2230,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
 	runHostPluginPublication(t, oldGate)
 	runHostSharedEndpointPreselection(t, oldGate)
+	runHostContinuationCredentialRefresh(t, oldGate)
 	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
 	runHostBoundProviderAdmission(t, gate, oldGate)
 	runHostProviderChainAdmission(t, gate, oldGate)

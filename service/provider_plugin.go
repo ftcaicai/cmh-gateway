@@ -220,12 +220,101 @@ func RefreshPluginCredential(ctx context.Context, channelID, keyIndex int, line 
 	return pluginCredentialRefresher.Refresh(ctx, channelID, keyIndex, line)
 }
 
+type continuationCredentialExpectation struct {
+	plugin *jsplugin.LoadedPlugin
+	digest string
+}
+
+func continuationCredentialDigest(plugin *jsplugin.LoadedPlugin, baseURL, proxy string, config json.RawMessage) (string, error) {
+	if plugin == nil || plugin.Engine == nil || plugin.Meta.Key == "" || plugin.SourceSHA256() == "" || plugin.SourceSHA256() != plugin.Engine.SourceSHA256() || len(config) > 256<<10 {
+		return "", core.ErrContinuationUnavailable
+	}
+	var object map[string]common.RawMessage
+	if common.Unmarshal(config, &object) != nil || object == nil {
+		return "", core.ErrContinuationUnavailable
+	}
+	encoded, err := common.Marshal(struct{ Key, Source, BaseURL, Proxy, Config string }{plugin.Meta.Key, plugin.SourceSHA256(), baseURL, proxy, string(config)})
+	if err != nil {
+		return "", core.ErrContinuationUnavailable
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(encoded)), nil
+}
+
+func (expected *continuationCredentialExpectation) check(channel *model.Channel) error {
+	if channel == nil || channel.Type != constant.ChannelTypeTaskPlugin || channel.Setting == nil {
+		return core.ErrContinuationUnavailable
+	}
+	var setting dto.ChannelSettings
+	var other dto.ChannelOtherSettings
+	if common.UnmarshalJsonStr(*channel.Setting, &setting) != nil || channel.OtherSettings != "" && common.UnmarshalJsonStr(channel.OtherSettings, &other) != nil {
+		return core.ErrContinuationUnavailable
+	}
+	plugin, ok := jsplugin.DefaultRegistry.Get(setting.TaskPluginKey)
+	if !ok {
+		return core.ErrContinuationUnavailable
+	}
+	digest, err := continuationCredentialDigest(plugin, channel.GetBaseURL(), setting.Proxy, plugin.ChannelConfigFor(other.PluginConfig))
+	if err != nil || digest != expected.digest {
+		return core.ErrContinuationUnavailable
+	}
+	return nil
+}
+
+func continuationCredentialReusable(line string, used *jsplugin.Credential) bool {
+	stored, ok := jsplugin.ParseCredential(line)
+	return ok && used != nil && stored.Plugin == used.Plugin && stored.AccountID == used.AccountID && !stored.NeedsLogin && !stored.ExpiresWithin(time.Now(), 0)
+}
+
+// FreshPluginCredentialLineForContinuation never substitutes a different refresh
+// source or configuration for a frozen task. This is a drift veto, not a grant.
+func FreshPluginCredentialLineForContinuation(ctx context.Context, plugin *jsplugin.LoadedPlugin, channelID, keyIndex int, line, baseURL, proxy string, config json.RawMessage) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	digest, err := continuationCredentialDigest(plugin, baseURL, proxy, config)
+	if err != nil {
+		return "", err
+	}
+	expected := &continuationCredentialExpectation{plugin: plugin, digest: digest}
+	channel, err := model.GetChannelById(channelID, true)
+	if err != nil || expected.check(channel) != nil {
+		return "", core.ErrContinuationUnavailable
+	}
+	credential, ok := jsplugin.ParseCredential(line)
+	if !ok || credential.Plugin != plugin.Meta.Key {
+		return "", core.ErrContinuationUnavailable
+	}
+	lines := pluginCredentialKeyLines(channel)
+	index := locatePluginCredentialLine(lines, keyIndex, line, credential)
+	if index < 0 {
+		return "", core.ErrContinuationUnavailable
+	}
+	if lines[index] != line {
+		if !continuationCredentialReusable(lines[index], credential) {
+			return "", core.ErrContinuationUnavailable
+		}
+		return lines[index], nil
+	}
+	return freshPluginCredentialLine(ctx, plugin, channelID, index, line, expected)
+}
+
 // Refresh is RefreshPluginCredential on this refresher's single-flight group.
 func (r *PluginCredentialRefresher) Refresh(ctx context.Context, channelID, keyIndex int, line string) (string, error) {
+	return r.refreshWithExpectation(ctx, channelID, keyIndex, line, nil)
+}
+
+func (r *PluginCredentialRefresher) refreshWithExpectation(ctx context.Context, channelID, keyIndex int, line string, expected *continuationCredentialExpectation) (string, error) {
+	if expected != nil && ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	sum := sha256.Sum256([]byte(line))
-	flight := r.group.DoChan(strconv.Itoa(channelID)+":"+hex.EncodeToString(sum[:]), func() (any, error) {
+	key := strconv.Itoa(channelID) + ":" + hex.EncodeToString(sum[:])
+	if expected != nil {
+		key += ":continuation:" + expected.digest
+	}
+	flight := r.group.DoChan(key, func() (any, error) {
 		// The call is shared, so no single caller's cancellation ends it.
-		return refreshPluginCredentialLine(channelID, keyIndex, line)
+		return refreshPluginCredentialLineExpected(channelID, keyIndex, line, expected)
 	})
 	select {
 	case result := <-flight:
@@ -239,6 +328,10 @@ func (r *PluginCredentialRefresher) Refresh(ctx context.Context, channelID, keyI
 }
 
 func refreshPluginCredentialLine(channelID, keyIndex int, used string) (string, error) {
+	return refreshPluginCredentialLineExpected(channelID, keyIndex, used, nil)
+}
+
+func refreshPluginCredentialLineExpected(channelID, keyIndex int, used string, expected *continuationCredentialExpectation) (string, error) {
 	usedCredential, ok := jsplugin.ParseCredential(used)
 	if !ok {
 		return "", errors.New("channel key is not a plugin credential")
@@ -254,10 +347,21 @@ func refreshPluginCredentialLine(channelID, keyIndex int, used string) (string, 
 	err := model.WithPluginCredentialRefreshLock(lockCtx, channelID, func() error {
 		channel, err := model.GetChannelById(channelID, true)
 		if err != nil {
+			if expected != nil {
+				return core.ErrContinuationUnavailable
+			}
 			return err
+		}
+		if expected != nil {
+			if err := expected.check(channel); err != nil {
+				return err
+			}
 		}
 		channelName, multiKey, autoBan, storedKey = channel.Name, channel.ChannelInfo.IsMultiKey, channel.GetAutoBan(), channel.Key
 		plugin, ok := PluginOfChannel(channel)
+		if expected != nil {
+			plugin, ok = expected.plugin, true
+		}
 		if !ok || plugin.Meta.Key != usedCredential.Plugin {
 			return fmt.Errorf("channel #%d is not bound to plugin %s", channelID, usedCredential.Plugin)
 		}
@@ -270,6 +374,9 @@ func refreshPluginCredentialLine(channelID, keyIndex int, used string) (string, 
 			return ErrPluginCredentialRemoved
 		}
 		if lines[index] != used {
+			if expected != nil && !continuationCredentialReusable(lines[index], usedCredential) {
+				return core.ErrContinuationUnavailable
+			}
 			// Another node refreshed or a login replaced it meanwhile.
 			current, storedElsewhere = lines[index], true
 			return nil
@@ -285,6 +392,9 @@ func refreshPluginCredentialLine(channelID, keyIndex int, used string) (string, 
 		if result.Relogin {
 			next.NeedsLogin = true
 		} else {
+			if expected != nil && result.AccountID != "" && result.AccountID != usedCredential.AccountID {
+				return core.ErrContinuationUnavailable
+			}
 			if result.AccountID != "" && usedCredential.AccountID != "" && result.AccountID != usedCredential.AccountID {
 				return fmt.Errorf("plugin %s refresh returned another account", plugin.Meta.Key)
 			}
@@ -297,12 +407,20 @@ func refreshPluginCredentialLine(channelID, keyIndex int, used string) (string, 
 		// The plugin call held no channel lock, so the result replaces the
 		// line only if no login or edit replaced it meanwhile.
 		stored, err := model.UpdateChannelLocked(channelID, func(channel *model.Channel) error {
+			if expected != nil {
+				if err := expected.check(channel); err != nil {
+					return err
+				}
+			}
 			lines := pluginCredentialKeyLines(channel)
 			index := locatePluginCredentialLine(lines, keyIndex, used, usedCredential)
 			if index < 0 {
 				return ErrPluginCredentialRemoved
 			}
 			if lines[index] != used {
+				if expected != nil && !continuationCredentialReusable(lines[index], usedCredential) {
+					return core.ErrContinuationUnavailable
+				}
 				current, storedElsewhere = lines[index], true
 				return nil
 			}
@@ -440,6 +558,10 @@ func InvalidatePluginKeyToken(plugin *jsplugin.LoadedPlugin, channelID int, line
 // ErrPluginCredentialNeedsLogin, an expired one whose refresh failed
 // ErrPluginCredentialRefreshFailed. A static key is returned as it is.
 func FreshPluginCredentialLine(ctx context.Context, plugin *jsplugin.LoadedPlugin, channelID, keyIndex int, line string) (string, error) {
+	return freshPluginCredentialLine(ctx, plugin, channelID, keyIndex, line, nil)
+}
+
+func freshPluginCredentialLine(ctx context.Context, plugin *jsplugin.LoadedPlugin, channelID, keyIndex int, line string, expected *continuationCredentialExpectation) (string, error) {
 	credential, ok := jsplugin.ParseCredential(line)
 	if !ok {
 		return line, nil
@@ -451,9 +573,18 @@ func FreshPluginCredentialLine(ctx context.Context, plugin *jsplugin.LoadedPlugi
 	if !credential.ExpiresWithin(now, PluginCredentialRequestMargin) || !plugin.HasProviderHook("refresh") {
 		return line, nil
 	}
-	refreshed, err := RefreshPluginCredential(ctx, channelID, keyIndex, line)
+	refreshed, err := pluginCredentialRefresher.refreshWithExpectation(ctx, channelID, keyIndex, line, expected)
+	if expected != nil && (errors.Is(err, core.ErrContinuationUnavailable) || errors.Is(err, ErrPluginCredentialRemoved) || ctx.Err() != nil) {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", core.ErrContinuationUnavailable
+	}
 	if err == nil || errors.Is(err, ErrPluginCredentialNeedsLogin) {
 		return refreshed, err
+	}
+	if expected != nil {
+		return "", core.ErrContinuationUnavailable
 	}
 	common.SysLog(common.LogText("plugin credential refresh failed: plugin=%s channel_id=%d key_index=%d category=%s", plugin.Meta.Key, channelID, keyIndex, pluginErrorCategory(err)))
 	if credential.ExpiresWithin(now, 0) {
