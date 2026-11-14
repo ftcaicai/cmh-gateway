@@ -29,6 +29,6 @@ R3最小官方回跳、R4精确工厂清单、H1累计48/6000与唯一命名midd
 
 ## 接续顺序
 
-先前未覆盖的redirect共享验证等待跨expiry已补真实三库（initial1/后继0/Unavailable），见p2/H1-C-grant-redirect-expiry.md；接续在已有登记范围收口affinity/type60/legacy/requestplan可用性并开展完整startup设计/验收，不能继续以小parser代替主线。金融同事务保持用户原决定，需独立实施设计批准后再动账务。遇第50文件/命名例外超40行、费用、生产凭据或架构权限改变才提新决策。
+先前未覆盖的redirect共享验证等待跨expiry已补真实三库（initial1/后继0/Unavailable），见p2/H1-C-grant-redirect-expiry.md；接续在已有登记范围收口affinity/type60/legacy/requestplan可用性并开展完整startup设计/验收，不能继续以小parser代替主线。金融同事务保持用户原决定；负责人已在具名合成分阶段申请中明确选择“继续设计，不批准实施”，故不创建实施rules PR、不扩大财务预算、不试做资金代码，也不重复申请同一授权。资金仅继续合同与故障验收规格设计，已发布规格不等于已运行测试。遇第50文件/命名例外超40行、费用、生产凭据或架构权限改变才提新决策。
 
 用户于2026-11-14明确将连续轮数上限由40改为80，目标已恢复active/armed；轮数不是完成标准，也不是技术阻塞。目标保持未完成；没有为了到达计数而暂停/完成/标blocked。后续接续以CURRENT_TASK与本页及具体acceptance为准，不依赖聊天中“待提交”历史文字。
