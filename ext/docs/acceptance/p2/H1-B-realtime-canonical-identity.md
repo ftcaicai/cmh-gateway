@@ -17,4 +17,12 @@
 - 独立两次人工只读复核无阻断；未运行专用安全子工具，不宣称完整 ASVS 认证。owner 的 `-run Realtime` 显示 no tests to run，不算额外覆盖。
 - 官方 diff gate：rc51 基线，49/49 文件、4591/6000 增删行，余 1409 行；named exception 14/40，80% scope review继续有效。
 
-本次新增的是实际 codec 的中央 guard 回归，未新增 raw socket 攻击帧验收；既有 WS 回归仍通过。不证明供应商解析行为、任意正文安全、完整 TOCTOU 消除或资金守恒。资金、H4/H6 实施拒绝保持有效。
+第63轮仅新增实际 codec 的中央 guard 回归；第64轮补充如下 raw socket 证明。两轮均不证明供应商解析行为、任意正文安全、完整 TOCTOU 消除或资金守恒。资金、H4/H6 实施拒绝保持有效。
+
+## 第64轮：真实 handler 原始帧
+
+仅扩展中央测试，未修改生产代码。loopback WebSocket gateway 调用真实 `OpenaiRealtimeHandler`，连接本地 upstream stub：两条 TYPE/SESSION 遮蔽原始帧均收到 `error/request_rejected`，上游计数保持 0；随后同一连接的合法原始帧逐字节回显，上游计数恰好 1。不是只调用 guard 的模拟断言，也不是供应商 live 测试。
+
+局部复制 dialer，两次握手 timeout 5 秒；stub、gateway 双端及客户端读写 deadline 5 秒。客户端关闭后分别有界等待 gateway/upstream handler 6 秒，再关闭 server；生产 handler 内部 reader 没有导出的 join，本测试不宣称 race/所有内部 goroutine 认证。
+
+最终 owner 完整 SQLite Host 回归 13.531s、vet/diff-check exit 0；独立人工只读最终复核无阻断。父会话 `go test -p 2 ./ext/... -count=1` 全通过（domestic 7.975s），相关 vet 与官方 gate exit 0，仍为49文件/4591行。父会话生产包完整回归 openai 0.196s、relay 0.420s，exit 0。本轮未改变数据库行为，未将本轮 SQLite 测试宣称为新一轮三库认证；上一轮真实三库证据仍保留。

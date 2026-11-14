@@ -2044,6 +2044,99 @@ func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, no
 	} {
 		assert.Nil(t, openai.CheckRealtimeAdmission(c, info, []byte(body)), "canonical optional identity remains valid: %s", body)
 	}
+	t.Run("realtime_canonical_raw_frames", func(t *testing.T) {
+		dialer := *websocket.DefaultDialer
+		dialer.HandshakeTimeout = 5 * time.Second
+		var forwarded atomic.Int32
+		upstreamDone := make(chan struct{})
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer close(upstreamDone)
+			socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer socket.Close()
+			_ = socket.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_ = socket.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			for {
+				_, payload, err := socket.ReadMessage()
+				if err != nil {
+					return
+				}
+				forwarded.Add(1)
+				if socket.WriteMessage(websocket.TextMessage, payload) != nil {
+					return
+				}
+			}
+		}))
+		defer upstream.Close()
+		handlerDone := make(chan struct{})
+		gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer close(handlerDone)
+			target, _, err := dialer.Dial("ws"+strings.TrimPrefix(upstream.URL, "http"), nil)
+			if err != nil {
+				return
+			}
+			defer target.Close()
+			client, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer client.Close()
+			_ = target.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_ = target.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_ = client.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = r
+			common.SetContextKey(ctx, constant.ContextKeyChannelId, channel.Id)
+			common.SetContextKey(ctx, constant.ContextKeyChannelType, channel.Type)
+			common.SetContextKey(ctx, constant.ContextKeyOriginalModel, "public-chat")
+			common.SetContextKey(ctx, constant.ContextKeyChannelModelMapping, fresh.GetModelMapping())
+			common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "default")
+			session := &relaycommon.RelayInfo{OriginModelName: "public-chat", ClientWs: client, TargetWs: target, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id, ChannelType: channel.Type, UpstreamModelName: "approved-target"}}
+			openai.OpenaiRealtimeHandler(ctx, session)
+		}))
+		defer gateway.Close()
+		client, _, err := dialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http"), nil)
+		require.NoError(t, err)
+		defer func() {
+			_ = client.Close()
+			for _, done := range []chan struct{}{handlerDone, upstreamDone} {
+				select {
+				case <-done:
+				case <-time.After(6 * time.Second):
+					t.Error("Realtime socket handler did not stop")
+				}
+			}
+		}()
+		require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+		require.NoError(t, client.SetWriteDeadline(time.Now().Add(5*time.Second)))
+		for _, body := range []string{
+			`{"event_id":"shadow-type","type":"session.update","TYPE":"response.create","session":{"model":"unapproved-target"}}`,
+			`{"event_id":"shadow-session","type":"session.update","session":{"model":"unapproved-target"},"SESSION":{"model":"approved-target"}}`,
+		} {
+			require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(body)))
+			_, reply, err := client.ReadMessage()
+			require.NoError(t, err)
+			var rejected struct {
+				Type  string `json:"type"`
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, common.Unmarshal(reply, &rejected))
+			assert.Equal(t, "error", rejected.Type)
+			assert.Equal(t, "request_rejected", rejected.Error.Code)
+			assert.Zero(t, forwarded.Load())
+		}
+		legitimate := `{"type":"session.update","session":{"model":"approved-target"}}`
+		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(legitimate)))
+		_, reply, err := client.ReadMessage()
+		require.NoError(t, err)
+		assert.Equal(t, legitimate, string(reply), "the same live session must still forward the valid raw frame")
+		assert.Equal(t, int32(1), forwarded.Load())
+	})
 	// WssHelper initializes the actual handshake identity from context before
 	// dialing. This mapped public alias must be rejected before a new handshake,
 	// rather than dial the original alias and only reject in the event handler.
