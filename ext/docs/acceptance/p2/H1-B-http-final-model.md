@@ -19,7 +19,14 @@
 父会话最终全扩展测试全部通过（domestic 8.817s），`go vet -p 2 ./relay/channel ./ext/...` 与diff-check exit 0。
 
 
+## 第67轮：Alpha Search具名最终格式
+
+Alpha Search入口要求非空model，实际helper先映射、后参数override；因此同样可能出现审批upstream与最终正文不一致。仅追加AlphaSearch模式＋OpenAIAlphaSearch最终格式，沿用既有type60/active gate、独立replay及唯一canonical model合同；不套到正文无需model的tools、moderation缺省模型或图片multipart。
+
+中央fixture调用真实AlphaSearchHelper及本地HTTP stub：映射后的模型和未知嵌套字段到达stub；实际override错配403/SkipRetry且无新增发送；noop保留原override发送。stub固定返回合成400，使helper在usage/settlement之前结束，probe reserve/settle/refund全零；这是发送身份验收，不是完整成功响应或资金守恒证明。最终完整Host SQLite14.150s、相关vet通过；父会话channel0.147s/relay0.399s/ext全tests（domestic9.005s）、相关vet/rootbuild/diff-check exit0。独立只读复核无阻断，未执行专用安全工具。首次fixture误用BillingSession字段编译失败，修正为真实Billing后通过，未改生产合同。官方门禁49/49文件、4638/6000行，余1362，named14/40；无数据库行为修改，不宣称新增三库认证。
+
 ## 第66轮：有限已知JSON端点收口
+
 
 原chat-only判定还漏掉completions、embedding、Responses HTTP，以及临时改mode的chat→Responses转换。本轮仍在同一DoApiRequest挂载点，使用GetFinalRequestRelayFormat（显式final、转换链末项、入口格式的既有优先级），仅纳入：
 

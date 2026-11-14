@@ -3499,6 +3499,75 @@ func runHostHTTPFinalModel(t *testing.T, noop core.ModelGate) {
 		assert.Equal(t, before+1, calls.Load())
 		assert.Equal(t, wire, received)
 	})
+	t.Run("alpha actual helper outbound", func(t *testing.T) {
+		var alphaCalls atomic.Int32
+		var alphaWire string
+		alphaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			wire, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			alphaWire = string(wire)
+			alphaCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"synthetic upstream rejection","type":"invalid_request_error"}}`)
+		}))
+		defer alphaServer.Close()
+		alphaTarget := target
+		alphaTarget.AddressSHA256, err = core.DestinationAddress(alphaServer.URL + "/v1/alpha/search")
+		require.NoError(t, err)
+		alphaTarget.HostSHA256 = core.DestinationHost(strings.TrimPrefix(alphaServer.URL, "http://"))
+		core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{alphaTarget})
+		require.NoError(t, err)
+		for _, tc := range []struct {
+			name     string
+			override bool
+			noop     bool
+		}{{"mapped", false, false}, {"override denied", true, false}, {"noop retains override", true, true}} {
+			t.Run(tc.name, func(t *testing.T) {
+				core.Models = gate
+				if tc.noop {
+					core.Models = noop
+				}
+				defer func() { core.Models = gate }()
+				alphaContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+				alphaContext.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", nil)
+				common.SetContextKey(alphaContext, constant.ContextKeyChannelId, 95016)
+				common.SetContextKey(alphaContext, constant.ContextKeyChannelType, constant.ChannelTypeNewAPI)
+				common.SetContextKey(alphaContext, constant.ContextKeyOriginalModel, "public-chat")
+				common.SetContextKey(alphaContext, constant.ContextKeyChannelBaseUrl, alphaServer.URL)
+				alphaContext.Set("model_mapping", `{"public-chat":"approved-target"}`)
+				if tc.override {
+					common.SetContextKey(alphaContext, constant.ContextKeyChannelParamOverride, map[string]any{"model": "unapproved-target"})
+				}
+				probe := &admissionBillingProbe{}
+				alphaInfo := &relaycommon.RelayInfo{OriginModelName: "public-chat", RelayMode: relayconstant.RelayModeAlphaSearch, RelayFormat: kittypes.RelayFormatOpenAIAlphaSearch, RequestURLPath: "/v1/alpha/search", Request: &kitdto.AlphaSearchRequest{Model: "public-chat", RawBody: []byte(`{"model":"public-chat","unknown":{"preserved":[1,"synthetic"]}}`)}, Billing: probe}
+				before := alphaCalls.Load()
+				apiErr := relay.AlphaSearchHelper(alphaContext, alphaInfo)
+				require.NotNil(t, apiErr, "synthetic upstream error stops before usage and settlement")
+				if tc.override && !tc.noop {
+					assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+					assert.True(t, kittypes.IsSkipRetryError(apiErr))
+					assert.Equal(t, before, alphaCalls.Load())
+				} else {
+					assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+					assert.Equal(t, before+1, alphaCalls.Load())
+					expectedModel := "approved-target"
+					if tc.noop {
+						expectedModel = "unapproved-target"
+					}
+					assert.JSONEq(t, `{"model":"`+expectedModel+`","unknown":{"preserved":[1,"synthetic"]}}`, alphaWire)
+				}
+				assert.Zero(t, probe.reserve)
+				assert.Zero(t, probe.settle)
+				assert.Zero(t, probe.refund)
+			})
+		}
+	})
+	core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{target})
+	require.NoError(t, err)
 	storedWire := `{"model":"approved-target","messages":[]}`
 	storedBody, storage, err := relaycommon.NewOutboundJSONBody([]byte(storedWire))
 	require.NoError(t, err)

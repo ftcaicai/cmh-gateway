@@ -13,7 +13,7 @@
 - P1隔离纯值原型：tenant/request/source精确绑定、预留/追加/部分消费与释放/冲突重放/边界12例通过；只是合成单资产状态转移，不是真实双式账本、同事务或Redis×BATCH证明。见p1/funding-value-contract.md；未连接任何生产资金路径。
 - 启动policy-only：负责人明确批准，真实main早期DB/worker前安装四项一致策略；非法/partial/grant配置早停，valid deny-all与缺省进入故意DB sentinel，六类实际进程无SQLite文件；archive/grants禁用、无生产激活，预main factory编译例外保留。见p2/H1-C-policy-only-startup.md。第45轮同制品合成成功监听loopback、普通Bearer models200空/chat403策略拒绝/未认证401对照/upstream0，已停止；第46轮同制品精确允许模型真实目录发布1项，同显示偏好deny-all仍0项，两次401对照/上游0；不证明dispatch。见p2/H1-C-policy-only-serving.md。
 - Responses WS：49ade0298已发布，type61冻结rawOther恢复支持2 create/1握手，Other/config漂移拒绝；payload后及握手后create前复核，真实握手屏障禁用后0create且target关闭。三库22.331s、相关全tests/vet/build及独立复核通过。每create原连接目的地重验已补私有成功握手proof，签名URL/Host hash跨create当前策略重验、地址/Host/跨conn负控制及双握手撤销屏障三库22.655s通过，见p2/H1-C-responses-ws-target.md；native最终create模型唯一/字符串/精确upstream校验及真实alias、独立审批override首次/复用拒绝、passthrough转义重复键/noop对照三库23.205s通过，见p2/H1-C-responses-ws-model.md；不是任意JSON授权或完整TOCTOU证明，见p2/H1-C-responses-ws-reuse.md。
-- HTTP有限最终正文：active type60已知chat/completions、embedding、Responses/compact按最终format+mode精确组合独立replay校验canonical model唯一且精确upstream（含实际chat转换/compact投影），实际override错配0上游、正例字节不变、noop/重放故障通过；相关全tests/vet/build通过，见p2/H1-B-http-final-model.md。不是其他provider opaque正文授权，额外O(body)内存成本保留。
+- HTTP有限最终正文：active type60已知chat/completions、embedding、Responses/compact及Alpha Search按最终format+mode精确组合独立replay校验canonical model唯一且精确upstream（含实际chat转换/compact投影），实际override错配0上游、正例字节不变、noop/重放故障通过；相关全tests/vet/build通过，见p2/H1-B-http-final-model.md。不是其他provider opaque正文授权，额外O(body)内存成本保留。
 - T1.6c：rc51后原始Go符号重检仍24匹配/9文件（15生产/5测试/3定义/1注释），相关9文件rc50→rc51差异空；不是唯一资金出口证明。
 - cmh-param-normalize：当前rc51源码CLI valid、43/43fixtures及实际hostpatch回归通过，工厂已embed注册，request实例仍未启用。
 
@@ -27,7 +27,7 @@
 
 ## 已批准不可重复询问
 
-R3最小官方回跳、R4精确工厂清单、H1累计48/6000与唯一命名middleware/task_plugin.go第49例外≤40增删行（累计6000不变）、有限taskgrant首批合同和policy-only启动合同均已明确批准。源码当前相对rc51官方49文件/4636增删行，命名文件14/40，余1364行且0任意新文件名额；不删测试凑预算。
+R3最小官方回跳、R4精确工厂清单、H1累计48/6000与唯一命名middleware/task_plugin.go第49例外≤40增删行（累计6000不变）、有限taskgrant首批合同和policy-only启动合同均已明确批准。源码当前相对rc51官方49文件/4638增删行，命名文件14/40，余1362行且0任意新文件名额；不删测试凑预算。
 
 ## 接续顺序
 
