@@ -29,6 +29,42 @@ import (
 
 const APIVersion1 = 1
 
+var taskPluginKeys = map[constant.TaskPlatform]string{
+	constant.TaskPlatformSuno:                                            "sunoapi",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeAli)):         "alibaba",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeKling)):       "kling",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeJimeng)):      "jimeng",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeVidu)):        "vidu",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeDoubaoVideo)): "doubao",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeVolcEngine)):  "doubao",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeGemini)):      "google",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeMiniMax)):     "hailuo",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeSora)):        "sora",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeOpenAI)):      "sora",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeVertexAi)):    "vertex-ai",
+}
+
+// TaskPluginKeyForPlatform names the preferred static key, even when unavailable.
+func TaskPluginKeyForPlatform(platform constant.TaskPlatform) string {
+	if key, ok := taskPluginKeys[platform]; ok {
+		return key
+	}
+	return string(platform)
+}
+
+// ResolveTaskPluginForPlatform preserves static-key precedence and numeric fallback.
+func ResolveTaskPluginForPlatform(generation *RoutingGeneration, platform constant.TaskPlatform) (*LoadedPlugin, bool) {
+	if generation == nil {
+		return nil, false
+	}
+	if key, ok := taskPluginKeys[platform]; ok {
+		if plugin, found := generation.Get(key); found {
+			return plugin, true
+		}
+	}
+	return generation.Get(string(platform))
+}
+
 const (
 	maxLocalizedTextLocales       = 16
 	maxMetaDescriptionRunes       = 512

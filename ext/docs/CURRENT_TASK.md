@@ -4,6 +4,7 @@
 
 ## 当前事实
 
+- 当前未发布补丁已补静态resolver owner缺口：共享原始platform映射/优先级，sora无channelTypes和numeric fallback不得投影builtin；真实三库22.005s通过、独立只读复核无阻断、数据库均已停止。累计49官方文件4475行/剩1525，named exception14/40不变。旧pinned及legacy正向执行仍未解决，不启用生产。
 - 最近已推 `0851f7369adc17dbc0adaa5d7d6d8a6a31f26822`，main/develop一致，门禁43585172419/43585168004 success。第56轮实际loader同路径合法替换回归：旧SHA拒绝、新SHA采用新审批、旧返回快照独立，定向/extension全tests及vet通过（domestic8.245s），独立只读复核无阻断；测试提交5f596065a。第57轮该源码实际根二进制ldflags注入验收：build-only正确文件到故意DB失败点、冲突env SHA与追加LF文件均在DB前固定拒绝，三个子进程退出、无SQLite/监听/上游；证据 `acceptance/p2/H1-C-policy-only-startup.md`。不代表热更新、全局撤销、来源签名或生产启用。H4/H6负责人明确选择“均保持设计，不批准实施”；不创建对应规则PR、不扩大预算、不试做接线、不重复申请同一授权。资金负责人亦明确选择“继续设计，不批准实施”：不扩官方区、不创建实施rules PR、不试做资金代码；不重复申请同一授权。有限资金方向及经济/恢复/memory-only设计批准保留。只读候选18必需＋6条件＝3既有＋15新增必需，组合64；全条件最多69官方路径，测试拟集中扩展区，这不是获批范围或行数预测。生产模型可靠计费上界尚未证明、资格为空；后续仅收敛接口/状态转换/故障验证规格，见 `acceptance/p1/funding-engineering-proof-gaps.md`。rc51同步、policy-only合成Serving与目录对照已验；整体P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。

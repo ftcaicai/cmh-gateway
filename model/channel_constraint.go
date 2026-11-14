@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -272,7 +273,11 @@ func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase
 	// Legacy task resolution is not limited to the owner's declared models.
 	// Until an exact legacy execution envelope exists, even dual-use ordinary
 	// relay channels must not claim builtin identity while a current owner exists.
-	if _, owned := jsplugin.DefaultRegistry.Generation().GetByChannelType(ch.Type); owned {
+	generation := jsplugin.DefaultRegistry.Generation()
+	if _, owned := generation.GetByChannelType(ch.Type); owned {
+		return admission
+	}
+	if _, owned := jsplugin.ResolveTaskPluginForPlatform(generation, constant.TaskPlatform(strconv.Itoa(ch.Type))); owned {
 		return admission
 	}
 	// Global/group request plugins are not encoded in channel settings. Until

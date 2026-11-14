@@ -144,31 +144,8 @@ func GetTaskPlatform(c *gin.Context) constant.TaskPlatform {
 	return constant.TaskPlatform(c.GetString("platform"))
 }
 
-var taskPluginKeys = map[constant.TaskPlatform]string{
-	constant.TaskPlatformSuno:                                            "sunoapi",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeAli)):         "alibaba",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeKling)):       "kling",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeJimeng)):      "jimeng",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeVidu)):        "vidu",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeDoubaoVideo)): "doubao",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeVolcEngine)):  "doubao",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeGemini)):      "google",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeMiniMax)):     "hailuo",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeSora)):        "sora",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeOpenAI)):      "sora",
-	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeVertexAi)):    "vertex-ai",
-}
-
 func ResolveTaskPluginForPlatform(generation *pluginruntime.RoutingGeneration, platform constant.TaskPlatform) (*pluginruntime.LoadedPlugin, bool) {
-	if generation == nil {
-		return nil, false
-	}
-	if key, ok := taskPluginKeys[platform]; ok {
-		if plugin, found := generation.Get(key); found {
-			return plugin, true
-		}
-	}
-	return generation.Get(string(platform))
+	return pluginruntime.ResolveTaskPluginForPlatform(generation, platform)
 }
 
 // TaskPlatformUnavailableError explains why no adaptor serves the platform:
@@ -179,10 +156,7 @@ func TaskPlatformUnavailableError(platform constant.TaskPlatform) (string, strin
 	if !pluginruntime.DefaultRegistry.Enabled() {
 		return "task_plugin_system_disabled", "the task plugin system is disabled on this gateway"
 	}
-	key := string(platform)
-	if mapped, ok := taskPluginKeys[platform]; ok {
-		key = mapped
-	}
+	key := pluginruntime.TaskPluginKeyForPlatform(platform)
 	for _, meta := range pluginruntime.DefaultRegistry.Snapshot().Factory {
 		if meta.Key == key {
 			return "task_plugin_disabled", fmt.Sprintf("task plugin %q is disabled on this gateway", key)

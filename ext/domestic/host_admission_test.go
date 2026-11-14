@@ -2844,6 +2844,44 @@ export function parseTaskResult(){return {status:"IN_PROGRESS"};}`, jsplugin.Opt
 	var count int64
 	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", blocked.Id).Count(&count).Error)
 	assert.Zero(t, count)
+	for _, keys := range [][]string{{"sora"}, {"1"}, {"sora", "1"}} {
+		registry = jsplugin.NewRegistry()
+		jsplugin.DefaultRegistry = registry
+		for _, key := range keys {
+			_, err := registry.RegisterFactory(`export const meta={apiVersion:1,key:"`+key+`",name:"Static owner",version:"1.0.0",author:{name:"Test"},models:["different-model"],fetchMode:"per_task"};
+export function buildSubmitRequest(){return {url:"https://fixture.invalid/submit"};}
+export function parseSubmitResponse(){return {taskId:"synthetic"};}
+export function buildQueryRequest(){return {url:"https://fixture.invalid/query"};}
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}`, jsplugin.Options{})
+			require.NoError(t, err)
+		}
+		_, byType := registry.Generation().GetByChannelType(1)
+		assert.False(t, byType)
+		resolved, found := relay.ResolveTaskPluginForPlatform(registry.Generation(), constant.TaskPlatform("1"))
+		require.True(t, found)
+		assert.Equal(t, keys[0], resolved.Meta.Key, "static sora wins over numeric fallback")
+		assert.NotContains(t, model.GetGroupEnabledModels("default"), "legacy-undeclared")
+		for _, memory := range []bool{false, true} {
+			common.MemoryCacheEnabled = memory
+			model.InitChannelCache()
+			selected, err := model.GetRandomSatisfiedChannel("default", "legacy-undeclared", 0, nil)
+			require.NoError(t, err)
+			assert.Nil(t, selected)
+		}
+		require.Error(t, blocked.Insert())
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", blocked.Id).Count(&count).Error)
+		assert.Zero(t, count)
+		assert.Contains(t, model.GetGroupEnabledModels("default"), "newapi-unbound")
+	}
+	jsplugin.DefaultRegistry = jsplugin.NewRegistry()
+	resolved, found := relay.ResolveTaskPluginForPlatform(jsplugin.DefaultRegistry.Generation(), constant.TaskPlatform("1"))
+	assert.False(t, found)
+	assert.Nil(t, resolved)
+	resolved, found = relay.ResolveTaskPluginForPlatform(nil, constant.TaskPlatform("1"))
+	assert.False(t, found)
+	assert.Nil(t, resolved)
+	assert.Contains(t, model.GetGroupEnabledModels("default"), "legacy-undeclared")
+	assert.NoError(t, model.ValidateChannelAdmissionSnapshot(t.Context(), &channels[0]))
 }
 
 func runHostPluginPublication(t *testing.T, noop core.ModelGate) {
