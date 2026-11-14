@@ -597,7 +597,8 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 	registry := jsplugin.NewRegistry()
 	jsplugin.DefaultRegistry = registry
 	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
-	var lookups, submissions, mediaCalls, queryCalls atomic.Int32
+	var lookups, submissions, mediaCalls, queryCalls, deniedTargetCalls atomic.Int32
+	var redirectQuery atomic.Bool
 	var mediaRevision, mediaTier, mediaAuthorization string
 	var signedTier string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -609,6 +610,15 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 		}
 		if r.URL.Path == "/query" {
 			queryCalls.Add(1)
+			if redirectQuery.Load() {
+				http.Redirect(w, r, "/query-denied", http.StatusSeeOther)
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
+			return
+		}
+		if r.URL.Path == "/query-denied" {
+			deniedTargetCalls.Add(1)
 			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
 			return
 		}
@@ -1001,6 +1011,80 @@ export function buildContentRequest(ctx){return {url:ctx.baseUrl+"/media",method
 		_, err = soon.FetchTask(base, "fixture", &candidate, "")
 		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
 		assert.Equal(t, before, queryCalls.Load(), "an existing adaptor cannot start a new dispatch after expiry")
+	})
+	t.Run("ungranted_archive_destination_veto", func(t *testing.T) {
+		oldGrants, oldTargets := core.ContinuationGrants, core.Destinations
+		defer func() {
+			core.ContinuationGrants, core.Destinations = oldGrants, oldTargets
+			redirectQuery.Store(false)
+			require.NoError(t, model.DB.Save(&polled).Error)
+		}()
+		core.ContinuationGrants = nil
+		denyTargets, err := NewDestinationPolicy(nil)
+		require.NoError(t, err)
+		for _, redirected := range []bool{false, true} {
+			name := "initial_target"
+			if redirected {
+				name = "redirect_target"
+			}
+			t.Run(name, func(t *testing.T) {
+				core.Destinations = denyTargets
+				if redirected {
+					core.Destinations = queryPolicy
+				}
+				redirectQuery.Store(redirected)
+				candidate := polled
+				candidate.Status = model.TaskStatusInProgress
+				candidate.PrivateData.PollFailures = 2
+				candidate.PrivateData.BillingSource = "wallet"
+				candidate.PrivateData.SubscriptionId = 917
+				candidate.PrivateData.TokenId = 918
+				candidate.PrivateData.NodeName = "archived-target-veto-fixture"
+				require.NoError(t, model.DB.Save(&candidate).Error)
+				beforePrivate, err := common.Marshal(candidate.PrivateData)
+				require.NoError(t, err)
+				beforeQuery, beforeDenied := queryCalls.Load(), deniedTargetCalls.Load()
+				resolved, err := relay.GetTaskAdaptorForTask(t.Context(), &candidate, core.ContinuationPoll)
+				require.NoError(t, err)
+				_, err = resolved.FetchTask(base, "fixture", &candidate, "")
+				require.ErrorIs(t, err, core.ErrContinuationUnavailable, "archive without a grant must classify actual target policy veto as unavailable")
+				wantQueries := int32(0)
+				if redirected {
+					wantQueries = 1
+				}
+				assert.Equal(t, wantQueries, queryCalls.Load()-beforeQuery)
+				assert.Equal(t, beforeDenied, deniedTargetCalls.Load(), "the unapproved target must never receive a request")
+				beforeQuery = queryCalls.Load()
+				service.DispatchPlatformUpdate(t.Context(), candidate.Platform, map[int][]string{stored.Id: {candidate.GetUpstreamTaskID()}}, map[string]*model.Task{candidate.GetUpstreamTaskID(): &candidate})
+				var after model.Task
+				require.NoError(t, model.DB.First(&after, candidate.ID).Error)
+				assert.Equal(t, wantQueries, queryCalls.Load()-beforeQuery)
+				assert.Equal(t, beforeDenied, deniedTargetCalls.Load())
+				assert.Equal(t, 2, after.PrivateData.PollFailures)
+				assert.Equal(t, candidate.Status, after.Status)
+				assert.Equal(t, candidate.Quota, after.Quota)
+				assert.Equal(t, candidate.FinishTime, after.FinishTime)
+				assert.Equal(t, candidate.FailReason, after.FailReason)
+				assert.Equal(t, []byte(candidate.Data), []byte(after.Data))
+				afterPrivate, err := common.Marshal(after.PrivateData)
+				require.NoError(t, err)
+				assert.JSONEq(t, string(beforePrivate), string(afterPrivate))
+				assert.Zero(t, probe.reserve)
+				assert.Zero(t, probe.settle)
+				assert.Zero(t, probe.refund)
+				core.Destinations = denyTargets
+				redirectQuery.Store(false)
+				model.InitChannelCache()
+				ordinary := taskjsplugin.New(plugin)
+				ordinary.Init(info)
+				beforeQuery = queryCalls.Load()
+				_, err = ordinary.FetchTask(base, "fixture", &candidate, "")
+				require.EqualError(t, err, "request rejected")
+				assert.NotErrorIs(t, err, core.ErrContinuationUnavailable, "ordinary non-frozen destination failures retain their existing classification")
+				assert.Equal(t, beforeQuery, queryCalls.Load())
+				assert.Equal(t, beforeDenied, deniedTargetCalls.Load())
+			})
+		}
 	})
 	previousHooks := core.PluginHooks
 	defer func() { core.PluginHooks = previousHooks }()

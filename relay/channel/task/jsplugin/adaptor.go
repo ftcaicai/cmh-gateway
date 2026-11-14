@@ -1189,7 +1189,7 @@ func (a *TaskAdaptor) checkQueryDestination(req *http.Request, baseURL, proxy, h
 	admission := core.DestinationAdmission{Kind: "task_query", Method: req.Method, AddressSHA256: address,
 		HostSHA256: core.DestinationHost(host), Executor: executor, Hook: hook}
 	if core.Destinations.CheckDestination(req.Context(), admission) != nil {
-		if a.continuationScope != nil {
+		if a.continuation != nil {
 			return core.ErrContinuationUnavailable
 		}
 		return errors.New("request rejected")
