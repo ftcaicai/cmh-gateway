@@ -1,6 +1,6 @@
 # 官方rc51同步验收（2026-11-14）
 
-状态：真实release合并与回归进行中，不把无冲突自动merge称所有验收通过。
+状态：真实release同步已集成，完整Linux PR CI通过；本地Windows与optional全lint失败事实保留，不称所有平台全绿。
 
 ## 版本与范围
 
@@ -27,10 +27,10 @@ GitHub releases/latest实际返回v1.0.0-rc.51（published_at2026-11-13T09:30:24
 - 官方exactBun1.4.4 frozeninstall通过，fulltypecheck通过，Vitest235文件/2887测试通过181.92s（含authredirect20）；实际production Rsbuild2.2.0构建22.7s通过。CMH20/20 tests/types/lint11文件0/0/productionbuild均通过。
 - 官方optional全lint实际exit1：1432文件66warning/148errors，未修未隐藏；代表性失败文件与rc51字节一致，只有原4个R3文件有fork差异，这4文件单独真实CLI lint0/0通过。未独立重跑整个pristine tree lint，不能说全lint已认证纯上游；本次未做新Chrome表单E2E，不能沿用历史浏览器证据当本轮新验证。
 
-后端f698e266与前端e66d8c1b均未改源码，全部自管作业已收/引擎退出，忽略results保留精确日志位置。无生产/旧系统访问或付费调用。远程完整UbuntuPR CI结果须另绑定后再合main/develop，不据本地已定位失败提前称全绿。
+后端f698e266与前端e66d8c1b均未改源码，全部自管作业已收/引擎退出，忽略results保留精确日志位置。无生产/旧系统访问或付费调用。PR #3精确head333348795完整Ubuntu CI43545005397后端4m6s/前端4m55s均success，PR/push差异门禁43545005416/43545001595 success后普通merge0ebd2e0e2，main/develop同步。未用auto/admin或pending检查绕过，分支保护本身仍未认证。CI不包含optional全lint，不能拿CI绿抹掉它或Windows失败。
 
 ## 挂载点验收范围
 
 原49文件H1目录/写前/selected/预扣/长连接/plugin/source/destination/档案/poll/content/report等由原集中host+archive三库用例回归；P0 R3官方回跳桥接既有测试须在更新后生产构建下通过。H3/H7仍未实现，不称资金守恒通过；globalGate/TaskContinuations仍未启用。
 
-旧任务独立执行权限仍需负责人拍板explicitgrant/expiry/restartrevocation/staticfirstslice，RFC不是实际operator许可。同步rc51不等于发布生产，不访问旧系统/不迁数据/不执行付费上游。
+旧任务有限授权合同已获负责人明确批准（显式逐task/expiry/restartrevocation/staticfirstslice），后续直接实现验收，不重复拍板；RFC不是实际operator许可数据或全局安装授权。同步rc51不等于发布生产，不访问旧系统/不迁数据/不执行付费上游。
