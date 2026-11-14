@@ -11,7 +11,7 @@
 - Policy veto：源和真实目标政策拒绝对archived任务仅跳本次，不误计普通PollFailures；真实JS同文案异常仍普通错误，初始/redirect目标网络计数与privatefunding保持用例三库通过。原超时/CAS/refund未改，不是永久挂起保证。
 - affinity有限兼容：当前base与最终effective双精确审批已接线，真实规则cache miss→官方merge→provider wire通过；任一撤销/篡改/未批fresh base拒绝，三库通过。不是affinity-rule来源证明；第41轮补充task有效envelope选中/捕获/真实descriptor提交/双撤销，task body未应用provider operations，不改官方语义或宣称全协议认证，见p2/H1-C-affinity-effective.md。
 - P1隔离纯值原型：tenant/request/source精确绑定、预留/追加/部分消费与释放/冲突重放/边界12例通过；只是合成单资产状态转移，不是真实双式账本、同事务或Redis×BATCH证明。见p1/funding-value-contract.md；未连接任何生产资金路径。
-- 启动policy-only：负责人明确批准，真实main早期DB/worker前安装四项一致策略；非法/partial/grant配置早停，valid deny-all与缺省进入故意DB sentinel，六类实际进程无SQLite文件；archive/grants禁用、无生产激活，预main factory编译例外保留。见p2/H1-C-policy-only-startup.md。第45轮同制品合成成功监听loopback、普通Bearer models200空/chat403策略拒绝/未认证401对照/upstream0，已停止；见p2/H1-C-policy-only-serving.md。
+- 启动policy-only：负责人明确批准，真实main早期DB/worker前安装四项一致策略；非法/partial/grant配置早停，valid deny-all与缺省进入故意DB sentinel，六类实际进程无SQLite文件；archive/grants禁用、无生产激活，预main factory编译例外保留。见p2/H1-C-policy-only-startup.md。第45轮同制品合成成功监听loopback、普通Bearer models200空/chat403策略拒绝/未认证401对照/upstream0，已停止；第46轮同制品精确允许模型真实目录发布1项，同显示偏好deny-all仍0项，两次401对照/上游0；不证明dispatch。见p2/H1-C-policy-only-serving.md。
 - T1.6c：rc51后原始Go符号重检仍24匹配/9文件（15生产/5测试/3定义/1注释），相关9文件rc50→rc51差异空；不是唯一资金出口证明。
 - cmh-param-normalize：当前rc51源码CLI valid、43/43fixtures及实际hostpatch回归通过，工厂已embed注册，request实例仍未启用。
 

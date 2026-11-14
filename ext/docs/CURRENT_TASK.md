@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `dcba0c5f760328ddc9d677701a667ba45a649d7d`：main/develop一致，差异CI43563089410/43563086055 success；rc51完整同步已合入。第44/80轮负责人明确批准policy-only合同：本轮main早期接线/扩展回归/真实六类合成子进程通过，配置存在但无效即启动失败、非空grant拒绝、archive/grants禁用；全部缺省仍noop。没有生产启用、密钥读取或资金接入。默认sora/type1普通chat保守拒绝等限制不变。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
+- 最近已推 `5a639be475e0efb067b6a45e27b2ba2e773508fb`：main/develop一致，差异CI43564854669/43564851253 success；rc51完整同步已合入。第44/80轮负责人明确批准policy-only合同：本轮main早期接线/扩展回归/真实六类合成子进程通过，配置存在但无效即启动失败、非空grant拒绝、archive/grants禁用；全部缺省仍noop。没有生产启用、密钥读取或资金接入。默认sora/type1普通chat保守拒绝等限制不变。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -25,7 +25,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
 3. grant redirectexpiry已于cc5898a62发布，initial1/后继0/Unavailable真实三库通过。本轮继续affinity主线：stored base + final effective各独立精确审批，官方merge一次、key前批准同一map；runtime仅允许ParamOverride差异且其它权威配置一致。真实规则cache miss/provider wire、双撤销/context与RelayInfo篡改/未批fresh base通过三库21.946s及相关tests/vet/fullbuild；独立静态agent复核无阻断。候选首次fixture缺provider身份witness导致三库断言失败，改真实filter重跑通过，未改生产检查。证据 `acceptance/p2/H1-C-affinity-effective.md`。仅有限provider新增positive，非task-affinity全协议/来源证明，不启用全局。
 4. P1已按资金RFC允许范围完成隔离纯值合成原型，12显式用例及独立复核通过，未导入任何生产资金路径；不是同事务/真实账本/Redis×BATCH证明。见 `acceptance/p1/funding-value-contract.md`。资金实施仍需独立批准，不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
-6. 启动RFC `rfc/2026-11-14-startup-policy-installation-boundary.md` 的A policy-only合同已经明确批准并于dcba0c5f7接线；InitEnv/logger后DB/worker前安装，错误早停、含grant拒绝、archive/grants禁用。真实六类子进程与扩展测试通过，预main factory编译例外保留；第45轮同一实际二进制已成功合成Serving：loopback/全新SQLite3.50.4、真实Bearer普通用户，models200空、chat403 access_denied、未认证401对照、upstream0，全部gateway/stub退出；见 `acceptance/p2/H1-C-policy-only-serving.md`。不是三库启动认证/全协议可用或生产授权。
+6. 启动RFC `rfc/2026-11-14-startup-policy-installation-boundary.md` 的A policy-only合同已经明确批准并于dcba0c5f7接线；InitEnv/logger后DB/worker前安装，错误早停、含grant拒绝、archive/grants禁用。真实六类子进程与扩展测试通过，预main factory编译例外保留；第45轮同一实际二进制已成功合成Serving：loopback/全新SQLite3.50.4、真实Bearer普通用户，models200空、chat403 access_denied、未认证401对照、upstream0，全部gateway/stub退出；见 `acceptance/p2/H1-C-policy-only-serving.md`。第46轮复用隔离合成库，同显示偏好下精确允许目录1项/deny-all目录0项，真实Bearer/401对照/上游0，未发chat，全部已退出；见 `acceptance/p2/H1-C-policy-only-serving.md`。不是三库启动认证/全协议可用或生产授权。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
 ## 命令与环境
