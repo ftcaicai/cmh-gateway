@@ -3499,6 +3499,61 @@ func runHostHTTPFinalModel(t *testing.T, noop core.ModelGate) {
 		assert.Equal(t, before+1, calls.Load())
 		assert.Equal(t, wire, received)
 	})
+	t.Run("moderation optional explicit model", func(t *testing.T) {
+		moderationInfo := *info
+		moderationInfo.RelayMode, moderationInfo.RelayFormat, moderationInfo.RequestURLPath = relayconstant.RelayModeModerations, kittypes.RelayFormatOpenAI, "/v1/moderations"
+		moderationTarget := target
+		moderationTarget.AddressSHA256, err = core.DestinationAddress(server.URL + moderationInfo.RequestURLPath)
+		require.NoError(t, err)
+		core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{moderationTarget})
+		require.NoError(t, err)
+		defer func() { core.Models = gate }()
+		for _, tc := range []struct {
+			name, wire    string
+			allowed, noop bool
+		}{
+			{"mapped", `{"model":"approved-target","input":"synthetic"}`, true, false},
+			{"absent raw passthrough", ` {"input":"synthetic","unknown":[1]} `, true, false},
+			{"escaped duplicate", `{"model":"approved-target","mo\u0064el":"approved-target"}`, false, false},
+			{"numeric", `{"model":1}`, false, false},
+			{"empty", `{"model":""}`, false, false},
+			{"noop wrong", `{"model":"unapproved-target"}`, true, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				core.Models = gate
+				if tc.noop {
+					core.Models = noop
+				}
+				before := calls.Load()
+				response, sendErr := adaptor.DoRequest(c, &moderationInfo, strings.NewReader(tc.wire))
+				if !tc.allowed {
+					require.Error(t, sendErr)
+					var denied *kittypes.NewAPIError
+					require.ErrorAs(t, sendErr, &denied)
+					assert.Equal(t, http.StatusForbidden, denied.StatusCode)
+					assert.True(t, kittypes.IsSkipRetryError(denied))
+					assert.Equal(t, before, calls.Load())
+					return
+				}
+				require.NoError(t, sendErr)
+				require.NoError(t, response.(*http.Response).Body.Close())
+				assert.Equal(t, before+1, calls.Load())
+				assert.Equal(t, tc.wire, received)
+			})
+		}
+		core.Models = gate
+		moderationInfo.ParamOverride = map[string]any{"model": "unapproved-target"}
+		wrong, overrideErr := relaycommon.ApplyParamOverrideWithRelayInfo([]byte(`{"model":"approved-target","input":"synthetic"}`), &moderationInfo)
+		require.NoError(t, overrideErr)
+		before := calls.Load()
+		_, sendErr := adaptor.DoRequest(c, &moderationInfo, bytes.NewReader(wrong))
+		require.Error(t, sendErr)
+		var denied *kittypes.NewAPIError
+		require.ErrorAs(t, sendErr, &denied)
+		assert.Equal(t, http.StatusForbidden, denied.StatusCode)
+		assert.True(t, kittypes.IsSkipRetryError(denied))
+		assert.Equal(t, before, calls.Load())
+	})
 	t.Run("alpha actual helper outbound", func(t *testing.T) {
 		var alphaCalls atomic.Int32
 		var alphaWire string

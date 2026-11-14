@@ -401,10 +401,11 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err = signUpstreamRequest(a, c, info, req.Method, req.URL, req.Header); err != nil {
 		return nil, err
 	}
-	modelBodyKnown := false
+	modelBodyKnown, optionalModel := false, false
 	switch info.GetFinalRequestRelayFormat() {
 	case types.RelayFormatOpenAI:
-		modelBodyKnown = info.RelayMode == constant.RelayModeChatCompletions || info.RelayMode == constant.RelayModeCompletions
+		optionalModel = info.RelayMode == constant.RelayModeModerations
+		modelBodyKnown = optionalModel || info.RelayMode == constant.RelayModeChatCompletions || info.RelayMode == constant.RelayModeCompletions
 	case types.RelayFormatEmbedding:
 		modelBodyKnown = info.RelayMode == constant.RelayModeEmbeddings
 	case types.RelayFormatOpenAIResponses:
@@ -442,7 +443,7 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 			}
 			return true
 		})
-		if !root.IsObject() || count != 1 || !matches {
+		if !root.IsObject() || (count != 0 || !optionalModel) && (count != 1 || !matches) {
 			return nil, rejected
 		}
 	}

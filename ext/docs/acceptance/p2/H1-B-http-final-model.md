@@ -19,6 +19,14 @@
 父会话最终全扩展测试全部通过（domestic 8.817s），`go vet -p 2 ./relay/channel ./ext/...` 与diff-check exit 0。
 
 
+## 第68轮：moderation显式模型边界
+
+中央实际NewAPI outbound验证显式mapped正例、缺失model的原始字节保持、转义重复/数字/空串拒绝、实际override错配零新增发送和noop旧行为；未调用完整moderation helper或资金结算。完整Host SQLite13.313s、定向vet/diff-check通过；独立只读复核无阻断。
+
+父会话两次完整集成中relay与全部ext通过（domestic8.470s/8.049s），但channel均在既有TestUpstreamGetBody_HTTP2RetryAfterGracefulGoAway_PassThrough:540失败：`wsarecv: An existing connection was forcibly closed by the remote host.` 同一用例单独运行0.146s通过。该测试直接构建HTTP2 client/send，并未调用本轮DoApiRequest守卫；仍保留完整包exit1，不称全channel绿色，不改或弱化该测试。明确排除此单例的其余channel0.166s、相关vet/rootbuild/diff-check exit0；门禁49/49文件4639/6000行，余1361，named14/40。无数据库行为修改，不称新三库认证。
+
+仅active type60＋Moderations模式＋最终OpenAI格式：最终canonical model缺失保持旧行为，存在则必须唯一、非空字符串并精确等于权威upstream。其他既有必填模型格式仍要求恰好一份。tools正文model并非路由名，已有官方兼容测试允许不同值，本轮不纳入；moderation三处默认值stable/latest/omni不一致仍未解决，缺失model不是供应商默认目标获批的证明。不会注入model、改默认值或泛化multipart。
+
 ## 第67轮：Alpha Search具名最终格式
 
 Alpha Search入口要求非空model，实际helper先映射、后参数override；因此同样可能出现审批upstream与最终正文不一致。仅追加AlphaSearch模式＋OpenAIAlphaSearch最终格式，沿用既有type60/active gate、独立replay及唯一canonical model合同；不套到正文无需model的tools、moderation缺省模型或图片multipart。
