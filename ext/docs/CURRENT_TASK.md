@@ -4,8 +4,9 @@
 
 ## 当前事实
 
-- 当前未发布补丁已补静态resolver owner缺口：共享原始platform映射/优先级，sora无channelTypes和numeric fallback不得投影builtin；真实三库22.005s通过、独立只读复核无阻断、数据库均已停止。累计49官方文件4475行/剩1525，named exception14/40不变。旧pinned及legacy正向执行仍未解决，不启用生产。
+- 静态resolver owner修复已发布 `2c880f9e6e765b04cf2a62393d3ae0ea27cfd9e3`，main/develop一致，门禁43586768786/43586763330 success：共享原始platform映射/优先级，sora无channelTypes和numeric fallback不得投影builtin。真实三库22.005s及集成相关全tests/vet/fullbuild通过，数据库均已停止。累计49官方文件4475行/剩1525，named exception14/40不变。第60轮只读核查未发现旧pinned legacy owner消失场景的执行旁路：真实非空task witness在current owner查询前即unknown，Setup与预扣前仍拒绝非type61；普通无task路径不应blanket deny。不为此增加重复生产守卫，不代表legacy正向执行支持。
 - 最近已推 `0851f7369adc17dbc0adaa5d7d6d8a6a31f26822`，main/develop一致，门禁43585172419/43585168004 success。第56轮实际loader同路径合法替换回归：旧SHA拒绝、新SHA采用新审批、旧返回快照独立，定向/extension全tests及vet通过（domestic8.245s），独立只读复核无阻断；测试提交5f596065a。第57轮该源码实际根二进制ldflags注入验收：build-only正确文件到故意DB失败点、冲突env SHA与追加LF文件均在DB前固定拒绝，三个子进程退出、无SQLite/监听/上游；证据 `acceptance/p2/H1-C-policy-only-startup.md`。不代表热更新、全局撤销、来源签名或生产启用。H4/H6负责人明确选择“均保持设计，不批准实施”；不创建对应规则PR、不扩大预算、不试做接线、不重复申请同一授权。资金负责人亦明确选择“继续设计，不批准实施”：不扩官方区、不创建实施rules PR、不试做资金代码；不重复申请同一授权。有限资金方向及经济/恢复/memory-only设计批准保留。只读候选18必需＋6条件＝3既有＋15新增必需，组合64；全条件最多69官方路径，测试拟集中扩展区，这不是获批范围或行数预测。生产模型可靠计费上界尚未证明、资格为空；后续仅收敛接口/状态转换/故障验证规格，见 `acceptance/p1/funding-engineering-proof-gaps.md`。rc51同步、policy-only合成Serving与目录对照已验；整体P1/P2未完成。
+- 第60轮request-plan只读调查未发现可直接删除的冗余拒绝：单体source/config/stage审批不等于基础executor与完整有序计划的组合授权；非nil plan可在后续channel/group阶段进入scope，有限billing字段守卫也不是opaque body身份证明。暂不改生产守卫。空执行计划兼容需冻结私有plan、覆盖全部阶段和最终group/channel、重试重新验证，并解决publication/runtime区别；尚未设计批准，不借此启用normalize实例。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -35,7 +36,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - 第54轮 `go test -p 2 ./ext/... -count=1` 与 `go vet -p 2 ./ext/...` exit0（domestic8.338s）；仅既有实现回归，不是资金/H4/H6验收。第55轮再次查询上游latest仍为v1.0.0-rc.51（2026-11-13发布）；未伪造新升级演练。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前49官方文件/4404行，只有命名middleware/task_plugin.go第49例外（该file14/40行）才生效49上限，累计6000不变；剩0新文件/1596行，不含任意第50文件。既有范围登记/80%复核和独立review保留。分支保护未认证。
+- 门禁目前49官方文件/4475行，只有命名middleware/task_plugin.go第49例外（该file14/40行）才生效49上限，累计6000不变；剩0新文件/1525行，不含任意第50文件。既有范围登记/80%复核和独立review保留。分支保护未认证。
 
 ## 临时资源与作业
 
