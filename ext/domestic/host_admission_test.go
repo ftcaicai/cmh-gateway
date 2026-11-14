@@ -534,6 +534,15 @@ export function convertStreamEvent(ctx,event){if(ctx.state.stream)return {events
 	}
 }
 
+type frozenPollHookVeto struct{ export string }
+
+func (gate frozenPollHookVeto) CheckHook(_ context.Context, identity core.PluginHookIdentity) error {
+	if gate.export == "" || identity.Export == gate.export {
+		return errors.New("fixture source approval revoked")
+	}
+	return nil
+}
+
 type failingContinuationStore struct{ core.ContinuationStore }
 
 func (f *failingContinuationStore) Save(context.Context, core.ContinuationBinding, core.ContinuationArtifact) (core.ContinuationRef, error) {
@@ -575,7 +584,7 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 	registry := jsplugin.NewRegistry()
 	jsplugin.DefaultRegistry = registry
 	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
-	var lookups, submissions, mediaCalls atomic.Int32
+	var lookups, submissions, mediaCalls, queryCalls atomic.Int32
 	var mediaRevision, mediaTier, mediaAuthorization string
 	var signedTier string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -586,6 +595,7 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 			return
 		}
 		if r.URL.Path == "/query" {
+			queryCalls.Add(1)
 			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
 			return
 		}
@@ -611,7 +621,8 @@ export function buildSubmitRequest(ctx){utils.fetch({url:ctx.baseUrl+"/lookup"})
 export function parseSubmitResponse(){return {taskId:"local-task"};}
 export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
 export function signRequest(ctx){if(ctx.config.tier!=="approved")throw new Error("wrong signer config");return {headers:{"X-Tier":ctx.config.tier}};}
-export function parseTaskResult(){return {status:"IN_PROGRESS"};}
+export function parseTaskResult(ctx){if(ctx.state&&ctx.state.ordinaryFailure)throw new Error("plugin execution rejected");return {status:"IN_PROGRESS"};}
+export function extractUsageOnComplete(){return {};}
 export function listArtifacts(){return [{key:"video-main",type:"video"}];}
 export function buildContentRequest(ctx){return {url:ctx.baseUrl+"/media",method:"GET",headers:{"X-Revision":"A","Authorization":"Bearer "+ctx.apiKey}};}`
 	plugin, err := registry.RegisterFactory(source, jsplugin.Options{})
@@ -799,6 +810,60 @@ export function buildContentRequest(ctx){return {url:ctx.baseUrl+"/media",method
 	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), polled.Status)
 	assert.Equal(t, 13, polled.Quota)
 	assert.Zero(t, currentFactoryCalls, "archived task must never select current platform factory")
+	previousHooks := core.PluginHooks
+	defer func() { core.PluginHooks = previousHooks }()
+	for _, scenario := range []struct {
+		name         string
+		hooks        core.PluginHookGate
+		state        common.RawMessage
+		wantQueries  int32
+		wantFailures int
+	}{
+		{name: "frozen_query_source_veto", hooks: frozenPollHookVeto{}, wantFailures: 2},
+		{name: "frozen_parse_source_veto", hooks: frozenPollHookVeto{export: "parseTaskResult"}, wantQueries: 1, wantFailures: 2},
+		{name: "frozen_sign_source_veto", hooks: frozenPollHookVeto{export: "signRequest"}, wantFailures: 2},
+		{name: "frozen_usage_source_veto", hooks: frozenPollHookVeto{export: "extractUsageOnComplete"}, wantQueries: 1, wantFailures: 2},
+		{name: "frozen_javascript_same_text_throw_is_ordinary", hooks: previousHooks, state: common.RawMessage(`{"ordinaryFailure":true}`), wantQueries: 1, wantFailures: 3},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			candidate := polled
+			candidate.Status = model.TaskStatusInProgress
+			candidate.PrivateData.PollFailures = 2
+			candidate.PrivateData.PluginState = scenario.state
+			candidate.PrivateData.BillingSource = "wallet"
+			candidate.PrivateData.SubscriptionId = 917
+			candidate.PrivateData.TokenId = 918
+			candidate.PrivateData.NodeName = "frozen-poll-fixture"
+			require.NoError(t, model.DB.Save(&candidate).Error)
+			beforePrivate, err := common.Marshal(candidate.PrivateData)
+			require.NoError(t, err)
+			beforeQuery := queryCalls.Load()
+			beforeData := append([]byte(nil), candidate.Data...)
+			core.PluginHooks = scenario.hooks
+			service.DispatchPlatformUpdate(t.Context(), candidate.Platform, map[int][]string{stored.Id: {candidate.GetUpstreamTaskID()}}, map[string]*model.Task{candidate.GetUpstreamTaskID(): &candidate})
+			var after model.Task
+			require.NoError(t, model.DB.First(&after, candidate.ID).Error)
+			assert.Equal(t, scenario.wantQueries, queryCalls.Load()-beforeQuery)
+			assert.Equal(t, scenario.wantFailures, after.PrivateData.PollFailures)
+			assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), after.Status)
+			assert.Equal(t, candidate.Quota, after.Quota)
+			assert.Equal(t, candidate.FinishTime, after.FinishTime)
+			assert.Equal(t, candidate.FailReason, after.FailReason)
+			assert.Equal(t, beforeData, []byte(after.Data))
+			// Compare the complete private funding/provenance snapshot while
+			// allowing only the ordinary-error control's failure-count change.
+			after.PrivateData.PollFailures = 2
+			afterPrivate, err := common.Marshal(after.PrivateData)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(beforePrivate), string(afterPrivate))
+			assert.Zero(t, probe.reserve)
+			assert.Zero(t, probe.settle)
+			assert.Zero(t, probe.refund)
+			assert.Zero(t, currentFactoryCalls)
+		})
+	}
+	core.PluginHooks = previousHooks
+	require.NoError(t, model.DB.Save(&polled).Error)
 	beforeFailure := polled.PrivateData.PollFailures
 	core.TaskContinuations = nil
 	service.DispatchPlatformUpdate(t.Context(), polled.Platform, map[int][]string{stored.Id: {polled.GetUpstreamTaskID()}}, map[string]*model.Task{polled.GetUpstreamTaskID(): &polled})
@@ -847,6 +912,30 @@ export function parseBatchResult(ctx,body){return ctx.tasks.map(t=>({taskId:t.ta
 	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), batchPolled.Status)
 	assert.Zero(t, batchPolled.PrivateData.PollFailures)
 	assert.Equal(t, 13, batchPolled.Quota)
+	for _, export := range []string{"buildBatchQueryRequest", "parseBatchResult", "signRequest", "extractUsageOnComplete"} {
+		t.Run("frozen_batch_veto_"+export, func(t *testing.T) {
+			candidate := batchPolled
+			candidate.PrivateData.PollFailures = 2
+			require.NoError(t, model.DB.Save(&candidate).Error)
+			before := queryCalls.Load()
+			core.PluginHooks = frozenPollHookVeto{export: export}
+			service.DispatchPlatformUpdate(t.Context(), candidate.Platform, map[int][]string{stored.Id: {candidate.GetUpstreamTaskID()}}, map[string]*model.Task{candidate.GetUpstreamTaskID(): &candidate})
+			var after model.Task
+			require.NoError(t, model.DB.First(&after, candidate.ID).Error)
+			assert.Equal(t, 2, after.PrivateData.PollFailures)
+			assert.Equal(t, candidate.Status, after.Status)
+			assert.Equal(t, candidate.Quota, after.Quota)
+			want := int32(1)
+			if export == "buildBatchQueryRequest" || export == "signRequest" {
+				want = 0
+			}
+			assert.Equal(t, want, queryCalls.Load()-before)
+			assert.Zero(t, probe.refund)
+			assert.Zero(t, probe.settle)
+		})
+	}
+	core.PluginHooks = previousHooks
+	require.NoError(t, model.DB.Save(&batchPolled).Error)
 	var wrongTargetCalls atomic.Int32
 	wrongTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wrongTargetCalls.Add(1)

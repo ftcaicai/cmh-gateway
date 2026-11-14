@@ -1,6 +1,13 @@
 package core
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrPluginAdmissionDenied identifies a host source-policy veto, not a plugin
+// exception. Its fixed text never exposes the policy's configuration or reason.
+var ErrPluginAdmissionDenied = errors.New("plugin execution rejected")
 
 // PluginHookIdentity identifies only the exact compiled source and hook path.
 // It carries no arguments, bodies, configuration, channel keys or credentials.

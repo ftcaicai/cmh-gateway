@@ -452,7 +452,7 @@ func (e *Engine) call(ctx context.Context, opts callOptions, exportName string, 
 		}
 		identity := core.PluginHookIdentity{SourceSHA256: e.sourceSHA256, Export: exportName, Members: slices.Clone(members)}
 		if core.PluginHooks.CheckHook(ctx, identity) != nil {
-			return nil, nil, errors.New("plugin execution rejected")
+			return nil, nil, core.ErrPluginAdmissionDenied
 		}
 	}
 	if err := e.acquireCallSlot(ctx, opts.admissionTimeout); err != nil {

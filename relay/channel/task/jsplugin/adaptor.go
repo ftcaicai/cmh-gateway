@@ -1168,7 +1168,7 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor r
 		return nil, err
 	}
 	if err := a.signTaskRequest(context.Background(), a.channelType(), baseURL, key, credential, method, req.URL, req.Header, bodySHA256(body)); err != nil {
-		return nil, err
+		return nil, a.continuationHookError(err)
 	}
 	if err := a.checkQueryDestination(req, baseURL, proxy, hook); err != nil {
 		return nil, err
@@ -1270,6 +1270,15 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor r
 	return resp, nil
 }
 
+// continuationHookError keeps host policy vetoes out of a frozen task's ordinary
+// poll-failure accounting. Actual plugin and transport errors retain their contract.
+func (a *TaskAdaptor) continuationHookError(err error) error {
+	if a.continuation != nil && errors.Is(err, core.ErrPluginAdmissionDenied) {
+		return core.ErrContinuationUnavailable
+	}
+	return err
+}
+
 func (a *TaskAdaptor) ParseBatchResult(tasks []*model.Task, resp *http.Response, body []byte) (map[string]*service.BatchTaskResult, error) {
 	if a.continuationTask != nil && len(tasks) == 0 {
 		return nil, core.ErrContinuationUnavailable
@@ -1318,7 +1327,7 @@ func (a *TaskAdaptor) ParseBatchResult(tasks []*model.Task, resp *http.Response,
 			reason = "invalid_result"
 		}
 		logger.LogDebug(context.Background(), "task_plugin subsystem=adaptor event=parse_batch_failed plugin=%q reason=%s body_bytes=%d elapsed_ms=%d", a.plugin.Meta.Key, reason, len(body), time.Since(started).Milliseconds())
-		return nil, err
+		return nil, a.continuationHookError(err)
 	}
 	results := make(map[string]*service.BatchTaskResult, len(parsed))
 	hasCompletionUsage := a.hasHook(context.Background(), "extractUsageOnComplete")
@@ -1348,6 +1357,9 @@ func (a *TaskAdaptor) ParseBatchResult(tasks []*model.Task, resp *http.Response,
 				}
 			}
 			facts, hookErr := a.plugin.Engine.Call(context.Background(), "extractUsageOnComplete", itemCtx, jsonValue(&info), usageBody)
+			if errors.Is(a.continuationHookError(hookErr), core.ErrContinuationUnavailable) {
+				return nil, core.ErrContinuationUnavailable
+			}
 			if hookErr == nil {
 				upstreamModel, _ := itemCtx["upstreamModel"].(string)
 				originModel, _ := itemCtx["model"].(string)
@@ -1389,7 +1401,7 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, bod
 	value, err := a.plugin.Engine.Call(pluginruntime.WithFetcher(context.Background(), a.hookFetcher(baseURL, proxy)), "parseTaskResult", ctx, input, hookHTTPResponse(resp))
 	if err != nil {
 		logger.LogDebug(context.Background(), "task_plugin subsystem=adaptor event=parse_task_failed plugin=%q reason=hook_failed body_bytes=%d elapsed_ms=%d", a.plugin.Meta.Key, len(body), time.Since(started).Milliseconds())
-		return nil, err
+		return nil, a.continuationHookError(err)
 	}
 	var parsed taskResult
 	if err = convert(value, &parsed); err != nil {
@@ -1418,6 +1430,9 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, bod
 	// units here so the host settlement path can consume them from TaskInfo.
 	if a.hasHook(context.Background(), "extractUsageOnComplete") {
 		facts, hookErr := a.plugin.Engine.Call(context.Background(), "extractUsageOnComplete", ctx, jsonValue(result), input)
+		if errors.Is(a.continuationHookError(hookErr), core.ErrContinuationUnavailable) {
+			return nil, core.ErrContinuationUnavailable
+		}
 		if hookErr == nil {
 			upstreamModel, _ := ctx["upstreamModel"].(string)
 			originModel, _ := ctx["model"].(string)
@@ -1972,11 +1987,11 @@ func (a *TaskAdaptor) requestDescriptor(ctx context.Context, hook string, args .
 	if !a.plugin.Meta.PreservesJSONOrder() {
 		var descriptor requestDescriptor
 		err := a.plugin.Engine.CallInto(ctx, &descriptor, hook, args...)
-		return descriptor, err
+		return descriptor, a.continuationHookError(err)
 	}
 	var ordered orderedRequestDescriptor
 	if err := a.plugin.Engine.CallJSONInto(ctx, &ordered, hook, args...); err != nil {
-		return requestDescriptor{}, err
+		return requestDescriptor{}, a.continuationHookError(err)
 	}
 	descriptor := requestDescriptor{
 		ResponseType: ordered.ResponseType, URL: ordered.URL, Method: ordered.Method, Headers: ordered.Headers,
