@@ -597,8 +597,8 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 	registry := jsplugin.NewRegistry()
 	jsplugin.DefaultRegistry = registry
 	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
-	var lookups, submissions, mediaCalls, queryCalls, deniedTargetCalls atomic.Int32
-	var redirectQuery atomic.Bool
+	var lookups, submissions, mediaCalls, queryCalls, deniedTargetCalls, grantRedirectCalls atomic.Int32
+	var redirectQuery, grantRedirectQuery atomic.Bool
 	var mediaRevision, mediaTier, mediaAuthorization string
 	var signedTier string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -610,10 +610,19 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 		}
 		if r.URL.Path == "/query" {
 			queryCalls.Add(1)
+			if grantRedirectQuery.Load() {
+				http.Redirect(w, r, "/grant-redirect", http.StatusSeeOther)
+				return
+			}
 			if redirectQuery.Load() {
 				http.Redirect(w, r, "/query-denied", http.StatusSeeOther)
 				return
 			}
+			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
+			return
+		}
+		if r.URL.Path == "/grant-redirect" {
+			grantRedirectCalls.Add(1)
 			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
 			return
 		}
@@ -962,6 +971,111 @@ export function buildContentRequest(ctx){return {url:ctx.baseUrl+"/media",method
 		_, err = relay.GetTaskAdaptorForTask(t.Context(), &oauthTask, core.ContinuationPoll)
 		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
 		assert.Equal(t, before, queryCalls.Load(), "oauth mode is rejected at scope binding, before token acquisition")
+		t.Run("expiry_after_shared_redirect_policy", func(t *testing.T) {
+			oldFetchSetting := *system_setting.GetFetchSetting()
+			localFetchSetting := oldFetchSetting
+			localFetchSetting.AllowPrivateIp = true
+			localFetchSetting.AllowedPorts = []string{baseURL.Port()}
+			*system_setting.GetFetchSetting() = localFetchSetting
+			defer func() { *system_setting.GetFetchSetting() = oldFetchSetting }()
+			oldRedirectGrants, oldRedirectTargets := core.ContinuationGrants, core.Destinations
+			client, err := service.GetHttpClientWithProxySettings("", info.ChannelSetting)
+			require.NoError(t, err)
+			originalRedirect, originalTimeout := client.CheckRedirect, client.Timeout
+			client.Timeout = 10 * time.Second
+			release, callbackEntered := make(chan struct{}), make(chan error, 1)
+			fetchDone := make(chan error, 1)
+			fetchContext, cancelFetch := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancelFetch()
+			fetchStarted, fetchCollected := false, false
+			var releaseOnce sync.Once
+			var validAtCallback atomic.Bool
+			var callbackCalls atomic.Int32
+			defer func() {
+				releaseOnce.Do(func() { close(release) })
+				if fetchStarted && !fetchCollected {
+					<-fetchDone
+				}
+				client.CheckRedirect, client.Timeout = originalRedirect, originalTimeout
+				grantRedirectQuery.Store(false)
+				core.ContinuationGrants, core.Destinations = oldRedirectGrants, oldRedirectTargets
+			}()
+			redirectAddress, err := core.DestinationAddress(base + "/grant-redirect")
+			require.NoError(t, err)
+			redirectTarget := queryTarget
+			redirectTarget.AddressSHA256 = redirectAddress
+			bothTargets, err := NewDestinationPolicy([]core.DestinationAdmission{queryTarget, redirectTarget})
+			require.NoError(t, err)
+			require.NoError(t, bothTargets.CheckDestination(t.Context(), queryTarget))
+			require.NoError(t, bothTargets.CheckDestination(t.Context(), redirectTarget))
+			core.Destinations = bothTargets
+			redirectGrant := grant
+			redirectGrant.ExpiresAt = time.Now().Unix() + 3
+			redirectGrants, err := NewContinuationAuthorizer([]core.ContinuationGrant{redirectGrant})
+			require.NoError(t, err)
+			core.ContinuationGrants = redirectGrants
+			redirectAdaptor, err := relay.GetTaskAdaptorForTask(t.Context(), &candidate, core.ContinuationPoll)
+			require.NoError(t, err)
+			client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+				if next.URL.String() != base+"/grant-redirect" {
+					if originalRedirect != nil {
+						return originalRedirect(next, via)
+					}
+					return nil
+				}
+				callbackCalls.Add(1)
+				if originalRedirect != nil {
+					if err := originalRedirect(next, via); err != nil {
+						callbackEntered <- err
+						return err
+					}
+				}
+				validAtCallback.Store(time.Now().Unix() < redirectGrant.ExpiresAt)
+				callbackEntered <- nil
+				select {
+				case <-release:
+					return nil
+				case <-fetchContext.Done():
+					return fetchContext.Err()
+				}
+			}
+			beforeInitial, beforeHop := queryCalls.Load(), grantRedirectCalls.Load()
+			grantRedirectQuery.Store(true)
+			fetchStarted = true
+			go func() {
+				response, err := redirectAdaptor.FetchTask(base, "fixture", &candidate, "")
+				if response != nil {
+					_ = response.Body.Close()
+				}
+				fetchDone <- err
+			}()
+			select {
+			case err := <-callbackEntered:
+				require.NoError(t, err)
+			case <-fetchContext.Done():
+				t.Fatal(fetchContext.Err())
+			}
+			require.True(t, validAtCallback.Load(), "the scope and exact redirect target must pass before the shared callback starts waiting")
+			redirectDeadline := time.NewTimer(time.Until(time.Unix(redirectGrant.ExpiresAt, 0)))
+			defer redirectDeadline.Stop()
+			select {
+			case <-redirectDeadline.C:
+			case <-fetchContext.Done():
+				t.Fatal(fetchContext.Err())
+			}
+			releaseOnce.Do(func() { close(release) })
+			select {
+			case err := <-fetchDone:
+				fetchCollected = true
+				require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+			case <-fetchContext.Done():
+				t.Fatal(fetchContext.Err())
+			}
+			assert.Equal(t, int32(1), callbackCalls.Load())
+			assert.Equal(t, int32(1), queryCalls.Load()-beforeInitial)
+			assert.Equal(t, beforeHop, grantRedirectCalls.Load(), "an approved redirect target must not receive a new request after the shared callback crosses grant expiry")
+		})
+		before = queryCalls.Load()
 		queuedSource := `export const meta={apiVersion:1,key:"cmh-grant-queue",name:"Queue",version:"1.0.0",author:{name:"Test"},models:["public-task"],fetchMode:"per_task"};export function buildSubmitRequest(){return {url:"https://fixture.invalid"};}export function parseSubmitResponse(){return {taskId:"id"};}export function buildQueryRequest(){console.log("slot-held");return {};}export function parseTaskResult(){return {status:"IN_PROGRESS"};}`
 		held, release := make(chan struct{}), make(chan struct{})
 		var releaseOnce sync.Once

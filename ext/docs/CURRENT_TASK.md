@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `827fc8ad0`：main/develop一致，差异CI43548501653/43548497869 success；rc51完整同步已合入。本轮所有archived目标Policy veto分类2行修复待提交，真实初次/redirect三库通过。所有Gate仍noop，TaskContinuations/ContinuationGrants默认nil。
+- 最近已推 `af96568fd`：main/develop一致，差异CI43549617379/43549613316 success；rc51完整同步已合入。本轮仅补授权redirect等待跨expiry测试与整体退出条件账本，最终三库通过待提交；不改生产源码。所有Gate仍noop，TaskContinuations/ContinuationGrants默认nil。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -23,7 +23,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 
 1. `cmh-param-normalize`官方CLI lint与43/43 golden、真实CallTransform+patch通过。它会随官方整目录embed自动工厂注册，但未创建启用的请求实例；旧“不注册”描述已纠正。
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
-3. 本轮archived destinationveto：checkQueryDestination实际Policy拒绝分支a.continuation!=nil即Unavailable（原scopeonly），初次+redirect共用，不泛化SSRF/URL/网络错误、不授予目标。真实noGrant archive directFetch+Dispatch initial0query、303redirect1initial/0next，PollFailures2/status/Quota/data/完整privatefunding不变；普通New.Init freshcache directdeny EqualError request rejected且非Unavailable。首次普通对照因故意陈旧cache signer抢先失败，补fixtureInitCache与明确denyControl后未放宽冻结redirect断言。最终真三库12.215s、相关全套/vet/build过，独立review无本限定阻断。证据 `acceptance/p2/H1-C-continuation-destination-veto.md`。全GateStore未装，原timeout不改。
+3. 本轮仅测试补齐grant redirectexpiry：取得actualcachedclient，bothTargets精确批准且独立正控，originalSSRfcallback先过后barrier显式3秒expiry，actualcallback1/initialquery1/后继0/Unavailable；owncontext与实际HTTPTimeout10s并join后restore，逐项清理副作用。最终真三库26.865s与相关tests/vet/fullbuild过，独立review fixture等待/handler/清理问题闭环；无生产源码改动。证据 `acceptance/p2/H1-C-grant-redirect-expiry.md`。T1.6c rc51重检仍24/9；整体账本明确资金同事务/剩余兼容/startup运维等未完成，全GateStore仍未装。
 4. P1先验证FundingSource工厂+tx-aware契约可行性；不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 

@@ -118,7 +118,10 @@ raw SQL 证据：`*.sql` 的 `(?i)\busers\b|\bquota\b` 返回 **3 行**，均在
 | payment/admin | [syncCreditUserQuotaCache:171–180](<D:/work2/cmh-gateway/model/user_cache.go#L171-L180>) 和 [AdjustUserQuota:77–83](<D:/work2/cmh-gateway/model/user_quota_adjustment.go#L77-L83>) 在 tx 后同步增量；签到异步、推广转入未见同步 | 三方法覆盖不到这些分歧；“同步缓存”也不是 SQL 同事务 |
 | token/任务标记 | [token.go:382–438](<D:/work2/cmh-gateway/model/token.go#L382-L438>) 独立 cache/批量；[task_billing.go:274–305](<D:/work2/cmh-gateway/service/task_billing.go#L274-L305>) 资金成功后再 token/清 quota | 用户钱包、API token 限额、任务终态/退款标记无共同提交证据；不能入口 handled-return 跳过其语义 |
 
-## 6. 验收边界
+## 6. rc51同步后的复核（2026-11-14）
+
+在当前af96568fd /官方基线rc51重新用grep工具同正则全仓Go检索，仍为24匹配/9文件，具体行号与本清单一致（Increase13/Decrease10/Delta1；定义3/注释1/测试5/生产15）。另执行 `git diff v1.0.0-rc.50 v1.0.0-rc.51 --` 上述9个文件，输出为空，说明这组调用未随本次官方升级变更。本次只核对原始源码与版本差异，不新增金融hook或声称BATCH/Redis守恒已验。
+## 7. 验收边界（原快照）
 
 - 完成的是本快照 **三个明确 Go 符号的全部成功 grep 匹配分类**及相关 wrappers/用户余额写入补查；15 个生产调用逐点列出，5 个测试调用分组保留准确行号。不是 AST/运行时可达性证明，不声称覆盖仓库外、运行时 SQL、忽略/二进制/生成文件或全部资金实体。
 - 不据三方法清单推导唯一共同资金出口；预扣原语、追加预留、直接结算、Realtime、违规费、MJ、后台任务、授信/管理员/迁移均有不同边界。H3/H7 当前仍为保留设计编号，**本次没有新增财务 hooks**，同事务选择未更改。
