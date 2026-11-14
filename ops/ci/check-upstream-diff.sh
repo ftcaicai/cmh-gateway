@@ -64,6 +64,8 @@ done <<<"$changed"
 # Registration remains exact-file based; this is not a directory-wide waiver.
 # Scope: ext/docs/rfc/2026-11-13-admission-hook-budget.md (not funding H3/H7).
 max_files=48
+exception_file='middleware/task_plugin.go'
+exception_max_lines=40
 max_lines=6000
 allowed_changed=$(grep -xF -f <(printf '%s\n' "$whitelist") <<<"$changed" || true)
 files_count=$(sed '/^[[:space:]]*$/d' <<<"$allowed_changed" | wc -l | tr -d ' ')
@@ -74,12 +76,30 @@ if [[ -n "$allowed_changed" ]]; then
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
     if git cat-file -e "${baseline}:${f}" 2>/dev/null || git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
-      n=$(git diff --numstat "$baseline" -- "$f" | awk '{a+=$1; d+=$2} END {print a+d+0}')
+      stats=$(git diff --numstat "$baseline" -- "$f")
+      if awk '{if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/) exit 1}' <<<"$stats"; then
+        n=$(awk '{a+=$1; d+=$2} END {print a+d+0}' <<<"$stats")
+      else
+        echo "::error::unmeasurable official diff: $f"
+        exit 1
+      fi
     else
       n=$(wc -l <"$f" | tr -d ' ')
     fi
     lines_count=$((lines_count + n))
   done <<<"$allowed_changed"
+fi
+
+exception_lines=0
+if grep -qxF "$exception_file" <<<"$allowed_changed"; then
+  if git cat-file -e "${baseline}:${exception_file}" 2>/dev/null; then
+    max_files=49
+    exception_lines=$(git diff --numstat "$baseline" -- "$exception_file" | awk '{a+=$1; d+=$2} END {print a+d+0}')
+  else
+    exception_lines=$(wc -l <"$exception_file" | tr -d ' ')
+    echo "::error::shared endpoint exception requires the existing baseline file"
+    exit 1
+  fi
 fi
 
 # ---- dependency direction (ext/AGENTS.md §2.2) -----------------------------
@@ -102,6 +122,10 @@ if (( ${#violations[@]} > 0 )); then
 fi
 if (( files_count > max_files )); then
   echo "::error::hook file budget exceeded: $files_count > $max_files"
+  status=1
+fi
+if (( exception_lines > exception_max_lines )); then
+  echo "::error::shared endpoint exception line budget exceeded: $exception_lines > $exception_max_lines"
   status=1
 fi
 if (( lines_count > max_lines )); then

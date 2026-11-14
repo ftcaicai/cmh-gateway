@@ -15,7 +15,9 @@ cp "$source_root/ops/ci/check-upstream-diff.sh" "$fixture/ops/ci/check-upstream-
 cd "$fixture"
 git init -q
 printf 'package main\n' > main.go
-git add main.go
+mkdir -p middleware
+printf '' > middleware/task_plugin.go
+git add main.go middleware/task_plugin.go
 git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm baseline
 git tag v1.0.0
 printf '## 白名单\n\n```\n' > ext/docs/HOOKS.md
@@ -28,7 +30,7 @@ printf '```\n' >> ext/docs/HOOKS.md
 # Capture via an absolute ignored directory, rather than adding a whitelist waiver.
 check() {
   local expected=$1 marker=$2 status=0
-  bash ops/ci/check-upstream-diff.sh v1.0.0 > ops/result.txt 2>&1 || status=$?
+  bash ops/ci/check-upstream-diff.sh "${3:-v1.0.0}" > ops/result.txt 2>&1 || status=$?
   if [[ "$status" != "$expected" ]] || ! grep -qF "$marker" ops/result.txt; then
     printf 'gate fixture failed: expected exit %s and marker %s, actual exit %s\n' "$expected" "$marker" "$status" >&2
     exit 1
@@ -39,10 +41,27 @@ for ((i=1; i<=48; i++)); do printf '// fixture\n' > "official-$i.go"; done
 check 0 '48 / 48'
 printf '// fixture\n' > official-49.go
 check 1 'hook file budget exceeded: 49 > 48'
+printf '// exception\n' > middleware/task_plugin.go
+check 1 'NOT registered'
+printf '' > middleware/task_plugin.go
+printf 'middleware/task_plugin.go\n' >> ext/docs/HOOKS.md
+# Add the named entry inside the existing whitelist block, not after it.
+sed -i '/^middleware\/task_plugin.go$/d; /^official-49.go$/a middleware/task_plugin.go' ext/docs/HOOKS.md
+printf '// exception\n' > middleware/task_plugin.go
+check 1 'hook file budget exceeded: 50 > 49'
 printf '' > official-49.go
+check 1 'hook file budget exceeded: 50 > 49'
 # Empty new files still count. Delete only the verified fixture-owned file.
 [[ "$PWD/official-49.go" == "$fixture/official-49.go" ]]
 rm -- official-49.go
+check 0 '49 / 49'
+for ((i=1; i<=40; i++)); do printf '// exception\n'; done > middleware/task_plugin.go
+check 0 '49 / 49'
+printf '// excess\n' >> middleware/task_plugin.go
+check 1 'shared endpoint exception line budget exceeded: 41 > 40'
+printf '\0binary\n' > middleware/task_plugin.go
+check 1 'unmeasurable official diff'
+printf '' > middleware/task_plugin.go
 for ((i=2; i<=48; i++)); do
   [[ "$PWD/official-$i.go" == "$fixture/official-$i.go" ]]
   rm -- "official-$i.go"
@@ -53,4 +72,12 @@ printf '// excess\n' >> official-1.go
 check 1 'hook line budget exceeded: 6001 > 6000'
 printf '// forbidden\n' > unregistered.go
 check 1 'NOT registered'
-printf 'PASS: empty,48/49 files,6000/6001 lines,and exact whitelist rejection\n'
+# A different baseline without the existing named file must not gain its exception.
+[[ "$PWD/middleware/task_plugin.go" == "$fixture/middleware/task_plugin.go" ]]
+git rm -q middleware/task_plugin.go
+git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm no-named-baseline
+git tag no-named-baseline
+mkdir -p middleware
+printf '// untracked exception\n' > middleware/task_plugin.go
+check 1 'requires the existing baseline file' no-named-baseline
+printf 'PASS: unnamed49 rejects,named49/50 boundary,exception40/41,6000/6001,and exact whitelist rejection\n'
