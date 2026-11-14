@@ -3,6 +3,7 @@ package domestic
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -534,6 +536,17 @@ export function convertStreamEvent(ctx,event){if(ctx.state.stream)return {events
 	}
 }
 
+type grantAdmissionBarrierContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (ctx *grantAdmissionBarrierContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.waiting) })
+	return ctx.Context.Done()
+}
+
 type frozenPollHookVeto struct{ export string }
 
 func (gate frozenPollHookVeto) CheckHook(_ context.Context, identity core.PluginHookIdentity) error {
@@ -619,7 +632,7 @@ func runHostTaskDriverAdmission(t *testing.T, previousGate *Gate, noop core.Mode
 	const source = `export const meta={apiVersion:1,key:"cmh-task-admission",name:"Task admission",version:"1.0.0",author:{name:"Test"},models:["public-task"],fetchMode:"per_task",channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"approved"}}}};
 export function buildSubmitRequest(ctx){utils.fetch({url:ctx.baseUrl+"/lookup"});if(ctx.config.tier!=="approved")throw new Error("wrong actual config");return {url:ctx.baseUrl+"/submit",method:"POST",rewriteModel:ctx.requestBody.rewrite||ctx.upstreamModel,body:{model:ctx.upstreamModel}};}
 export function parseSubmitResponse(){return {taskId:"local-task"};}
-export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
+export function buildQueryRequest(ctx){if(ctx.state&&ctx.state.fetchAttempt)utils.fetch({url:ctx.baseUrl+"/lookup"});return {url:ctx.baseUrl+"/query"};}
 export function signRequest(ctx){if(ctx.config.tier!=="approved")throw new Error("wrong signer config");return {headers:{"X-Tier":ctx.config.tier}};}
 export function parseTaskResult(ctx){if(ctx.state&&ctx.state.ordinaryFailure)throw new Error("plugin execution rejected");return {status:"IN_PROGRESS"};}
 export function extractUsageOnComplete(){return {};}
@@ -810,6 +823,185 @@ export function buildContentRequest(ctx){return {url:ctx.baseUrl+"/media",method
 	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), polled.Status)
 	assert.Equal(t, 13, polled.Quota)
 	assert.Zero(t, currentFactoryCalls, "archived task must never select current platform factory")
+	t.Run("explicit_scoped_poll_authority", func(t *testing.T) {
+		oldGrants, oldHooks, oldTargets := core.ContinuationGrants, core.PluginHooks, core.Destinations
+		defer func() {
+			core.ContinuationGrants, core.PluginHooks, core.Destinations = oldGrants, oldHooks, oldTargets
+			require.NoError(t, model.DB.Save(&polled).Error)
+		}()
+		request := core.ContinuationGrantRequest{Binding: bindingArchive, Ref: *snapshot.Continuation, Purpose: core.ContinuationPoll, PluginKey: archived.PluginKey, SourceSHA256: archived.SourceSHA256, RuntimeSHA256: fmt.Sprintf("%x", sha256.Sum256(archived.RuntimeJSON))}
+		grant := core.ContinuationGrant{Request: request, Hooks: []string{"buildQueryRequest", "parseTaskResult", "signRequest", "extractUsageOnComplete"}, ExpiresAt: time.Now().Add(time.Hour).Unix()}
+		policy, err := NewContinuationAuthorizer([]core.ContinuationGrant{grant})
+		require.NoError(t, err)
+		core.ContinuationGrants, core.PluginHooks = policy, frozenPollHookVeto{}
+		beforeQuery := queryCalls.Load()
+		candidate := polled
+		candidate.PrivateData.PollFailures = 2
+		require.NoError(t, model.DB.Save(&candidate).Error)
+		service.DispatchPlatformUpdate(t.Context(), candidate.Platform, map[int][]string{stored.Id: {candidate.GetUpstreamTaskID()}}, map[string]*model.Task{candidate.GetUpstreamTaskID(): &candidate})
+		var after model.Task
+		require.NoError(t, model.DB.First(&after, candidate.ID).Error)
+		assert.Equal(t, int32(1), queryCalls.Load()-beforeQuery)
+		assert.Zero(t, after.PrivateData.PollFailures)
+		assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), after.Status)
+		assert.Equal(t, candidate.Quota, after.Quota)
+		_, err = plugin.Engine.Call(t.Context(), "buildQueryRequest", map[string]any{"baseUrl": base})
+		require.ErrorIs(t, err, core.ErrPluginAdmissionDenied, "new source calls remain denied without a scope")
+		freshSubmit := taskjsplugin.New(plugin)
+		freshSubmit.Init(info)
+		beforeSubmissions := submissions.Load()
+		require.NotNil(t, freshSubmit.ValidateRequestAndSetAction(c, info), "old-task poll grants must not authorize a new submission")
+		assert.Equal(t, beforeSubmissions, submissions.Load())
+		plain, err := taskjsplugin.RestoreContinuationArtifact(archived)
+		require.NoError(t, err)
+		require.NoError(t, plain.BindContinuationTask(&candidate, core.ContinuationPoll))
+		_, err = plain.FetchTask(base, "fixture", &candidate, "")
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable, "Restore/Bind and a reference alone grant no authority")
+		_, scope, err := core.LoadTaskContinuation(t.Context(), bindingArchive, *snapshot.Continuation, core.ContinuationPoll)
+		require.NoError(t, err)
+		require.NotNil(t, scope)
+		wrong := candidate
+		wrong.TaskID = "not-the-approved-task"
+		unrelated, err := taskjsplugin.RestoreContinuationArtifact(archived)
+		require.NoError(t, err)
+		require.NoError(t, unrelated.BindContinuationTask(&wrong, core.ContinuationPoll))
+		require.ErrorIs(t, unrelated.BindContinuationScope(scope), core.ErrContinuationUnavailable)
+		for _, alter := range []func(*core.ContinuationGrantRequest){func(r *core.ContinuationGrantRequest) { r.Binding.TaskID += "x" }, func(r *core.ContinuationGrantRequest) { r.Binding.UserID++ }, func(r *core.ContinuationGrantRequest) { r.Binding.ChannelID++ }, func(r *core.ContinuationGrantRequest) { r.Ref.ID = strings.Repeat("a", 64) }, func(r *core.ContinuationGrantRequest) { r.Ref.Digest = strings.Repeat("b", 64) }, func(r *core.ContinuationGrantRequest) { r.PluginKey = "different-plugin" }, func(r *core.ContinuationGrantRequest) { r.SourceSHA256 = strings.Repeat("a", 64) }, func(r *core.ContinuationGrantRequest) { r.RuntimeSHA256 = strings.Repeat("a", 64) }} {
+			mismatch := grant
+			alter(&mismatch.Request)
+			policy, err := NewContinuationAuthorizer([]core.ContinuationGrant{mismatch})
+			require.NoError(t, err)
+			core.ContinuationGrants = policy
+			resolved, err := relay.GetTaskAdaptorForTask(t.Context(), &candidate, core.ContinuationPoll)
+			require.NoError(t, err)
+			before := queryCalls.Load()
+			_, err = resolved.FetchTask(base, "fixture", &candidate, "")
+			require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+			assert.Equal(t, before, queryCalls.Load())
+		}
+		core.ContinuationGrants = policy
+		core.Destinations = previousDestinations
+		if !core.DestinationAdmissionEnabled() {
+			_, err = relay.GetTaskAdaptorForTask(t.Context(), &candidate, core.ContinuationPoll)
+			require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		}
+		core.Destinations = queryPolicy
+		resolved, err := relay.GetTaskAdaptorForTask(t.Context(), &candidate, core.ContinuationPoll)
+		require.NoError(t, err)
+		beforeBatch := queryCalls.Load()
+		_, err = resolved.(*taskjsplugin.TaskAdaptor).FetchBatchTasks(base, "fixture", []*model.Task{&candidate}, "")
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		assert.Equal(t, beforeBatch, queryCalls.Load())
+		content, err := relay.GetTaskAdaptorForTask(t.Context(), &candidate, core.ContinuationContent)
+		require.NoError(t, err)
+		_, err = content.(relaychannel.TaskArtifactProvider).ListArtifacts(&candidate)
+		require.Error(t, err, "poll-only authority cannot override content source policy")
+		credentialLine, err := (jsplugin.Credential{Plugin: plugin.Meta.Key, AccountID: "no-refresh", Data: common.RawMessage(`{}`)}).Line()
+		require.NoError(t, err)
+		before := queryCalls.Load()
+		_, err = resolved.FetchTask(base, credentialLine, &candidate, "")
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		_, err = resolved.FetchTask(base, "fixture-static\n"+credentialLine, &candidate, "")
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		assert.Equal(t, before, queryCalls.Load())
+		denyTargets, err := NewDestinationPolicy(nil)
+		require.NoError(t, err)
+		core.Destinations = denyTargets
+		_, err = resolved.FetchTask(base, "fixture", &candidate, "")
+		require.Error(t, err)
+		assert.Equal(t, before, queryCalls.Load(), "a hook grant never approves a physical destination")
+		core.Destinations = queryPolicy
+		core.PluginHooks = oldHooks
+		_, err = plugin.Engine.Call(core.WithContinuationScope(t.Context(), &core.ContinuationScope{}), "buildQueryRequest", map[string]any{"baseUrl": base})
+		require.Error(t, err, "an invalid attached scope must not fall back to a permissive source policy")
+		_, err = plugin.Engine.Call(core.WithContinuationScope(t.Context(), scope), "listArtifacts")
+		require.Error(t, err, "unlisted hooks stay denied even if current policy permits the source")
+		var internalFetch atomic.Int32
+		fetchCtx := jsplugin.WithFetcher(t.Context(), func(context.Context, jsplugin.FetchRequest) (jsplugin.FetchResponse, error) {
+			internalFetch.Add(1)
+			return jsplugin.FetchResponse{}, nil
+		})
+		_, err = plugin.Engine.Call(core.WithContinuationScope(fetchCtx, scope), "buildQueryRequest", map[string]any{"baseUrl": base, "state": map[string]any{"fetchAttempt": true}})
+		require.Error(t, err)
+		assert.Zero(t, internalFetch.Load())
+		lateHooks := &hostPreselectionHookProbe{PluginHookGate: oldHooks}
+		core.PluginHooks = lateHooks
+		assert.Zero(t, resolved.AdjustBillingOnComplete(&candidate, &relaycommon.TaskInfo{Status: "SUCCESS"}))
+		assert.Empty(t, lateHooks.calls, "scoped parse already captures usage; late callback must not run extra unscoped JS")
+		core.PluginHooks = oldHooks
+		oauthSource := strings.Replace(source, `fetchMode:"per_task",`, `fetchMode:"per_task",auth:{type:"oauth2_jwt"},`, 1)
+		oauthPlugin, err := jsplugin.CompilePlugin(oauthSource, jsplugin.Options{})
+		require.NoError(t, err)
+		oauthAdaptor := taskjsplugin.New(oauthPlugin)
+		oauthAdaptor.Init(info)
+		oauthArtifact, err := oauthAdaptor.CaptureContinuationArtifact(info)
+		require.NoError(t, err)
+		oauthRef, err := archive.Save(t.Context(), bindingArchive, oauthArtifact)
+		require.NoError(t, err)
+		oauthTask := candidate
+		oauthExecution := *candidate.PrivateData.Execution
+		oauthExecution.Continuation = &oauthRef
+		oauthTask.PrivateData.Execution = &oauthExecution
+		oauthGrant := grant
+		oauthGrant.Request.Ref = oauthRef
+		oauthGrant.Request.SourceSHA256 = oauthArtifact.SourceSHA256
+		oauthGrant.Request.RuntimeSHA256 = fmt.Sprintf("%x", sha256.Sum256(oauthArtifact.RuntimeJSON))
+		oauthPolicy, err := NewContinuationAuthorizer([]core.ContinuationGrant{oauthGrant})
+		require.NoError(t, err)
+		core.ContinuationGrants = oauthPolicy
+		_, err = relay.GetTaskAdaptorForTask(t.Context(), &oauthTask, core.ContinuationPoll)
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		assert.Equal(t, before, queryCalls.Load(), "oauth mode is rejected at scope binding, before token acquisition")
+		queuedSource := `export const meta={apiVersion:1,key:"cmh-grant-queue",name:"Queue",version:"1.0.0",author:{name:"Test"},models:["public-task"],fetchMode:"per_task"};export function buildSubmitRequest(){return {url:"https://fixture.invalid"};}export function parseSubmitResponse(){return {taskId:"id"};}export function buildQueryRequest(){console.log("slot-held");return {};}export function parseTaskResult(){return {status:"IN_PROGRESS"};}`
+		held, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		defer releaseOnce.Do(func() { close(release) })
+		queuedPlugin, err := jsplugin.CompilePlugin(queuedSource, jsplugin.Options{Concurrency: 1, Log: func(message string) {
+			if strings.Contains(message, "slot-held") {
+				close(held)
+				<-release
+			}
+		}})
+		require.NoError(t, err)
+		queuedArtifact := core.ContinuationArtifact{PluginKey: queuedPlugin.Meta.Key, SourceSHA256: queuedPlugin.SourceSHA256(), Source: queuedPlugin.SourceBytes(), RuntimeJSON: common.RawMessage(`{}`)}
+		queuedRef, err := archive.Save(t.Context(), bindingArchive, queuedArtifact)
+		require.NoError(t, err)
+		blockDone := make(chan error, 1)
+		go func() { _, err := queuedPlugin.Engine.Call(t.Context(), "buildQueryRequest"); blockDone <- err }()
+		<-held
+		queuedGrant := core.ContinuationGrant{Request: core.ContinuationGrantRequest{Binding: bindingArchive, Ref: queuedRef, Purpose: core.ContinuationPoll, PluginKey: queuedArtifact.PluginKey, SourceSHA256: queuedArtifact.SourceSHA256, RuntimeSHA256: fmt.Sprintf("%x", sha256.Sum256(queuedArtifact.RuntimeJSON))}, Hooks: []string{"buildQueryRequest", "parseTaskResult"}, ExpiresAt: time.Now().Unix() + 2}
+		queuedPolicy, err := NewContinuationAuthorizer([]core.ContinuationGrant{queuedGrant})
+		require.NoError(t, err)
+		core.ContinuationGrants = queuedPolicy
+		_, queuedScope, err := core.LoadTaskContinuation(t.Context(), bindingArchive, queuedRef, core.ContinuationPoll)
+		require.NoError(t, err)
+		barrier := &grantAdmissionBarrierContext{Context: core.WithContinuationScope(t.Context(), queuedScope), waiting: make(chan struct{})}
+		queuedDone := make(chan error, 1)
+		go func() { _, err := queuedPlugin.Engine.Call(barrier, "parseTaskResult"); queuedDone <- err }()
+		<-barrier.waiting
+		deadline := time.NewTimer(time.Until(time.Unix(queuedGrant.ExpiresAt, 0)))
+		defer deadline.Stop()
+		<-deadline.C
+		releaseOnce.Do(func() { close(release) })
+		require.NoError(t, <-blockDone)
+		require.ErrorIs(t, <-queuedDone, core.ErrPluginAdmissionDenied, "scope that expires in a real queue must be rejected before JS")
+		grant.ExpiresAt = time.Now().Unix() + 1
+		expiring, err := NewContinuationAuthorizer([]core.ContinuationGrant{grant})
+		require.NoError(t, err)
+		core.ContinuationGrants = expiring
+		soon, err := relay.GetTaskAdaptorForTask(t.Context(), &candidate, core.ContinuationPoll)
+		require.NoError(t, err)
+		timer := time.NewTimer(time.Until(time.Unix(grant.ExpiresAt, 0)))
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		}
+		_, err = soon.FetchTask(base, "fixture", &candidate, "")
+		require.ErrorIs(t, err, core.ErrContinuationUnavailable)
+		assert.Equal(t, before, queryCalls.Load(), "an existing adaptor cannot start a new dispatch after expiry")
+	})
 	previousHooks := core.PluginHooks
 	defer func() { core.PluginHooks = previousHooks }()
 	for _, scenario := range []struct {
@@ -880,7 +1072,7 @@ export function buildContentRequest(ctx){return {url:ctx.baseUrl+"/media",method
 	_, err = accountAdaptor.FetchTask(base, "fixture-static-key", &accountTask, "")
 	require.ErrorIs(t, err, core.ErrContinuationUnavailable)
 	batchSource := strings.Replace(source, `fetchMode:"per_task"`, `fetchMode:"batch"`, 1)
-	batchSource = strings.Replace(batchSource, `export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}`, `export function buildBatchQueryRequest(ctx,tasks){return {url:ctx.baseUrl+"/query",method:"GET"};}
+	batchSource = strings.Replace(batchSource, `export function buildQueryRequest(ctx){if(ctx.state&&ctx.state.fetchAttempt)utils.fetch({url:ctx.baseUrl+"/lookup"});return {url:ctx.baseUrl+"/query"};}`, `export function buildBatchQueryRequest(ctx,tasks){return {url:ctx.baseUrl+"/query",method:"GET"};}
 export function parseBatchResult(ctx,body){return ctx.tasks.map(t=>({taskId:t.taskId,status:"IN_PROGRESS"}));}`, 1)
 	batchPlugin, err := jsplugin.CompilePlugin(batchSource, jsplugin.Options{})
 	require.NoError(t, err)

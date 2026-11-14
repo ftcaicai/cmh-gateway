@@ -446,16 +446,24 @@ type callOptions struct {
 }
 
 func (e *Engine) call(ctx context.Context, opts callOptions, exportName string, members []string, args ...any) (any, json.RawMessage, error) {
-	if core.PluginHookAdmissionEnabled() {
+	scope, scoped := core.ContinuationScopeFromContext(ctx)
+	identity := core.PluginHookIdentity{SourceSHA256: e.sourceSHA256, Export: exportName, Members: slices.Clone(members)}
+	if scoped {
+		if scope.CheckHook(identity) != nil {
+			return nil, nil, core.ErrPluginAdmissionDenied
+		}
+	} else if core.PluginHookAdmissionEnabled() {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		identity := core.PluginHookIdentity{SourceSHA256: e.sourceSHA256, Export: exportName, Members: slices.Clone(members)}
 		if core.PluginHooks.CheckHook(ctx, identity) != nil {
 			return nil, nil, core.ErrPluginAdmissionDenied
 		}
 	}
 	if err := e.acquireCallSlot(ctx, opts.admissionTimeout); err != nil {
+		if scoped && scope.CheckHook(identity) != nil {
+			return nil, nil, core.ErrPluginAdmissionDenied
+		}
 		return nil, nil, err
 	}
 	call := &runtimeCall{engine: e, ctx: ctx, holdsSlot: true}
@@ -471,10 +479,15 @@ func (e *Engine) call(ctx context.Context, opts callOptions, exportName string, 
 	}
 	instance, err := e.getRuntime(ctx)
 	if err != nil {
+		if scoped && scope.CheckHook(identity) != nil {
+			return nil, nil, core.ErrPluginAdmissionDenied
+		}
 		return nil, nil, err
 	}
 	call.runtime, call.hook = instance.runtime, hook.Name()
-	call.fetcher, _ = ctx.Value(fetcherContextKey{}).(Fetcher)
+	if !scoped {
+		call.fetcher, _ = ctx.Value(fetcherContextKey{}).(Fetcher)
+	}
 	call.transform, _ = ctx.Value(transformContextKey{}).(*TransformContext)
 	instance.call = call
 	reusable := true
@@ -509,6 +522,10 @@ func (e *Engine) call(ctx context.Context, opts callOptions, exportName string, 
 		callArgs = append(callArgs, converted)
 	}
 
+	// A wait for a slot/runtime may have crossed the explicit grant expiry.
+	if scoped && scope.CheckHook(identity) != nil {
+		return nil, nil, core.ErrPluginAdmissionDenied
+	}
 	call.watchdog = watchRuntimeContext(instance.runtime, ctx, e.timeout, errCallTimeout)
 	// utils.fetch pauses and restarts the watchdog; stop whichever watch is
 	// current when the call ends.

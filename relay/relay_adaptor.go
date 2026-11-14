@@ -220,7 +220,7 @@ func GetTaskAdaptorForTask(ctx context.Context, task *model.Task, purpose core.C
 	if store == nil || task.TaskID == "" || task.UserId <= 0 || task.ChannelId <= 0 {
 		return nil, core.ErrContinuationUnavailable
 	}
-	artifact, err := store.Load(ctx, core.ContinuationBinding{TaskID: task.TaskID, UserID: task.UserId, ChannelID: task.ChannelId}, *execution.Continuation, purpose)
+	artifact, scope, err := core.LoadTaskContinuation(ctx, core.ContinuationBinding{TaskID: task.TaskID, UserID: task.UserId, ChannelID: task.ChannelId}, *execution.Continuation, purpose)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -238,6 +238,9 @@ func GetTaskAdaptorForTask(ctx context.Context, task *model.Task, purpose core.C
 		return nil, core.ErrContinuationUnavailable
 	}
 	if err = adaptor.BindContinuationTask(task, purpose); err != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
+	if scope != nil && adaptor.BindContinuationScope(scope) != nil {
 		return nil, core.ErrContinuationUnavailable
 	}
 	return adaptor, nil

@@ -20,14 +20,16 @@ type OperatorManifest struct {
 	ChannelTypes   []int
 	Executors      []core.ExecutorIdentity
 	Destinations   []core.DestinationAdmission
+	Continuations  []core.ContinuationGrant `json:",omitempty"`
 }
 
 // OperatorPolicies contains validated immutable policies. Construction never
 // installs them: a partially integrated gateway must not expose an enable switch.
 type OperatorPolicies struct {
-	Models       *Gate
-	Destinations *DestinationPolicy
-	Fingerprint  string
+	Models        *Gate
+	Destinations  *DestinationPolicy
+	Continuations *ContinuationPolicy
+	Fingerprint   string
 }
 
 const maxOperatorManifestBytes = 1 << 20
@@ -37,7 +39,7 @@ const maxOperatorManifestBytes = 1 << 20
 // spellings and unsupported versions rather than silently ignoring operator input.
 // It is intentionally not a general-purpose JSON configuration format.
 func EncodeOperatorManifest(manifest OperatorManifest) ([]byte, error) {
-	if manifest.Version != 1 || len(manifest.PublicModels) > 4096 || len(manifest.UpstreamModels) > 4096 || len(manifest.ChannelTypes) > 256 || len(manifest.Executors) > 256 || len(manifest.Destinations) > 4096 {
+	if manifest.Version != 1 || len(manifest.PublicModels) > 4096 || len(manifest.UpstreamModels) > 4096 || len(manifest.ChannelTypes) > 256 || len(manifest.Executors) > 256 || len(manifest.Destinations) > 4096 || len(manifest.Continuations) > 4096 {
 		return nil, errGateConfiguration
 	}
 	for _, names := range [][]string{manifest.PublicModels, manifest.UpstreamModels} {
@@ -61,6 +63,22 @@ func EncodeOperatorManifest(manifest OperatorManifest) ([]byte, error) {
 			}
 		}
 	}
+	for _, grant := range manifest.Continuations {
+		request := grant.Request
+		for _, value := range []string{request.Binding.TaskID, request.Ref.ID, request.Ref.Digest, string(request.Purpose), request.PluginKey, request.SourceSHA256, request.RuntimeSHA256} {
+			if len(value) > 255 || !utf8.ValidString(value) {
+				return nil, errGateConfiguration
+			}
+		}
+		if len(grant.Hooks) > 4 {
+			return nil, errGateConfiguration
+		}
+		for _, hook := range grant.Hooks {
+			if len(hook) > 255 || !utf8.ValidString(hook) {
+				return nil, errGateConfiguration
+			}
+		}
+	}
 	encoded, err := common.Marshal(manifest)
 	if err != nil || len(encoded) > maxOperatorManifestBytes {
 		return nil, errGateConfiguration
@@ -76,7 +94,7 @@ func ParseOperatorManifest(document []byte) (*OperatorPolicies, error) {
 		return nil, errGateConfiguration
 	}
 	var manifest OperatorManifest
-	if common.Unmarshal(document, &manifest) != nil || manifest.Version != 1 || len(manifest.PublicModels) > 4096 || len(manifest.UpstreamModels) > 4096 || len(manifest.ChannelTypes) > 256 || len(manifest.Executors) > 256 || len(manifest.Destinations) > 4096 {
+	if common.Unmarshal(document, &manifest) != nil || manifest.Version != 1 || len(manifest.PublicModels) > 4096 || len(manifest.UpstreamModels) > 4096 || len(manifest.ChannelTypes) > 256 || len(manifest.Executors) > 256 || len(manifest.Destinations) > 4096 || len(manifest.Continuations) > 4096 {
 		return nil, errGateConfiguration
 	}
 	canonical, err := common.Marshal(manifest)
@@ -148,5 +166,9 @@ func ParseOperatorManifest(document []byte) (*OperatorPolicies, error) {
 	if err != nil {
 		return nil, errGateConfiguration
 	}
-	return &OperatorPolicies{Models: models, Destinations: destinations, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(canonical))}, nil
+	continuations, err := NewContinuationAuthorizer(manifest.Continuations)
+	if err != nil {
+		return nil, errGateConfiguration
+	}
+	return &OperatorPolicies{Models: models, Destinations: destinations, Continuations: continuations, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(canonical))}, nil
 }

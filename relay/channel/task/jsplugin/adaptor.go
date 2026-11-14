@@ -137,6 +137,8 @@ type TaskAdaptor struct {
 	plugin                    *pluginruntime.LoadedPlugin
 	info                      *relaycommon.RelayInfo
 	continuation              *taskContinuationRuntime
+	continuationScope         *core.ContinuationScope
+	continuationRuntimeSHA    string
 	continuationTask          *core.ContinuationBinding
 	continuationPurpose       core.ContinuationPurpose
 	continuationRef           core.ContinuationRef
@@ -235,7 +237,7 @@ func RestoreContinuationArtifact(artifact core.ContinuationArtifact) (*TaskAdapt
 		return nil, core.ErrContinuationUnavailable
 	}
 	info := &relaycommon.RelayInfo{OriginModelName: runtime.PublicModel, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: runtime.ChannelID, ChannelType: runtime.ChannelType, ChannelBaseUrl: runtime.BaseURL, ChannelSetting: runtime.Setting, ChannelOtherSettings: runtime.OtherSettings, HeadersOverride: runtime.HeadersOverride, ParamOverride: runtime.ParamOverride, UpstreamModelName: runtime.UpstreamModel}}
-	return &TaskAdaptor{plugin: plugin, info: info, continuation: &runtime}, nil
+	return &TaskAdaptor{plugin: plugin, info: info, continuation: &runtime, continuationRuntimeSHA: bodySHA256(artifact.RuntimeJSON)}, nil
 }
 
 // BindContinuationTask restricts a restored artifact to one persisted task and
@@ -261,6 +263,60 @@ func (a *TaskAdaptor) BindContinuationTask(task *model.Task, purpose core.Contin
 	a.continuationUpstreamID = task.GetUpstreamTaskID()
 	a.continuationPurpose, a.continuationRef, a.continuationAccount = purpose, ref, task.PrivateData.CredentialAccount
 	return nil
+}
+
+// BindContinuationScope accepts only a scope minted after authenticated archive
+// loading, and only for the exact task/runtime already bound to this adaptor.
+func (a *TaskAdaptor) BindContinuationScope(scope *core.ContinuationScope) error {
+	if a == nil || a.continuation == nil || a.continuationTask == nil || a.continuationScope != nil || scope == nil || a.continuationPurpose != core.ContinuationPoll || a.plugin.Meta.FetchMode != "per_task" {
+		return core.ErrContinuationUnavailable
+	}
+	request := core.ContinuationGrantRequest{Binding: *a.continuationTask, Ref: a.continuationRef, Purpose: a.continuationPurpose,
+		PluginKey: a.plugin.Meta.Key, SourceSHA256: a.plugin.SourceSHA256(), RuntimeSHA256: a.continuationRuntimeSHA}
+	if !scope.BoundTo(request) {
+		return core.ErrContinuationUnavailable
+	}
+	switch a.plugin.Meta.Auth.Type {
+	case "", "none", "api_key":
+	default:
+		return core.ErrContinuationUnavailable
+	}
+	a.continuationScope = scope
+	return nil
+}
+
+func (a *TaskAdaptor) checkScopedPollKey(key string) error {
+	if a.continuationScope == nil {
+		return nil
+	}
+	if a.continuationScope.Check() != nil {
+		return core.ErrContinuationUnavailable
+	}
+	switch a.plugin.Meta.Auth.Type {
+	case "", "none", "api_key":
+	default:
+		return core.ErrContinuationUnavailable
+	}
+	for line := range strings.SplitSeq(key, "\n") {
+		if _, credential := pluginruntime.ParseCredential(line); credential {
+			return core.ErrContinuationUnavailable
+		}
+	}
+	return nil
+}
+
+func (a *TaskAdaptor) continuationContext(ctx context.Context) context.Context {
+	if a.continuationScope != nil {
+		return core.WithContinuationScope(ctx, a.continuationScope)
+	}
+	return ctx
+}
+
+func (a *TaskAdaptor) pollHookContext(ctx context.Context, baseURL, proxy string) context.Context {
+	if a.continuationScope != nil {
+		return core.WithContinuationScope(ctx, a.continuationScope)
+	}
+	return pluginruntime.WithFetcher(ctx, a.hookFetcher(baseURL, proxy))
 }
 
 func (a *TaskAdaptor) checkContinuationTask(task *model.Task, purpose core.ContinuationPurpose) error {
@@ -504,6 +560,11 @@ func (a *TaskAdaptor) AdjustBillingOnSubmit(info *relaycommon.RelayInfo, taskDat
 }
 
 func (a *TaskAdaptor) AdjustBillingOnComplete(task *model.Task, result *relaycommon.TaskInfo) int {
+	if a.continuationScope != nil {
+		// Scoped parse captured usage facts before task state publication. This
+		// late int-only callback cannot safely propagate an expired grant.
+		return 0
+	}
 	if a.checkContinuationTask(task, core.ContinuationPoll) != nil {
 		return 0
 	}
@@ -1022,6 +1083,9 @@ func (a *TaskAdaptor) GetChannelName() string { return a.plugin.Meta.Name }
 func (a *TaskAdaptor) FetchMode() string      { return a.plugin.Meta.FetchMode }
 
 func (a *TaskAdaptor) FetchBatchTasks(baseURL, key string, tasks []*model.Task, proxy string) (*http.Response, error) {
+	if a.continuationScope != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
 	if a.continuationTask != nil && len(tasks) == 0 {
 		return nil, core.ErrContinuationUnavailable
 	}
@@ -1073,6 +1137,9 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy str
 	if task != nil && task.PrivateData.Key != "" {
 		key = task.PrivateData.Key
 	}
+	if err := a.checkScopedPollKey(key); err != nil {
+		return nil, err
+	}
 	key, err := a.taskCredentialLine(context.Background(), key, task)
 	if err != nil {
 		return nil, err
@@ -1082,7 +1149,7 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy str
 	if err != nil {
 		return nil, err
 	}
-	descriptor, err := a.requestDescriptor(pluginruntime.WithFetcher(context.Background(), a.hookFetcher(baseURL, proxy)), "buildQueryRequest", ctx)
+	descriptor, err := a.requestDescriptor(a.pollHookContext(context.Background(), baseURL, proxy), "buildQueryRequest", ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1098,6 +1165,9 @@ func (a *TaskAdaptor) hookFetcher(baseURL, proxy string) pluginruntime.Fetcher {
 // checkQueryDestination authorizes the actual query transport after signing.
 // This is network capability approval, not a persisted task/model permission.
 func (a *TaskAdaptor) checkQueryDestination(req *http.Request, baseURL, proxy, hook string) error {
+	if a.continuationScope != nil && a.continuationScope.Check() != nil {
+		return core.ErrContinuationUnavailable
+	}
 	if !core.DestinationAdmissionEnabled() {
 		return nil
 	}
@@ -1119,6 +1189,9 @@ func (a *TaskAdaptor) checkQueryDestination(req *http.Request, baseURL, proxy, h
 	admission := core.DestinationAdmission{Kind: "task_query", Method: req.Method, AddressSHA256: address,
 		HostSHA256: core.DestinationHost(host), Executor: executor, Hook: hook}
 	if core.Destinations.CheckDestination(req.Context(), admission) != nil {
+		if a.continuationScope != nil {
+			return core.ErrContinuationUnavailable
+		}
 		return errors.New("request rejected")
 	}
 	return nil
@@ -1167,7 +1240,7 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor r
 	if err := channel.ApplyHeaderOverride(a.headerOverrideInfo(overrideKey(key, credential)), nil, req); err != nil {
 		return nil, err
 	}
-	if err := a.signTaskRequest(context.Background(), a.channelType(), baseURL, key, credential, method, req.URL, req.Header, bodySHA256(body)); err != nil {
+	if err := a.signTaskRequest(a.continuationContext(context.Background()), a.channelType(), baseURL, key, credential, method, req.URL, req.Header, bodySHA256(body)); err != nil {
 		return nil, a.continuationHookError(err)
 	}
 	if err := a.checkQueryDestination(req, baseURL, proxy, hook); err != nil {
@@ -1235,12 +1308,26 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor r
 				redirectPolicyErr = errors.New(strings.ReplaceAll(err.Error(), next.URL.String(), next.URL.Scheme+"://"+next.URL.Host))
 				return redirectPolicyErr
 			}
+			if a.continuationScope != nil && a.continuationScope.Check() != nil {
+				redirectPolicyErr = core.ErrContinuationUnavailable
+				return redirectPolicyErr
+			}
 			return nil
 		}
 		if len(via) >= 10 {
 			return fmt.Errorf("stopped after 10 redirects")
 		}
-		return service.ValidateSSRFProtectedFetchURL(next.URL.String())
+		if err := service.ValidateSSRFProtectedFetchURL(next.URL.String()); err != nil {
+			return err
+		}
+		if a.continuationScope != nil && a.continuationScope.Check() != nil {
+			redirectPolicyErr = core.ErrContinuationUnavailable
+			return redirectPolicyErr
+		}
+		return nil
+	}
+	if a.continuationScope != nil && a.continuationScope.Check() != nil {
+		return nil, core.ErrContinuationUnavailable
 	}
 	started := time.Now()
 	resp, err := queryClient.Do(req)
@@ -1280,6 +1367,9 @@ func (a *TaskAdaptor) continuationHookError(err error) error {
 }
 
 func (a *TaskAdaptor) ParseBatchResult(tasks []*model.Task, resp *http.Response, body []byte) (map[string]*service.BatchTaskResult, error) {
+	if a.continuationScope != nil {
+		return nil, core.ErrContinuationUnavailable
+	}
 	if a.continuationTask != nil && len(tasks) == 0 {
 		return nil, core.ErrContinuationUnavailable
 	}
@@ -1394,11 +1484,14 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, bod
 	if task != nil && task.PrivateData.Key != "" {
 		key = task.PrivateData.Key
 	}
+	if err := a.checkScopedPollKey(key); err != nil {
+		return nil, err
+	}
 	ctx, err := a.queryContext(task, key, baseURL, proxy)
 	if err != nil {
 		return nil, err
 	}
-	value, err := a.plugin.Engine.Call(pluginruntime.WithFetcher(context.Background(), a.hookFetcher(baseURL, proxy)), "parseTaskResult", ctx, input, hookHTTPResponse(resp))
+	value, err := a.plugin.Engine.Call(a.pollHookContext(context.Background(), baseURL, proxy), "parseTaskResult", ctx, input, hookHTTPResponse(resp))
 	if err != nil {
 		logger.LogDebug(context.Background(), "task_plugin subsystem=adaptor event=parse_task_failed plugin=%q reason=hook_failed body_bytes=%d elapsed_ms=%d", a.plugin.Meta.Key, len(body), time.Since(started).Milliseconds())
 		return nil, a.continuationHookError(err)
@@ -1429,7 +1522,7 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, bod
 	// The raw polling response only exists at this boundary. Capture upstream
 	// units here so the host settlement path can consume them from TaskInfo.
 	if a.hasHook(context.Background(), "extractUsageOnComplete") {
-		facts, hookErr := a.plugin.Engine.Call(context.Background(), "extractUsageOnComplete", ctx, jsonValue(result), input)
+		facts, hookErr := a.plugin.Engine.Call(a.continuationContext(context.Background()), "extractUsageOnComplete", ctx, jsonValue(result), input)
 		if errors.Is(a.continuationHookError(hookErr), core.ErrContinuationUnavailable) {
 			return nil, core.ErrContinuationUnavailable
 		}

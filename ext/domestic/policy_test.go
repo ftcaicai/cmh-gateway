@@ -8,12 +8,63 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestContinuationGrantPolicyAndManifest(t *testing.T) {
+	request := core.ContinuationGrantRequest{Binding: core.ContinuationBinding{TaskID: "local-task", UserID: 7, ChannelID: 9}, Ref: core.ContinuationRef{ID: strings.Repeat("a", 64), Digest: strings.Repeat("b", 64)}, Purpose: core.ContinuationPoll, PluginKey: "cmh-fixture", SourceSHA256: strings.Repeat("c", 64), RuntimeSHA256: strings.Repeat("d", 64)}
+	grant := core.ContinuationGrant{Request: request, Hooks: []string{"buildQueryRequest", "parseTaskResult"}, ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	policy, err := NewContinuationAuthorizer([]core.ContinuationGrant{grant})
+	require.NoError(t, err)
+	grant.Hooks[0] = "buildSubmitRequest"
+	approved, found, err := policy.Authorize(t.Context(), request)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, []string{"buildQueryRequest", "parseTaskResult"}, approved.Hooks)
+	approved.Hooks[0] = "mutated"
+	again, found, err := policy.Authorize(t.Context(), request)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, "buildQueryRequest", again.Hooks[0])
+	mismatch := request
+	mismatch.RuntimeSHA256 = strings.Repeat("e", 64)
+	_, found, err = policy.Authorize(t.Context(), mismatch)
+	require.NoError(t, err)
+	assert.False(t, found)
+	grant = again
+	for _, alter := range []func(*core.ContinuationGrant){func(g *core.ContinuationGrant) { g.Hooks = []string{"buildSubmitRequest", "parseTaskResult"} }, func(g *core.ContinuationGrant) { g.Hooks = []string{"buildQueryRequest", "buildQueryRequest"} }, func(g *core.ContinuationGrant) { g.Hooks = []string{"parseTaskResult"} }, func(g *core.ContinuationGrant) { g.ExpiresAt = 0 }, func(g *core.ContinuationGrant) { g.ExpiresAt = time.Now().Add(-time.Hour).Unix() }, func(g *core.ContinuationGrant) { g.Request.Purpose = core.ContinuationContent }, func(g *core.ContinuationGrant) { g.Request.SourceSHA256 = strings.Repeat("A", 64) }, func(g *core.ContinuationGrant) { g.Request.Binding.UserID = 0 }} {
+		invalid := grant
+		alter(&invalid)
+		got, err := NewContinuationAuthorizer([]core.ContinuationGrant{invalid})
+		require.Error(t, err)
+		assert.Nil(t, got)
+	}
+	_, err = NewContinuationAuthorizer([]core.ContinuationGrant{grant, grant})
+	require.Error(t, err)
+	empty, err := NewContinuationAuthorizer(nil)
+	require.NoError(t, err)
+	_, found, err = empty.Authorize(t.Context(), request)
+	require.NoError(t, err)
+	assert.False(t, found)
+	before := core.ContinuationGrants
+	wire, err := EncodeOperatorManifest(OperatorManifest{Version: 1})
+	require.NoError(t, err)
+	assert.Equal(t, `{"Version":1,"PublicModels":null,"UpstreamModels":null,"ChannelTypes":null,"Executors":null,"Destinations":null}`, string(wire), "empty optional grants preserve existing canonical approval bytes")
+	withGrant, err := EncodeOperatorManifest(OperatorManifest{Version: 1, Continuations: []core.ContinuationGrant{grant}})
+	require.NoError(t, err)
+	compiled, err := ParseOperatorManifest(withGrant)
+	require.NoError(t, err)
+	require.NotNil(t, compiled.Continuations)
+	_, found, err = compiled.Continuations.Authorize(t.Context(), request)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, before, core.ContinuationGrants)
+}
 
 func TestOperatorManifestFileVerification(t *testing.T) {
 	originalBuild := BuildOperatorManifestSHA256
