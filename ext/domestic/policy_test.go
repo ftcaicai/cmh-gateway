@@ -99,6 +99,29 @@ func TestOperatorManifestFileVerification(t *testing.T) {
 	got, err = LoadOperatorPolicies(environment)
 	require.Error(t, err)
 	assert.Nil(t, got, "even harmless trailing bytes need a new raw-file anchor")
+
+	// Re-anchoring the same path replaces approvals, not previously returned snapshots.
+	BuildOperatorManifestSHA256 = ""
+	replacement, err := EncodeOperatorManifest(OperatorManifest{Version: 1, PublicModels: []string{"replacement-chat"}, UpstreamModels: []string{"replacement-target"}, ChannelTypes: []int{1}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, replacement, 0600))
+	got, err = LoadOperatorPolicies(environment)
+	require.Error(t, err)
+	assert.Nil(t, got, "a stale anchor cannot return last-good approvals")
+	environment["CMH_OPERATOR_MANIFEST_SHA256"] = fmt.Sprintf("%x", sha256.Sum256(replacement))
+	replaced, err := LoadOperatorPolicies(environment)
+	require.NoError(t, err)
+	require.NotNil(t, replaced)
+	originalAdmission := core.Admission{Phase: core.AdmissionDispatch, Model: core.ModelIdentity{Public: "public-chat", Upstream: "approved-target"}, Channel: core.ChannelIdentity{Known: true, ID: 1, Type: 1}, Executor: core.ExecutorIdentity{Kind: "builtin"}}
+	replacementAdmission := originalAdmission
+	replacementAdmission.Model = core.ModelIdentity{Public: "replacement-chat", Upstream: "replacement-target"}
+	assert.NoError(t, loaded.Models.Check(t.Context(), originalAdmission))
+	assert.ErrorIs(t, loaded.Models.Check(t.Context(), replacementAdmission), ErrAdmissionDenied)
+	assert.NoError(t, replaced.Models.Check(t.Context(), replacementAdmission))
+	assert.ErrorIs(t, replaced.Models.Check(t.Context(), originalAdmission), ErrAdmissionDenied)
+	assert.Equal(t, beforeModels, core.Models)
+	assert.Equal(t, beforeTargets, core.Destinations)
+
 	for _, bad := range []map[string]string{{"CMH_OPERATOR_MANIFEST_FILE": path}, {"CMH_OPERATOR_MANIFEST_SHA256": digest}, {"CMH_OPERATOR_MANIFEST_FILE": filepath.Dir(path), "CMH_OPERATOR_MANIFEST_SHA256": digest}, {"CMH_OPERATOR_MANIFEST_FILE": path + "-missing", "CMH_OPERATOR_MANIFEST_SHA256": digest}, {"CMH_OPERATOR_MANIFEST_FILE": path, "CMH_OPERATOR_MANIFEST_SHA256": "bad-hash"}} {
 		BuildOperatorManifestSHA256 = ""
 		got, err := LoadOperatorPolicies(bad)
