@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `5a639be475e0efb067b6a45e27b2ba2e773508fb`：main/develop一致，差异CI43564854669/43564851253 success；rc51完整同步已合入。第44/80轮负责人明确批准policy-only合同：本轮main早期接线/扩展回归/真实六类合成子进程通过，配置存在但无效即启动失败、非空grant拒绝、archive/grants禁用；全部缺省仍noop。没有生产启用、密钥读取或资金接入。默认sora/type1普通chat保守拒绝等限制不变。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
+- 最近已推 `65c855b52b4ecce4382592ad398c8a9210c8b3c8`：main/develop一致，差异CI43574407321/43574399230 success。第47轮负责人批准有限资金首批设计方向：同步非流式纯文本chat、专属品牌token、独立客户/OEM账户；仅继续设计，不批准实施、扩预算或生产。第48轮完成token隔离只读清单：status_only宽写覆盖额度、Redis hydration/旧batch及用户硬删除旁路须纳入；见 `acceptance/p1/funding-token-fence-design.md`。rc51完整同步已合入；policy-only早期安装及合成Serving/精确目录对照已验，缺省仍noop、archive/grants禁用，无生产资金接入。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
