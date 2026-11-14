@@ -293,7 +293,7 @@ export function refresh(ctx) { utils.fetch({url:ctx.baseUrl+"/refresh",method:"P
 	require.Nil(t, relay.CheckRequestAdmission(c, info))
 	selectedParams, _ := common.GetContextKey(c, constant.ContextKeyChannelParamOverride)
 	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{"temperature": 0})
-	require.NotNil(t, relay.CheckRequestAdmission(c, info), "runtime-added affinity overrides currently require a separately supported execution envelope")
+	require.NotNil(t, relay.CheckRequestAdmission(c, info), "unapproved effective overrides must remain denied")
 	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, selectedParams)
 	c.Set("request_plugin_plan", struct{}{})
 	require.NotNil(t, relay.CheckRequestAdmission(c, info), "retained plan remains unknown even after current request-plugin settings are empty")
@@ -386,6 +386,160 @@ export function refresh(ctx) { utils.fetch({url:ctx.baseUrl+"/refresh",method:"P
 	require.NoError(t, err)
 	core.Models = bothGate
 	require.NotNil(t, relay.CheckRequestAdmission(c, info), "even independently approved fresh config cannot replace frozen selected config")
+}
+
+func runHostAffinityAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
+	t.Helper()
+	previousRegistry := jsplugin.DefaultRegistry
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	defer func() { jsplugin.DefaultRegistry, core.Models = previousRegistry, previousGate }()
+	setting := operation_setting.GetChannelAffinitySetting()
+	previousSetting := *setting
+	defer func() { *setting = previousSetting }()
+	*setting = operation_setting.ChannelAffinitySetting{Enabled: true, Rules: []operation_setting.ChannelAffinityRule{{
+		Name: "cmh-exact-affinity", ModelRegex: []string{"^public-chat$"}, PathRegex: []string{"^/v1/chat/completions$"},
+		KeySources:            []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-CMH-Affinity"}},
+		ParamOverrideTemplate: map[string]any{"operations": []any{map[string]any{"mode": "set", "path": "affinity_marker", "value": "approved"}}},
+	}}}
+	var dispatches atomic.Int32
+	bodies := make(chan string, 2)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		bodies <- string(body)
+		dispatches.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstreamServer.Close()
+	service.InitHttpClient()
+	plugin, err := registry.RegisterFactory(`export const meta={apiVersion:1,key:"cmh-affinity-admission",name:"Affinity admission",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/chat/completions",upstream_path:"/generate",converter:"none"}]};`, jsplugin.Options{})
+	require.NoError(t, err)
+	base, binding, mapping := upstreamServer.URL, `{"task_plugin_key":"cmh-affinity-admission"}`, `{"public-chat":"approved-target"}`
+	baseParams := `{"operations":[{"mode":"set","path":"base_marker","value":"stored"}]}`
+	channel := model.Channel{Id: 95012, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Key: "fixture-affinity", Models: "public-chat", Group: "default", BaseURL: &base, Setting: &binding, ModelMapping: &mapping, ParamOverride: &baseParams}
+	core.Models = noop
+	require.NoError(t, model.DB.Create(&channel).Error)
+	require.NoError(t, channel.AddAbilities(model.DB))
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id = ?", channel.Id).Delete(&model.Channel{}).Error)
+	}()
+	newContext := func() *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Request.Header.Set("X-CMH-Affinity", t.Name())
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+		service.GetChannelConstraints(c).AddFilter(hostdto.ChannelFilter{Kind: hostdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
+		_, hit := service.GetPreferredChannelByAffinity(c, "public-chat", "default")
+		require.False(t, hit, "the public affinity matcher must install template metadata even on a cache miss")
+		return c
+	}
+	baseIdentity, err := model.PluginExecutorIdentity(&channel, plugin, registry.Generation().Number, "provider", "/v1/chat/completions")
+	require.NoError(t, err)
+	merged, applied := service.ApplyChannelAffinityOverrideTemplate(newContext(), channel.GetParamOverride())
+	require.True(t, applied)
+	encoded, err := common.Marshal(merged)
+	require.NoError(t, err)
+	effectiveRaw := string(encoded)
+	effectiveChannel := channel
+	effectiveChannel.ParamOverride = &effectiveRaw
+	effectiveIdentity, err := model.PluginExecutorIdentity(&effectiveChannel, plugin, registry.Generation().Number, "provider", "/v1/chat/completions")
+	require.NoError(t, err)
+	require.NotEqual(t, baseIdentity.ConfigFingerprint, effectiveIdentity.ConfigFingerprint)
+	public, err := New([]string{"public-chat"}, []string{"61"})
+	require.NoError(t, err)
+	upstream, err := New([]string{"approved-target"}, nil)
+	require.NoError(t, err)
+	baseGate, err := NewGate(public, upstream, []core.ExecutorIdentity{baseIdentity})
+	require.NoError(t, err)
+	effectiveGate, err := NewGate(public, upstream, []core.ExecutorIdentity{effectiveIdentity})
+	require.NoError(t, err)
+	bothGate, err := NewGate(public, upstream, []core.ExecutorIdentity{baseIdentity, effectiveIdentity})
+	require.NoError(t, err)
+	for _, test := range []struct {
+		name string
+		gate *Gate
+	}{{"base_only", baseGate}, {"effective_only", effectiveGate}} {
+		t.Run(test.name, func(t *testing.T) {
+			core.Models = test.gate
+			c := newContext()
+			filters := []hostdto.ChannelFilter{{Kind: hostdto.FilterTaskPluginIdentity, RequestPath: c.Request.URL.Path, PluginView: model.NewPluginCandidateView(registry.Generation())}}
+			candidateAllowed, _ := model.ChannelSatisfiesFilters(&channel, "public-chat", filters)
+			assert.Equal(t, test.name == "base_only", candidateAllowed, "candidate selection requires the stored base, not a predicted effective envelope")
+			setupErr := middleware.SetupContextForSelectedChannel(c, &channel, "public-chat")
+			require.NotNil(t, setupErr)
+			assert.Equal(t, http.StatusForbidden, setupErr.StatusCode)
+			_, keyPublished := common.GetContextKey(c, constant.ContextKeyChannelKey)
+			assert.False(t, keyPublished, "both exact envelopes must pass before credential publication")
+			assert.Zero(t, dispatches.Load())
+		})
+	}
+	core.Models = bothGate
+	c := newContext()
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, &channel, "public-chat"))
+	selected, ok := common.GetContextKeyType[map[string]any](c, constant.ContextKeyChannelParamOverride)
+	require.True(t, ok)
+	assert.Equal(t, merged, selected)
+	operations, ok := selected["operations"].([]any)
+	require.True(t, ok)
+	require.Len(t, operations, 2, "the official merge runs once; a second merge would duplicate its template operation")
+	require.Nil(t, relay.CheckRequestAdmission(c, &relaycommon.RelayInfo{OriginModelName: "public-chat", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id, ChannelType: channel.Type}}))
+	info := &relaycommon.RelayInfo{UsingGroup: "default", OriginModelName: "public-chat", RequestURLPath: c.Request.URL.Path, RelayMode: relayconstant.RelayModeChatCompletions, RelayFormat: kittypes.RelayFormatOpenAI}
+	info.InitChannelMeta(c)
+	info.UpstreamModelName = "approved-target"
+	adaptor := &providerplugin.Adaptor{}
+	adaptor.Init(info)
+	wire, err := relaycommon.ApplyParamOverrideWithRelayInfo([]byte(`{"model":"approved-target"}`), info)
+	require.NoError(t, err)
+	response, err := adaptor.DoRequest(c, info, bytes.NewReader(wire))
+	require.NoError(t, err)
+	httpResponse, ok := response.(*http.Response)
+	require.True(t, ok)
+	require.NoError(t, httpResponse.Body.Close())
+	assert.Equal(t, int32(1), dispatches.Load())
+	assert.JSONEq(t, `{"model":"approved-target","affinity_marker":"approved","base_marker":"stored"}`, <-bodies)
+	unapprovedParams := map[string]any{"temperature": 0}
+	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, unapprovedParams)
+	require.NotNil(t, relay.CheckRequestAdmission(c, info), "unapproved post-selection context parameters cannot inherit the previous effective approval")
+	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, selected)
+	originalParams := info.ParamOverride
+	info.ParamOverride = unapprovedParams
+	_, err = adaptor.DoRequest(c, info, bytes.NewReader(wire))
+	require.Error(t, err, "prepared execution must attest the actual RelayInfo parameters, not the approved context")
+	assert.Equal(t, int32(1), dispatches.Load())
+	info.ParamOverride = originalParams
+	for _, test := range []struct {
+		name string
+		gate *Gate
+	}{{"revoke_effective", baseGate}, {"revoke_base", effectiveGate}} {
+		t.Run(test.name, func(t *testing.T) {
+			core.Models = test.gate
+			probe := &admissionBillingProbe{}
+			deniedInfo := &relaycommon.RelayInfo{OriginModelName: "public-chat", Request: &kitdto.GeneralOpenAIRequest{Model: "public-chat"}, Billing: probe}
+			require.NotNil(t, relay.PrepareRequestBilling(c, deniedInfo), "policy revocation must reject even before initial handler metadata exists")
+			assert.Zero(t, probe.reserve)
+			assert.Zero(t, deniedInfo.GetEstimatePromptTokens())
+			_, runtimeErr := adaptor.DoRequest(c, info, bytes.NewReader(wire))
+			require.Error(t, runtimeErr)
+			assert.Equal(t, int32(1), dispatches.Load(), "a prepared provider cannot dispatch after either approval is revoked")
+		})
+	}
+	core.Models = bothGate
+	changedParams := `{"operations":[{"mode":"set","path":"base_marker","value":"unapproved-new-base"}]}`
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("param_override", changedParams).Error)
+	require.NotNil(t, relay.CheckRequestAdmission(c, info), "an old approved effective envelope cannot authorize an unapproved current base")
+	_, err = adaptor.DoRequest(c, info, bytes.NewReader(wire))
+	require.Error(t, err)
+	assert.Equal(t, int32(1), dispatches.Load())
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("param_override", baseParams).Error)
+	require.Nil(t, relay.CheckRequestAdmission(c, info))
 }
 
 func runHostProviderChainAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {
@@ -2712,6 +2866,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	runHostContinuationCredentialRefresh(t, oldGate)
 	runHostAdmissionRequestBoundary(t, channels, gate, oldGate)
 	runHostBoundProviderAdmission(t, gate, oldGate)
+	t.Run("affinity_exact_envelopes", func(t *testing.T) { runHostAffinityAdmission(t, gate, oldGate) })
 	runHostProviderChainAdmission(t, gate, oldGate)
 	runHostTaskDriverAdmission(t, gate, oldGate)
 	runHostAdmissionSockets(t, channels[1], gate, oldGate)

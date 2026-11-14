@@ -791,6 +791,8 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 			otherSettings.AdvancedCustom = plugin.Meta.ChannelRelayConfig(plugin.ChannelConfigFor(otherSettings.PluginConfig))
 		}
 	}
+	var executionPlugin jsplugin.PinnedPlugin
+	executionRole := "task"
 	if admissionActive {
 		// A request-pinned executor can outlive the registry generation used by
 		// the channel projection. It must never be relabeled builtin; artifact
@@ -815,15 +817,13 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 			if plan, exists := c.Get("request_plugin_plan"); exists && plan != nil {
 				return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 			}
-			var pinned jsplugin.PinnedPlugin
-			role := "task"
 			if providerPlugin != nil {
-				pinned, _ = providerPlugin.(jsplugin.PinnedPlugin)
-				role = "provider"
+				executionPlugin, _ = providerPlugin.(jsplugin.PinnedPlugin)
+				executionRole = "provider"
 			} else if value, exists := c.Get(jsplugin.ContextKeyPinnedPlugin); exists {
-				pinned, _ = value.(jsplugin.PinnedPlugin)
+				executionPlugin, _ = value.(jsplugin.PinnedPlugin)
 			}
-			projected, err := model.ChannelPluginAdmission(channel, modelName, core.AdmissionAttempt, pinned, role, c.Request.URL.Path)
+			projected, err := model.ChannelPluginAdmission(channel, modelName, core.AdmissionAttempt, executionPlugin, executionRole, c.Request.URL.Path)
 			if err != nil {
 				return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 			}
@@ -834,6 +834,26 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		}
 		if matches, _ := model.ChannelSatisfiesHostFilters(channel, modelName, service.GetChannelConstraints(c).Filters); !matches {
+			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	}
+	paramOverride := channel.GetParamOverride()
+	headerOverride := channel.GetHeaderOverride()
+	if mergedParam, applied := service.ApplyChannelAffinityOverrideTemplate(c, paramOverride); applied {
+		paramOverride = mergedParam
+	}
+	if admissionActive && executionPlugin.Plugin != nil {
+		// Check the exact merged object that will be used by the request, after
+		// the stored base passed admission above and before publishing selection.
+		encoded, err := common.Marshal(paramOverride)
+		if err != nil {
+			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		raw := string(encoded)
+		effective := *channel
+		effective.ParamOverride = &raw
+		projected, err := model.ChannelPluginAdmission(&effective, modelName, core.AdmissionAttempt, executionPlugin, executionRole, c.Request.URL.Path)
+		if err != nil || core.Models.Check(c.Request.Context(), projected) != nil {
 			return types.NewErrorWithStatusCode(model.ErrChannelAdmissionDenied, types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		}
 	}
@@ -855,11 +875,6 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		}
 	}
 	logTaskPluginChannelDecision(c, channel, modelName, "channel_selected", "")
-	paramOverride := channel.GetParamOverride()
-	headerOverride := channel.GetHeaderOverride()
-	if mergedParam, applied := service.ApplyChannelAffinityOverrideTemplate(c, paramOverride); applied {
-		paramOverride = mergedParam
-	}
 	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, paramOverride)
 	common.SetContextKey(c, constant.ContextKeyChannelHeaderOverride, headerOverride)
 	if nil != channel.OpenAIOrganization && *channel.OpenAIOrganization != "" {

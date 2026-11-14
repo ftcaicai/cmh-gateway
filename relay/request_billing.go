@@ -131,8 +131,8 @@ func CheckRequestAdmission(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 			raw := string(encoded)
 			*control.target = &raw
 		}
-		selectedAdmission, selectedErr := model.ChannelPluginAdmission(&selected, info.OriginModelName, core.AdmissionAttempt, pinned, role, c.Request.URL.Path)
-		if selectedErr != nil || selectedAdmission.Executor != admission.Executor || selectedAdmission.Model != admission.Model {
+		selected.Group = group
+		if model.CheckPluginExecution(c.Request.Context(), &selected, pinned, info.OriginModelName, admission.Model.Upstream, role, c.Request.URL.Path) != nil {
 			return rejected
 		}
 	}

@@ -409,12 +409,20 @@ func CheckPluginExecution(ctx context.Context, selected *Channel, pinned jsplugi
 	if err != nil || fresh == nil || fresh.Type != selected.Type || selected.Group == "" || !slices.Contains(strings.Split(fresh.Group, ","), selected.Group) {
 		return ErrChannelAdmissionDenied
 	}
+	base, err := ChannelPluginAdmission(fresh, public, core.AdmissionDispatch, pinned, role, pathScope)
+	if err != nil || core.Models.Check(ctx, base) != nil {
+		return ErrChannelAdmissionDenied
+	}
 	actual, err := ChannelPluginAdmission(selected, public, core.AdmissionDispatch, pinned, role, pathScope)
 	if err != nil || actual.Model.Upstream != upstream {
 		return ErrChannelAdmissionDenied
 	}
-	current, err := ChannelPluginAdmission(fresh, public, core.AdmissionDispatch, pinned, role, pathScope)
-	if err != nil || current.Model != actual.Model || current.Executor != actual.Executor || core.Models.Check(ctx, actual) != nil {
+	// Only parameter overrides may differ from the current approved base.
+	// This attests the final effective envelope, not its affinity-rule origin.
+	effective := *fresh
+	effective.ParamOverride = selected.ParamOverride
+	expected, err := ChannelPluginAdmission(&effective, public, core.AdmissionDispatch, pinned, role, pathScope)
+	if err != nil || expected.Model != actual.Model || expected.Executor != actual.Executor || core.Models.Check(ctx, actual) != nil {
 		return ErrChannelAdmissionDenied
 	}
 	return nil
