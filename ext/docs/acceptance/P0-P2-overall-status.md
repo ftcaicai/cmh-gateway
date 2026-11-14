@@ -20,14 +20,18 @@
 ## 仍未满足的退出条件
 
 1. **P1资金**：H3/H7完整资金生命周期同事务接入、token/任务归属/幂等恢复与BATCH开关/Redis守恒及故障重启三库测试未实现。旧四方法handled提前返回已证伪，不能复活。资金RFC2026-11-13仍未获实施批准，不能借H1预算覆盖财务重构。H4定价/H6正式启动迁移hook仍为保留范围，不把独立archive migration称整期完成。
-2. **P2权威兼容**：affinity已覆盖有限provider wire及task有效envelope，重试全协议覆盖仍未认证；普通未绑定type60为builtin，插件绑定type60仍拒绝；legacy当前by-type owner不再按模型声明回退builtin，保存/目录/DB及memory候选三库拒绝；代价是默认sora/type1双用途普通chat在active gate下也拒绝，不是完整兼容；owner缺失/旧pinned/静态platform整体身份仍待解决。启用requestplan等仍拒绝，尚无全协议安全且可用的验收；有限grant不覆盖batch/content/report/refresh或动态签名query目标task权限。
+2. **P2权威兼容**：affinity已覆盖有限provider wire及task有效envelope，重试全协议覆盖仍未认证；普通未绑定type60为builtin，插件绑定type60仍拒绝；legacy当前by-type owner不再按模型声明回退builtin，保存/目录/DB及memory候选三库拒绝；代价是默认sora/type1双用途普通chat在active gate下也拒绝，不是完整兼容；owner缺失/旧pinned完整可用性仍未认证；静态platform与numeric fallback已复用官方实际resolver收口，避免当前可解析owner误标builtin，保守拒绝代价不变。启用requestplan等仍拒绝，尚无全协议安全且可用的验收；有限grant不覆盖batch/content/report/refresh或动态签名query目标task权限。
 3. **启动与运维**：policy-only早期一致安装已接线、全部缺省仍noop，TaskContinuations/ContinuationGrants禁用；尚无全协议正向成功Serving/生产同制品验收、档案密钥custody/备份恢复/GCM寿命预算及全协议可用性。仅合成合同获批，不授权生产manifest启用。
-4. **回归缺口**：Realtime规范身份casefold差异已修，中央实际codec红绿及三库24.621s通过，见p2/H1-B-realtime-canonical-identity.md；第64轮又经真实OpenaiRealtimeHandler本地raw socket验收：两条遮蔽帧拒绝/upstream0，同连接合法帧精确回显/upstream1；扩展全tests/vet通过，非供应商parser实测。Windows全rootcontroller/middleware日志/DB占用cleanup和累计package timeout失败保留；rc51 optional全web lint148errors/66warnings未修。Linux完整CI通过不抹掉这些平台事实；race因C编译器缺少未认证。数据库仅SQLite3.50.4/MySQL8.0.44/PG17.12，不声称最低版本全面认证。
+4. **回归缺口**：Realtime规范身份casefold差异已修，中央实际codec红绿及三库24.621s通过，见p2/H1-B-realtime-canonical-identity.md；第64轮又经真实OpenaiRealtimeHandler本地raw socket验收：两条遮蔽帧拒绝/upstream0，同连接合法帧精确回显/upstream1；扩展全tests/vet通过，非供应商parser实测。Windows全rootcontroller/middleware日志/DB占用cleanup和累计package timeout失败保留；rc51 optional全web lint148errors/66warnings未修。Windows完整channel的既有HTTP2 GOAWAY/缺失GetBody fixture曾出现reset失败；负责人明确拒绝该第50文件例外，不修改或弱化测试，不把排除结果称完整通过。资金/H4/H6实施亦已明确拒绝，不重复申请。Linux完整CI通过不抹掉这些平台事实；race因C编译器缺少未认证。数据库仅SQLite3.50.4/MySQL8.0.44/PG17.12，不声称最低版本全面认证。
 5. **真实调用/上线**：无生产凭据、收费模型调用、真实operator taskgrant、28个供应商生产渠道配置或生产域；不访问旧系统/不迁移数据/不切流。离线本地stub通过不等于供应商live或生产可用。
 
 ## 已批准不可重复询问
 
-R3最小官方回跳、R4精确工厂清单、H1累计48/6000与唯一命名middleware/task_plugin.go第49例外≤40增删行（累计6000不变）、有限taskgrant首批合同和policy-only启动合同均已明确批准。源码当前相对rc51官方49文件/4639增删行，命名文件14/40，余1361行且0任意新文件名额；不删测试凑预算。
+R3最小官方回跳、R4精确工厂清单、H1累计48/6000与唯一命名middleware/task_plugin.go第49例外≤40增删行（累计6000不变）、有限taskgrant首批合同和policy-only启动合同均已明确批准。源码当前相对rc51官方49文件/4641增删行，命名文件14/40，余1359行且0任意新文件名额；不删测试凑预算。
+
+## 第72轮当前源码复验
+
+64af8365a源码未作生产修改，执行未排除任何用例的 `go test -p 2 ./relay/channel ./relay ./ext/... -count=1`：channel0.176s、relay0.430s、domestic8.109s及全部ext通过；相关 `go vet -p 2` 与根 `go build -p 2 ./...` 均exit0。这是一次当前相关包完整通过，不覆盖全root、frontend或新三库验证，也不能抹去HTTP2 fixture先前间歇失败。总账修正静态resolver已完成的有限范围及当前49/4641预算，保留全部未批准实施退出条件。
 
 ## 接续顺序
 
