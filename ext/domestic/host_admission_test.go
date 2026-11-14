@@ -540,6 +540,129 @@ func runHostAffinityAdmission(t *testing.T, previousGate *Gate, noop core.ModelG
 	assert.Equal(t, int32(1), dispatches.Load())
 	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("param_override", baseParams).Error)
 	require.Nil(t, relay.CheckRequestAdmission(c, info))
+	t.Run("task_submit", func(t *testing.T) { runHostTaskAffinityAdmission(t, noop) })
+}
+
+func runHostTaskAffinityAdmission(t *testing.T, noop core.ModelGate) {
+	t.Helper()
+	oldGate, oldRegistry, oldStore, oldHooks := core.Models, jsplugin.DefaultRegistry, core.TaskContinuations, core.PluginHooks
+	defer func() {
+		core.Models, jsplugin.DefaultRegistry, core.TaskContinuations, core.PluginHooks = oldGate, oldRegistry, oldStore, oldHooks
+	}()
+	core.TaskContinuations = nil
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	setting := operation_setting.GetChannelAffinitySetting()
+	oldSetting := *setting
+	defer func() { *setting = oldSetting }()
+	*setting = operation_setting.ChannelAffinitySetting{Enabled: true, Rules: []operation_setting.ChannelAffinityRule{{
+		Name: "cmh-task-exact-affinity", ModelRegex: []string{"^affinity-task$"}, PathRegex: []string{"^/v1/tasks/cmh-task-affinity$"},
+		KeySources:            []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-CMH-Task-Affinity"}},
+		ParamOverrideTemplate: map[string]any{"operations": []any{map[string]any{"mode": "set", "path": "affinity_marker", "value": "approved"}}},
+	}}}
+	var dispatches atomic.Int32
+	bodies := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		dispatches.Add(1)
+		bodies <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"synthetic-task-affinity"}`))
+	}))
+	defer server.Close()
+	service.InitHttpClient()
+	plugin, err := registry.RegisterFactory(`export const meta={apiVersion:1,key:"cmh-task-affinity",name:"Task affinity",version:"1.0.0",author:{name:"Test"},models:["affinity-task"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit",method:"POST",body:{model:ctx.upstreamModel,prompt:ctx.requestBody.prompt}};}
+export function parseSubmitResponse(){return {taskId:"synthetic-task-affinity"};}
+export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/query"};}
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}`, jsplugin.Options{})
+	require.NoError(t, err)
+	base, binding := server.URL, `{"task_plugin_key":"cmh-task-affinity"}`
+	params := `{"operations":[{"mode":"set","path":"base_marker","value":"stored"}]}`
+	channel := model.Channel{Id: 95013, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Key: "synthetic-task-key", Models: "affinity-task", Group: "default", BaseURL: &base, Setting: &binding, ParamOverride: &params}
+	core.Models = noop
+	require.NoError(t, model.DB.Create(&channel).Error)
+	require.NoError(t, channel.AddAbilities(model.DB))
+	defer func() {
+		core.Models = noop
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id = ?", channel.Id).Delete(&model.Channel{}).Error)
+	}()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/cmh-task-affinity", nil)
+	c.Request.Header.Set("X-CMH-Task-Affinity", t.Name())
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	c.Set("expected_task_plugin_key", plugin.Meta.Key)
+	c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Plugin: plugin, Generation: registry.Generation()})
+	service.GetChannelConstraints(c).AddFilter(hostdto.ChannelFilter{Kind: hostdto.FilterTaskPluginIdentity, TaskPluginKey: plugin.Meta.Key, RequestPath: c.Request.URL.Path})
+	_, hit := service.GetPreferredChannelByAffinity(c, "affinity-task", "default")
+	require.False(t, hit)
+	merged, applied := service.ApplyChannelAffinityOverrideTemplate(c, channel.GetParamOverride())
+	require.True(t, applied)
+	encoded, err := common.Marshal(merged)
+	require.NoError(t, err)
+	effectiveRaw := string(encoded)
+	effective := channel
+	effective.ParamOverride = &effectiveRaw
+	baseIdentity, err := model.PluginExecutorIdentity(&channel, plugin, registry.Generation().Number, "task", c.Request.URL.Path)
+	require.NoError(t, err)
+	effectiveIdentity, err := model.PluginExecutorIdentity(&effective, plugin, registry.Generation().Number, "task", c.Request.URL.Path)
+	require.NoError(t, err)
+	public, err := New([]string{"affinity-task"}, []string{"61"})
+	require.NoError(t, err)
+	upstream, err := New([]string{"affinity-task"}, nil)
+	require.NoError(t, err)
+	both, err := NewGate(public, upstream, []core.ExecutorIdentity{baseIdentity, effectiveIdentity})
+	require.NoError(t, err)
+	core.Models = both
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, &channel, "affinity-task"))
+	selected, ok := common.GetContextKeyType[map[string]any](c, constant.ContextKeyChannelParamOverride)
+	require.True(t, ok)
+	require.Equal(t, merged, selected)
+	require.Len(t, selected["operations"], 2, "official selection merges the template once")
+	c.Set("task_request", map[string]any{"prompt": "synthetic"})
+	c.Set("task_action", "generate")
+	probe := &admissionBillingProbe{}
+	info := &relaycommon.RelayInfo{OriginModelName: "affinity-task", UsingGroup: "default", Billing: probe, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+	info.InitChannelMeta(c)
+	info.UpstreamModelName = "affinity-task"
+	info.UserId, info.PublicTaskID = 71, "synthetic-task-affinity-envelope"
+	adaptor := taskjsplugin.New(plugin)
+	adaptor.Init(info)
+	require.Nil(t, adaptor.ValidateRequestAndSetAction(c, info))
+	artifact, err := adaptor.CaptureContinuationArtifact(info)
+	require.NoError(t, err)
+	var runtime struct{ ParamOverride map[string]any }
+	require.NoError(t, common.Unmarshal(artifact.RuntimeJSON, &runtime))
+	assert.Equal(t, selected, runtime.ParamOverride, "frozen continuation retains the actual effective envelope")
+	body, err := adaptor.BuildRequestBody(c, info)
+	require.NoError(t, err)
+	response, err := adaptor.DoRequest(c, info, body)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, int32(1), dispatches.Load())
+	// Task descriptors are plugin-owned: unlike the ordinary provider pipeline,
+	// the task host does not apply channel parameter operations to this body.
+	// The effective envelope is still checked and archived above.
+	assert.JSONEq(t, `{"model":"affinity-task","prompt":"synthetic"}`, <-bodies)
+	hooks := &hostPreselectionHookProbe{PluginHookGate: oldHooks}
+	core.PluginHooks = hooks
+	for _, identity := range []core.ExecutorIdentity{baseIdentity, effectiveIdentity} {
+		remaining, err := NewGate(public, upstream, []core.ExecutorIdentity{identity})
+		require.NoError(t, err)
+		core.Models = remaining
+		require.NotNil(t, adaptor.ValidateRequestAndSetAction(c, info), "revocation must reject a prepared task before its cached hook")
+		_, err = adaptor.DoRequest(c, info, strings.NewReader(`{"model":"affinity-task"}`))
+		require.Error(t, err)
+	}
+	assert.Empty(t, hooks.calls)
+	assert.Equal(t, int32(1), dispatches.Load())
+	assert.Zero(t, probe.reserve)
 }
 
 func runHostProviderChainAdmission(t *testing.T, previousGate *Gate, noop core.ModelGate) {

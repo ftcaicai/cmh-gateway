@@ -16,7 +16,15 @@
 - middleware/distributor.go：存储 base 审批后、发布新 selection context / GetNextEnabledKey 前进行一次官方 merge 与 effective 审批；同一 map 写回原上下文。
 - relay/request_billing.go：重建实际 selected context 后复用统一检查，仍先于估价/免费跳过/预扣；不改账务方法。
 - ext/domestic/host_admission_test.go：沿公开 GetPreferredChannelByAffinity 匹配真实 header 规则（cache miss 仍有模板）→Setup→预扣前检查→provider 真实本地派发；上游收到 base_marker 与 affinity_marker。operations 恰好两条，防止重复合并。base-only 候选可入围但 Setup 拒绝且不发布 key；effective-only 候选和 Setup 均拒绝。撤销任一审批、选中后 context / RelayInfo 参数篡改、未批 fresh base 均拒绝，准备后的 provider 不再联网。预扣拒绝探针没有估算/Reserve 调用，**不是资金守恒认证**。
-- 既有 pinned A/current B、其它配置漂移、任务源/目标 veto 与有限授权回归一起运行。新增 affinity positive 仅 provider wire；既有 task 回归不等于新增 task-affinity positive 或全协议覆盖。
+- 既有 pinned A/current B、其它配置漂移、任务源/目标 veto 与有限授权回归一起运行。首批新增 affinity positive 仅 provider wire；后续第41轮补充 task 的有效 envelope、捕获及撤销验证，见下节；不等于全协议覆盖。
+
+### 第41轮任务合同补验
+
+集中 fixture 新增 `affinity_exact_envelopes/task_submit`：公开 affinity header 规则匹配与实际 Setup 选择，stored base / effective task+path 身份独立审批，实际 ValidateRequestAndSetAction → BuildRequestBody → DoRequest 向本地 stub 提交。选中 operations 长度2，CaptureContinuationArtifact 的 RuntimeJSON.ParamOverride 与选中 effective 完全一致；准备后的同一 adaptor 撤销任一审批均在 hook / 新网络前拒绝，reservation probe 为0（不是资金守恒证明）。
+
+首次真实 wire marker 断言 RED：实际请求为 `{"model":"affinity-task","prompt":"synthetic"}`，没有 base_marker / affinity_marker。源码与实际调用一致：task 描述符归插件所有，task 路径不经过普通 provider 的 ApplyParamOverride。最终按真实 descriptor wire 断言，不人工应用 override，不修改生产语义，**不能声称 task operations 已应用到上游 body**。初次失败已调查，非删除应有安全断言。
+
+最终 focused SQLite3.50.4 PASS：package7.761s，task子用例0.02s。集成 ext 全测试 / task 包测试及对应 vet exit0：ext/domestic7.672s、task1.365s。最终完整三库 exit0、package21.236s：SQLite3.50.4 7.58s / MySQL8.0.44 6.67s / PostgreSQL17.12 6.72s；task_submit 分别0.02/0.01/0.01s。两独立引擎已优雅停止，相关 jobs 均收取。
 
 ## 命令与结果
 

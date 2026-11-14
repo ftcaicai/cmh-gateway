@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `cc5898a62`：main/develop一致，差异CI43551288287/43551284080 success；rc51完整同步已合入。本轮affinity双精确审批已在三个既登记生产文件接线，实际provider wire/三库/相关tests/vet/build通过，独立只读复核无阻断，待本批提交。所有Gate仍noop，TaskContinuations/ContinuationGrants默认nil。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
+- 最近已推 `afece39871ca5bade1d8608fbf85119c9fbd5c76`：main/develop一致，差异CI43558775291/43558771845 success；rc51完整同步已合入。affinity双精确审批已在三个既登记生产文件接线，实际provider wire/三库/相关tests/vet/build通过，独立只读复核无阻断并已发布。当前第41/80轮补齐task-affinity实际提交证据，并只读调查type60/legacy身份边界。所有Gate仍noop，TaskContinuations/ContinuationGrants默认nil。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -41,7 +41,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续总体剩余：有限static per_task授权已实接/真三库，批准制品loader可返回policy但全局仍未安装；batch/content/report/refresh/dynamic目的地task权限未覆盖。affinity双精确envelope有限provider已验，task-affinity/更广重试覆盖未认证；type60/legacy、新实例requestplan与最终startup failclosed/keycustody备份GCM预算/完整启用验收仍未完。金融同事务RFC独立未批，timeout不改；不能因有限首批成功就装全局或宣称P1/P2完成。49/1602硬限保留，无第50file或命名sharedendpoint>40授权。
+- 接续总体剩余：有限static per_task授权已实接/真三库，批准制品loader可返回policy但全局仍未安装；batch/content/report/refresh/dynamic目的地task权限未覆盖。affinity双精确envelope provider及task选中/捕获/实际描述符提交/撤销已验；task body不应用普通provider operations，未改官方语义。type60普通未绑定路径为builtin，绑定路径仍拒绝；legacy按模型匹配投影存在误标可能，但独立追踪未发现穿透实际pinned执行守卫的JS/网络绕过，待下一轮最小保守收口。更广重试覆盖未认证；新实例requestplan与最终startup failclosed/keycustody备份GCM预算/完整启用验收仍未完。金融同事务RFC独立未批，timeout不改；不能因有限首批成功就装全局或宣称P1/P2完成。49/1602硬限保留，无第50file或命名sharedendpoint>40授权。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 
