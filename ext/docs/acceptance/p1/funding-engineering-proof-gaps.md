@@ -28,4 +28,18 @@
 
 剩余：具体DTO与schema/模型上界证据、全部raw/bulk/Redis/batch mutation覆盖、participant生命周期与多用户竞争、实际typed caller兼容、一次派发本地故障测试、三库升级/幂等/未知commit/Redis×BATCH守恒、元数据/usage/tombstone保留期限及历史删除。以上未验证，不能批准无条件端到端或生产启用；但可以先形成有退出门槛的synthetic-only实施申请，以实现获取这些工程证据所需的代码。合成fixture不能授予真实模型资格，实施仍须独立范围/预算授权及rules PR。
 
+## 阶段与故障验收规格（设计，未执行）
+
+负责人已明确选择继续设计、不批准实施。本节只固定未来可审查断言，不创建仓储、事务桥、测试代码或rules PR。
+
+- 分离持久事实与调用者观察：已提交的Reserved、DispatchClaimed、usage intent、Settled/Cancelled由数据库事实证明；CancelPending、SettlementPending、Uncertain、UsageIntentPending可能仅是内存观察。写入失败不能声称已持久保存pending或usage。
+- 合成oracle仅用于规格：客户初始1000、OEM初始2000，各自独立资产；预留售价100/成本60后分别为available/reserved＝900/100及1940/60，token remain900。实际售价70/成本40结算后分别为930/0/consumed70及1960/0/consumed40，token remain930/used70；30/20释放与终态、分录、token同事务。这里1:1额度scale不是产品配置，consumed桶也不是对手科目或真实双重分录证明。
+- 预留任一写入后确定回滚：全部财务事实保持初始值，可保留先前独立提交的bootstrap绑定，网络0。commit回执丢失则数据库只能是完整前态或完整后态，调用者CommitUnknown；必须从独立连接按精确phase key核验，不能猜测回滚或重复释放。
+- claim确定回滚、unknown、重放均发送0次。即使unknown后来查到claim已提交，也不补发。只有活跃首次已知commit成功者可发送一次；claim/cancel竞争只有一个赢家，不得出现已释放预留与有效发送权并存。
+- claim后EOF、超时、取消、3xx、异常SSE、缺失或不可信usage：保持预留与claim，不自动refund/redrive/追加收费；实际网关应用层attempt最多1、redirect下一跳0。已写HTTP响应不追加第二份正文，pending审计不能冒充可撤回响应。
+- usage intent确定回滚：数据库仍只有claim，重启不能从丢失的内存usage结算。已有intent但结算回滚保持预留及原intent；结算unknown先查精确phase结果。相同终态重放零额外token/资金/通知；实际等于预留的零delta结算仍须终态事件。outbox投递失败或回执丢失不逆转已提交资金。
+- 最终正文不匹配若在预留前发现，资金不变；若在已知预留后发现，应为取消成功或保持Reserved并观察CancelPending，不能笼统声称零资金触碰。缺失usage不等于合法零usage；首批可靠全上界合同没有已定义Append触发点，不自行添加claim后Append。
+
+仍未闭合的有限设计项：预留阶段token.used是冻结计入还是仅结算计入；各资产精确对手科目及方向；phase-key/payload与各阶段outbox含义；完整零usage的合法性。不得用上述示例替代这些定义。未来验证须独立SQL连接及重启读取，覆盖每写入点回滚、真正lost-ack、三库fresh/upgrade/重复迁移与Redis×BATCH四组合；当前没有运行这些测试，纯值原型不能替代事务证据。
+
 只读调查原稿位于本地ignored缓存，未提交敏感正文或凭据；本页保存可接续结论，不将源码阅读包装成测试通过。
