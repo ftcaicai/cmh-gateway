@@ -2013,7 +2013,37 @@ func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, no
 	require.NotNil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"response.create","response":{"model":"unapproved-target"}}`)))
 	require.NotNil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"session.update","session":{"input_audio_transcription":{"model":"unapproved-transcriber"}}}`)))
 	require.NotNil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"session.update","session":{"audio":{"input":{"transcription":{"model":"unapproved-transcriber"}}}}}`)))
-	require.Nil(t, openai.CheckRealtimeAdmission(c, info, []byte(`{"type":"session.update","session":{"instructions":"ordinary update"}}`)))
+	for _, body := range []string{
+		`{"type":"session.update","TYPE":"response.create","session":{"model":"unapproved-target"}}`,
+		`{"type":"session.update","session":{"model":"unapproved-target"},"SESSION":{"model":"approved-target"}}`,
+		`{"type":"session.update","session":{"input_audio_transcription":{"model":"unapproved-transcriber","MODEL":""}}}`,
+		`{"type":"response.create","type":"response.create","response":{"model":"approved-target"}}`,
+		`{"type":"response.create","response":{"model":"approved-target","m\u006fdel":"approved-target"}}`,
+		`{"type":"session.update","session":{},"s\u0065ssion":{}}`,
+		`{"type":"response.create","response":{},"response":{}}`,
+		`{"type":"session.update","session":{"input_audio_transcription":{},"input_audio_transcription":{}}}`,
+		`{"type":"session.update","session":{"audio":{},"audio":{}}}`,
+		`{"type":"session.update","session":{"audio":{"input":{},"input":{}}}}`,
+		`{"type":"session.update","session":{"audio":{"input":{"transcription":{},"transcription":{}}}}}`,
+		`{"type":"session.update","session":{"audio":{"input":{"transcription":{"model":"unapproved-transcriber","MODEL":""}}}}}`,
+		`{"type":"session.update","session":{"model":7}}`,
+		`{"type":"session.update","session":{"input_audio_transcription":{"model":7}}}`,
+		`{"type":"response.create","response":[]}`,
+		`[]`,
+		`null`,
+	} {
+		assert.NotNil(t, openai.CheckRealtimeAdmission(c, info, []byte(body)), "canonical identity must not be shadowed: %s", body)
+	}
+	for _, body := range []string{
+		`{"type":"session.update","TYPE":"response.create","session":{"model":"approved-target"},"SESSION":{"model":"unapproved-target"}}`,
+		`{"type":"session.update","session":{"model":"approved-target","MODEL":"unapproved-target","instructions":"ordinary","instructions":"updated"}}`,
+		`{"t\u0079pe":"response.create","response":{"m\u006fdel":"approved-target"}}`,
+		`{"type":"session.update","session":{"input_audio_transcription":{"model":null},"audio":{"input":{"transcription":{"model":null}}}}}`,
+		`{"type":"session.update","session":{"input_audio_transcription":null,"audio":{"input":{"transcription":null}}}}`,
+		`{"type":"session.update","session":{"instructions":"ordinary update"}}`,
+	} {
+		assert.Nil(t, openai.CheckRealtimeAdmission(c, info, []byte(body)), "canonical optional identity remains valid: %s", body)
+	}
 	// WssHelper initializes the actual handshake identity from context before
 	// dialing. This mapped public alias must be rejected before a new handshake,
 	// rather than dial the original alias and only reject in the event handler.
@@ -2024,6 +2054,7 @@ func runHostAdmissionSockets(t *testing.T, channel model.Channel, gate *Gate, no
 	assert.Equal(t, beforeDials, upstreamDials.Load())
 	core.Models = noop
 	require.Nil(t, openai.CheckRealtimeAdmission(nil, nil, nil))
+	require.Nil(t, openai.CheckRealtimeAdmission(nil, nil, []byte(`{"type":"session.update","type":"response.create","session":{"model":"unapproved-target"}}`)))
 	core.Models = gate
 	runHostProviderAdmissionSocket(t, noop)
 }

@@ -2,7 +2,6 @@ package openai
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -82,64 +82,91 @@ func CheckRealtimeAdmission(c *gin.Context, info *relaycommon.RelayInfo, message
 		ctx = c.Request.Context()
 	}
 	if message != nil {
-		var event struct {
-			Type     string                     `json:"type"`
-			Session  map[string]json.RawMessage `json:"session"`
-			Response map[string]json.RawMessage `json:"response"`
-		}
-		if common.Unmarshal(message, &event) != nil {
+		if !ojson.ValidBytes(message) {
 			return rejected
 		}
-		var members map[string]json.RawMessage
-		switch event.Type {
-		case dto.RealtimeEventTypeSessionUpdate:
-			members = event.Session
-		case dto.RealtimeEventTypeResponseCreate:
-			members = event.Response
+		root := ojson.GetBytesNoCopy(message, "@this")
+		if !root.IsObject() {
+			return rejected
 		}
-		if event.Type == dto.RealtimeEventTypeSessionUpdate {
-			// Transcription chooses another model, not the fixed realtime model.
-			// Authorize that explicit target separately under the same channel and
-			// executor policy; never let it inherit the main socket's approval.
-			var nested struct {
-				Session struct {
-					Legacy struct {
-						Model string `json:"model"`
-					} `json:"input_audio_transcription"`
-					Audio struct {
-						Input struct {
-							Transcription struct {
-								Model string `json:"model"`
-							} `json:"transcription"`
-						} `json:"input"`
-					} `json:"audio"`
-				} `json:"session"`
-			}
-			if common.Unmarshal(message, &nested) != nil {
-				return rejected
-			}
-			for _, target := range []string{nested.Session.Legacy.Model, nested.Session.Audio.Input.Transcription.Model} {
-				if target == "" {
-					continue
+		event, ok := realtimeIdentityMembers(root, "type", "session", "response")
+		if !ok {
+			return rejected
+		}
+		eventType := event["type"]
+		if eventType.Exists() && eventType.Type != ojson.String {
+			return rejected
+		}
+		var members map[string]ojson.Result
+		switch eventType.String() {
+		case dto.RealtimeEventTypeSessionUpdate:
+			members, ok = realtimeIdentityMembers(event["session"], "model", "input_audio_transcription", "audio")
+		case dto.RealtimeEventTypeResponseCreate:
+			members, ok = realtimeIdentityMembers(event["response"], "model")
+		}
+		if !ok {
+			return rejected
+		}
+		if eventType.String() == dto.RealtimeEventTypeSessionUpdate {
+			for _, path := range [][]string{{"input_audio_transcription"}, {"audio", "input", "transcription"}} {
+				current := members
+				for i, key := range path {
+					nextKeys := []string{"model"}
+					if i+1 < len(path) {
+						nextKeys = []string{path[i+1]}
+					}
+					current, ok = realtimeIdentityMembers(current[key], nextKeys...)
+					if !ok {
+						return rejected
+					}
 				}
-				transcription := admission
-				transcription.Model = core.ModelIdentity{Public: target, Upstream: target}
-				if core.Models.Check(ctx, transcription) != nil {
+				target := current["model"]
+				if target.Exists() && target.Type != ojson.Null && target.Type != ojson.String {
 					return rejected
 				}
+				if target.String() != "" {
+					transcription := admission
+					transcription.Model = core.ModelIdentity{Public: target.String(), Upstream: target.String()}
+					if core.Models.Check(ctx, transcription) != nil {
+						return rejected
+					}
+				}
 			}
 		}
-		if raw, present := members["model"]; present {
-			var name string
-			if common.Unmarshal(raw, &name) != nil || name != info.UpstreamModelName {
-				return rejected
-			}
+		if name, present := members["model"]; present && (name.Type != ojson.String || name.String() != info.UpstreamModelName) {
+			return rejected
 		}
 	}
 	if core.Models.Check(ctx, admission) != nil {
 		return rejected
 	}
 	return nil
+}
+
+// realtimeIdentityMembers reads only canonical identity keys, preserving unknown
+// fields while rejecting duplicate decoded keys on the paths used for admission.
+func realtimeIdentityMembers(object ojson.Result, keys ...string) (map[string]ojson.Result, bool) {
+	members := make(map[string]ojson.Result, len(keys))
+	if !object.Exists() || object.Type == ojson.Null {
+		return members, true
+	}
+	if !object.IsObject() {
+		return nil, false
+	}
+	valid := true
+	object.ForEach(func(key, value ojson.Result) bool {
+		name := key.String()
+		if !slices.Contains(keys, name) {
+			return true
+		}
+		if _, duplicate := members[name]; duplicate {
+			valid = false
+			return false
+		}
+		members[name] = value
+		return true
+	})
+	return members, valid
 }
 
 func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.NewAPIError, *dto.RealtimeUsage) {
