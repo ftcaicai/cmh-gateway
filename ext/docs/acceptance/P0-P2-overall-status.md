@@ -16,14 +16,14 @@
 ## 仍未满足的退出条件
 
 1. **P1资金**：H3/H7完整资金生命周期同事务接入、token/任务归属/幂等恢复与BATCH开关/Redis守恒及故障重启三库测试未实现。旧四方法handled提前返回已证伪，不能复活。资金RFC2026-11-13仍未获实施批准，不能借H1预算覆盖财务重构。H4定价/H6正式启动迁移hook仍为保留范围，不把独立archive migration称整期完成。
-2. **P2权威兼容**：affinity已覆盖有限provider wire及task有效envelope，重试全协议覆盖仍未认证；普通未绑定type60为builtin，插件绑定type60仍拒绝；legacy目录投影可能误标builtin，但实际pinned任务执行守卫仍拒绝，需进一步收口，不能笼统称所有legacy均未知。启用requestplan等仍拒绝，尚无全协议安全且可用的验收；有限grant不覆盖batch/content/report/refresh或动态签名query目标task权限。
+2. **P2权威兼容**：affinity已覆盖有限provider wire及task有效envelope，重试全协议覆盖仍未认证；普通未绑定type60为builtin，插件绑定type60仍拒绝；legacy当前by-type owner不再按模型声明回退builtin，保存/目录/DB及memory候选三库拒绝；代价是默认sora/type1双用途普通chat在active gate下也拒绝，不是完整兼容；owner缺失/旧pinned/静态platform整体身份仍待解决。启用requestplan等仍拒绝，尚无全协议安全且可用的验收；有限grant不覆盖batch/content/report/refresh或动态签名query目标task权限。
 3. **启动与运维**：Models/PluginHooks/Executors/Destinations仍noop；TaskContinuations/ContinuationGrants仍nil。批准manifest+锚定loader虽能编译返回policy，但尚无完整启动原子安装、密钥custody/备份恢复/GCM寿命预算、全量failclosed行为与同制品验收。禁止提前安装半套策略。
 4. **回归缺口**：Windows全rootcontroller/middleware日志/DB占用cleanup和累计package timeout失败保留；rc51 optional全web lint148errors/66warnings未修。Linux完整CI通过不抹掉这些平台事实；race因C编译器缺少未认证。数据库仅SQLite3.50.4/MySQL8.0.44/PG17.12，不声称最低版本全面认证。
 5. **真实调用/上线**：无生产凭据、收费模型调用、真实operator taskgrant、28个供应商生产渠道配置或生产域；不访问旧系统/不迁移数据/不切流。离线本地stub通过不等于供应商live或生产可用。
 
 ## 已批准不可重复询问
 
-R3最小官方回跳、R4精确工厂清单、H1累计48/6000与唯一命名middleware/task_plugin.go第49例外≤40增删行（累计6000不变）、有限taskgrant首批合同均已明确批准。源码当前相对rc51官方49文件/4398增删行，命名文件14/40，余1602行且0任意新文件名额；不删测试凑预算。
+R3最小官方回跳、R4精确工厂清单、H1累计48/6000与唯一命名middleware/task_plugin.go第49例外≤40增删行（累计6000不变）、有限taskgrant首批合同均已明确批准。源码当前相对rc51官方49文件/4397增删行，命名文件14/40，余1603行且0任意新文件名额；不删测试凑预算。
 
 ## 接续顺序
 

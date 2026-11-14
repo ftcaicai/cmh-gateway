@@ -269,12 +269,11 @@ func ChannelModelAdmission(ch *Channel, public string, phase core.AdmissionPhase
 	if ch.Type == constant.ChannelTypeTaskPlugin || setting.TaskPluginKey != "" || len(setting.TaskExtendPluginKeys) > 0 || len(setting.RequestPlugins) > 0 {
 		return admission
 	}
-	if plugin, owned := jsplugin.DefaultRegistry.Generation().GetByChannelType(ch.Type); owned {
-		for _, declared := range plugin.Meta.Models {
-			if strings.EqualFold(declared, public) || strings.EqualFold(declared, upstream) || strings.EqualFold(declared, reasoning.BaseModelName(public)) || strings.EqualFold(declared, reasoning.BaseModelName(upstream)) {
-				return admission
-			}
-		}
+	// Legacy task resolution is not limited to the owner's declared models.
+	// Until an exact legacy execution envelope exists, even dual-use ordinary
+	// relay channels must not claim builtin identity while a current owner exists.
+	if _, owned := jsplugin.DefaultRegistry.Generation().GetByChannelType(ch.Type); owned {
+		return admission
 	}
 	// Global/group request plugins are not encoded in channel settings. Until
 	// the execution-plan boundary is wired, do not claim builtin-only execution

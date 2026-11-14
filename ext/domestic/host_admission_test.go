@@ -2789,6 +2789,63 @@ export function refresh(ctx){const response=utils.fetch({url:ctx.baseUrl+"/refre
 	assert.Equal(t, int32(1), networkCalls.Load())
 }
 
+func runHostLegacyOwnerProjection(t *testing.T, noop core.ModelGate) {
+	t.Helper()
+	oldGate, oldRegistry, oldMemory := core.Models, jsplugin.DefaultRegistry, common.MemoryCacheEnabled
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	defer func() {
+		core.Models, jsplugin.DefaultRegistry, common.MemoryCacheEnabled = oldGate, oldRegistry, oldMemory
+		model.InitChannelCache()
+	}()
+	public, err := New([]string{"legacy-undeclared,newapi-unbound"}, []string{"1,60"})
+	require.NoError(t, err)
+	upstream, err := New([]string{"legacy-undeclared,newapi-unbound"}, nil)
+	require.NoError(t, err)
+	gate, err := NewGate(public, upstream, nil)
+	require.NoError(t, err)
+	channels := []model.Channel{
+		{Id: 95014, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Key: "fixture", Models: "legacy-undeclared", Group: "default"},
+		{Id: 95015, Type: constant.ChannelTypeNewAPI, Status: common.ChannelStatusEnabled, Key: "fixture", Models: "newapi-unbound", Group: "default"},
+	}
+	core.Models = gate
+	for i := range channels {
+		require.NoError(t, channels[i].Insert(), "ordinary no-owner channel remains saveable")
+	}
+	defer func() {
+		core.Models = noop
+		for i := range channels {
+			require.NoError(t, model.DB.Where("channel_id = ?", channels[i].Id).Delete(&model.Ability{}).Error)
+			require.NoError(t, model.DB.Where("id = ?", channels[i].Id).Delete(&model.Channel{}).Error)
+		}
+	}()
+	assert.Contains(t, model.GetGroupEnabledModels("default"), "legacy-undeclared")
+	assert.Contains(t, model.GetGroupEnabledModels("default"), "newapi-unbound")
+	_, err = registry.RegisterFactory(`export const meta={apiVersion:1,key:"cmh-legacy-owner",name:"Legacy owner",version:"1.0.0",author:{name:"Test"},channelTypes:[1],models:["different-declared-model"],fetchMode:"per_task"};
+export function buildSubmitRequest(){return {url:"https://fixture.invalid/submit"};}
+export function parseSubmitResponse(){return {taskId:"synthetic"};}
+export function buildQueryRequest(){return {url:"https://fixture.invalid/query"};}
+export function parseTaskResult(){return {status:"IN_PROGRESS"};}`, jsplugin.Options{})
+	require.NoError(t, err)
+	assert.Error(t, model.ValidateChannelAdmissionSnapshot(t.Context(), &channels[0]), "a current legacy owner cannot become builtin merely because the model is undeclared")
+	assert.NotContains(t, model.GetGroupEnabledModels("default"), "legacy-undeclared")
+	for _, memory := range []bool{false, true} {
+		common.MemoryCacheEnabled = memory
+		model.InitChannelCache()
+		selected, err := model.GetRandomSatisfiedChannel("default", "legacy-undeclared", 0, nil)
+		require.NoError(t, err)
+		assert.Nil(t, selected, "current-owner legacy must not be selected as builtin; memory=%v", memory)
+	}
+	assert.NoError(t, model.ValidateChannelAdmissionSnapshot(t.Context(), &channels[1]), "unbound type60 has no legacy owner and remains builtin")
+	assert.Contains(t, model.GetGroupEnabledModels("default"), "newapi-unbound")
+	blocked := channels[0]
+	blocked.Id = 95016
+	require.Error(t, blocked.Insert(), "actual save must fail, not only a projection assertion")
+	var count int64
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", blocked.Id).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
 func runHostPluginPublication(t *testing.T, noop core.ModelGate) {
 	t.Helper()
 	oldGate, oldRegistry := core.Models, jsplugin.DefaultRegistry
@@ -2894,6 +2951,9 @@ export function parseTaskResult(){return {status:"IN_PROGRESS"};}`
 
 func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	t.Helper()
+	oldRegistry := jsplugin.DefaultRegistry
+	jsplugin.DefaultRegistry = jsplugin.NewRegistry()
+	defer func() { jsplugin.DefaultRegistry = oldRegistry }()
 	oldDB, oldLogDB := model.DB, model.LOG_DB
 	oldMainType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
 	oldMaster, oldMemory := common.IsMasterNode, common.MemoryCacheEnabled
@@ -2984,6 +3044,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.True(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeOpenAI))
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeAnthropic))
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
+	t.Run("legacy_owner_projection", func(t *testing.T) { runHostLegacyOwnerProjection(t, oldGate) })
 	runHostPluginPublication(t, oldGate)
 	runHostSharedEndpointPreselection(t, oldGate)
 	runHostContinuationCredentialRefresh(t, oldGate)
