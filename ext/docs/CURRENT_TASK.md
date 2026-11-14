@@ -41,7 +41,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续task-scoped独立grant：archiveSave在build前，仅字节完整性不是授权，Loadpurpose枚举/RestoreBind/ref不能mint权限。可选第一批per_task staticcredential有限buildQuery/parse/sign/usage显式operator精确task/ref/purpose/source/runtime许可+authenticatedLoad私有scope，禁utils.fetch/refresh/content/report/batch，实际transport仍globalexactdestination；需要明确expiry/revocation权限合同再实接，不自动授权未来签名queryURL。其余affinity/type60/legacy与keycustody/备份/GCM/fullactivation未完，49/1760硬限保留；金融同事务RFC独立未批，timeout未改。
+- 接续已批准taskgrant（RFC2026-11-14-task-continuation-authority）：负责人已选择有限首批合同，接续直接实施，不再问expiry/restart撤销同一许可。先合rc51 PR3全部CI后，在已登记engine/resolver/adaptor接 authenticatedStore.Load→独立精确operator task/ref/purpose/source/runtime+finitehook grant→private scope；each actualJS排队后/派发/redirect前到期检查，不回退global绕过，scope始终nofetch，拒plugincredential/oauth认证token网络，必须enabled目的地精确policy。未授予任何真实task许可或全局启用；timeout/金融同事务不改。其余affinity/type60/legacy/密钥备份GCM预算/fullactivation仍未完，49/1760硬限。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 
