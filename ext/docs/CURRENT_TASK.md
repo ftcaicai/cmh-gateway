@@ -4,6 +4,8 @@
 
 ## 当前事实
 
+- 第70轮rerank实际passthrough红测复现authority mapped/原正文未映射；仅加最终Rerank+Rerank模式2生产行，实际helper拒绝/identity/noop三控制通过，Host8.103s。父会话relay/ext通过，channel在既有CannotRetryWithoutGetBody:578 reset失败，未称全绿；明确排除两项已调查HTTP2 fixture后的其余channel0.167s、相关vet/rootbuild/diff-check和门禁通过，官方49/4641余1359、named14/40，独立只读复核无阻断。第68轮573bcfcdc双分支门禁43601238156/43601229878 success，第69轮只读HTTP2调查537bcc4c4双分支43601983383/43601975380 success。最新上游仍rc51，无新升级宣称。
+
 - 第68轮仅moderation显式model：缺失保留旧语义，存在才要求唯一字符串/精确upstream；定向Host13.313s与独立复核通过。父会话relay/ext全tests通过，但channel两次在既有HTTP2 GOAWAY测试:540连接复位失败，单例隔离0.146s通过；不称全包绿，明确排除此例其余channel0.166s、vet/rootbuild/diff-check通过，门禁49/4639余1361、named14/40。tools正文model与路由名允许不同，不能套相等检查，moderation默认stable/latest/omni差异尚未闭合。
 - 第67轮已于8838b42c5发布，双分支门禁43600394504/43600381396 success。仅补Alpha Search精确mode+最终format：源码确认其必填model在映射后仍可能被override替换；实际helper本地400测试避免进入usage/结算，验证mapped发送/未知字段、错配零发送和noop。定向SQLite Host14.150s、父会话channel/relay/ext全tests（domestic9.005s）/vet/rootbuild与独立复核通过，官方49/4638余1362、named14/40；无DB行为修改，不宣称新三库认证。不扩大tools默认语义、moderation或图片multipart。
 - 第66轮已于ba30d1969发布，双分支门禁43599327437/43599318564 success。第65轮type60/OpenAI chat最终正文守卫已于26a877709发布，双分支门禁43598086733/43598071386 success。第66轮在原挂载点补齐已知completions/embedding/Responses/compact的精确最终format+mode，包含chat→Responses与compact投影；实现与中央HTTP正反例已验，定向13.250s、父会话channel/relay/ext全tests（domestic8.842s）/vet/rootbuild通过，独立复核无阻断；官方49/4636余1364，named14/40，未增加文件。不扩大opaque/multipart范围，无新三库认证。

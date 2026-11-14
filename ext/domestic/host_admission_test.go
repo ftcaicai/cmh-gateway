@@ -3554,6 +3554,69 @@ func runHostHTTPFinalModel(t *testing.T, noop core.ModelGate) {
 		assert.True(t, kittypes.IsSkipRetryError(denied))
 		assert.Equal(t, before, calls.Load())
 	})
+	t.Run("rerank actual passthrough helper", func(t *testing.T) {
+		var rerankCalls atomic.Int32
+		var rerankWire string
+		rerankServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			wire, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			rerankWire = string(wire)
+			rerankCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"synthetic upstream rejection","type":"invalid_request_error"}}`)
+		}))
+		defer rerankServer.Close()
+		rerankTarget := target
+		rerankTarget.AddressSHA256, err = core.DestinationAddress(rerankServer.URL + "/v1/rerank")
+		require.NoError(t, err)
+		rerankTarget.HostSHA256 = core.DestinationHost(strings.TrimPrefix(rerankServer.URL, "http://"))
+		core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{rerankTarget})
+		require.NoError(t, err)
+		for _, tc := range []struct {
+			name, model string
+			noop        bool
+		}{{"mapped raw alias denied", "public-chat", false}, {"identity body", "approved-target", false}, {"noop retains raw alias", "public-chat", true}} {
+			t.Run(tc.name, func(t *testing.T) {
+				core.Models = gate
+				if tc.noop {
+					core.Models = noop
+				}
+				defer func() { core.Models = gate }()
+				wire := `{"model":"` + tc.model + `","query":"synthetic","documents":["synthetic"]}`
+				rerankContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+				rerankContext.Request = httptest.NewRequest(http.MethodPost, "/v1/rerank", strings.NewReader(wire))
+				rerankContext.Request.Header.Set("Content-Type", "application/json")
+				common.SetContextKey(rerankContext, constant.ContextKeyChannelId, 95016)
+				common.SetContextKey(rerankContext, constant.ContextKeyChannelType, constant.ChannelTypeNewAPI)
+				common.SetContextKey(rerankContext, constant.ContextKeyOriginalModel, "public-chat")
+				common.SetContextKey(rerankContext, constant.ContextKeyChannelBaseUrl, rerankServer.URL)
+				rerankContext.Set("model_mapping", `{"public-chat":"approved-target"}`)
+				common.SetContextKey(rerankContext, constant.ContextKeyChannelSetting, kitdto.ChannelSettings{PassThroughBodyEnabled: true})
+				probe := &admissionBillingProbe{}
+				rerankInfo := &relaycommon.RelayInfo{OriginModelName: "public-chat", RelayMode: relayconstant.RelayModeRerank, RelayFormat: kittypes.RelayFormatRerank, RequestURLPath: "/v1/rerank", Request: &kitdto.RerankRequest{Model: "public-chat"}, Billing: probe}
+				before := rerankCalls.Load()
+				apiErr := relay.RerankHelper(rerankContext, rerankInfo)
+				require.NotNil(t, apiErr, "synthetic error stops before usage and settlement")
+				assert.Equal(t, "approved-target", rerankInfo.UpstreamModelName)
+				if tc.model != "approved-target" && !tc.noop {
+					assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+					assert.True(t, kittypes.IsSkipRetryError(apiErr))
+					assert.Equal(t, before, rerankCalls.Load())
+				} else {
+					assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+					assert.Equal(t, before+1, rerankCalls.Load())
+					assert.Equal(t, wire, rerankWire)
+				}
+				assert.Zero(t, probe.reserve)
+				assert.Zero(t, probe.settle)
+				assert.Zero(t, probe.refund)
+			})
+		}
+	})
 	t.Run("alpha actual helper outbound", func(t *testing.T) {
 		var alphaCalls atomic.Int32
 		var alphaWire string

@@ -410,6 +410,8 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		modelBodyKnown = info.RelayMode == constant.RelayModeEmbeddings
 	case types.RelayFormatOpenAIResponses:
 		modelBodyKnown = info.RelayMode == constant.RelayModeResponses || info.RelayMode == constant.RelayModeResponsesCompact
+	case types.RelayFormatRerank:
+		modelBodyKnown = info.RelayMode == constant.RelayModeRerank
 	case types.RelayFormatOpenAIAlphaSearch:
 		modelBodyKnown = info.RelayMode == constant.RelayModeAlphaSearch
 	case types.RelayFormatOpenAIResponsesCompaction:

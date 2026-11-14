@@ -19,6 +19,14 @@
 父会话最终全扩展测试全部通过（domestic 8.817s），`go vet -p 2 ./relay/channel ./ext/...` 与diff-check exit 0。
 
 
+## 第70轮：rerank passthrough最终身份
+
+实际RerankHelper先映射DTO/authority，但passthrough发送原BodyStorage。修复前本地stub收到public-chat而authority为approved-target，测试要求403/零发送却实际400/一次发送：红测7.714s exit1。仅增加type60＋active Models＋最终Rerank格式＋Rerank模式，复用既有mandatory canonical model独立replay；不新增type60普通rerank converter。
+
+真实helper三控制：映射raw alias拒绝403/SkipRetry零网络；identity正确正文原字节到stub；noop保留raw alias发送。stub固定合成400，在usage/settle之前结束，probe reserve/settle/refund全零，不是资金守恒或完整成功响应认证。定向HTTP回归2.338s、完整Host SQLite8.103s、相关vet/gofmt/diff-check通过；独立只读最终复核无阻断，未自行运行测试。无DB行为修改，不称新三库认证。
+
+父会话完整relay/ext通过（relay5.861s/domestic7.891s），channel本次在HTTP2CannotRetryWithoutGetBody:578收到wsarecv reset而非预期cannot retry err，完整包exit1保留；与第69轮调查同类，未改该测试或生产重试。明确排除已调查的两项HTTP2 fixture后，其余channel0.167s通过，相关vet/rootbuild与门禁exit0：49/4641余1359、named14/40；不把排除后的结果称完整包绿色。
+
 ## 第69轮：HTTP2完整回归失败调查（未修复）
 
 失败测试与rc51字节一致（blob `4370e22b3429f2046c9c80920a563de1112f4ed9`）。其独立http2.Transport直接发送，不调用最终正文准入；raw服务器在收到END_STREAM后写GOAWAY立即Close，RST_STREAM与成功响应路径也立即关闭，可能未排空SETTINGS ACK等控制帧。证据支持关闭竞态，但没有失败抓包，不宣称确证TCP reset起源。
