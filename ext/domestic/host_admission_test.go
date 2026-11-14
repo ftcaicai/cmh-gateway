@@ -32,6 +32,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
+	"github.com/QuantumNous/new-api/relay/channel/newapi"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	"github.com/QuantumNous/new-api/relay/channel/providerplugin"
 	taskjsplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
@@ -3294,6 +3295,147 @@ export function refresh(ctx){const response=utils.fetch({url:ctx.baseUrl+"/refre
 	assert.Equal(t, int32(1), networkCalls.Load())
 }
 
+type httpModelReplayBody struct {
+	io.Reader
+	size int64
+	open func() (io.ReadCloser, error)
+}
+
+func (b httpModelReplayBody) Size() int64                       { return b.size }
+func (b httpModelReplayBody) NewReader() (io.ReadCloser, error) { return b.open() }
+
+type httpModelReplayReader struct {
+	io.Reader
+	readErr, closeErr error
+}
+
+func (r httpModelReplayReader) Read(p []byte) (int, error) {
+	if r.readErr != nil {
+		return 0, r.readErr
+	}
+	return r.Reader.Read(p)
+}
+func (r httpModelReplayReader) Close() error { return r.closeErr }
+
+func runHostHTTPFinalModel(t *testing.T, noop core.ModelGate) {
+	t.Helper()
+	oldGate, oldDestinations := core.Models, core.Destinations
+	t.Cleanup(func() { core.Models, core.Destinations = oldGate, oldDestinations })
+	public, err := New([]string{"public-chat"}, []string{"60"})
+	require.NoError(t, err)
+	upstream, err := New([]string{"approved-target"}, nil)
+	require.NoError(t, err)
+	gate, err := NewGate(public, upstream, nil)
+	require.NoError(t, err)
+	core.Models = gate
+	var calls atomic.Int32
+	var received string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received = string(body)
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	address, err := core.DestinationAddress(server.URL + "/v1/chat/completions")
+	require.NoError(t, err)
+	target := core.DestinationAdmission{Kind: "relay_http", Method: http.MethodPost, AddressSHA256: address, HostSHA256: core.DestinationHost(strings.TrimPrefix(server.URL, "http://")), Model: core.ModelIdentity{Public: "public-chat", Upstream: "approved-target"}, Channel: core.ChannelIdentity{Known: true, ID: 95016, Type: constant.ChannelTypeNewAPI}}
+	core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{target})
+	require.NoError(t, err)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("ingress is not the send body"))
+	c.Request.Header.Set("Content-Type", "application/json")
+	common.SetContextKey(c, constant.ContextKeyChannelId, 95016)
+	common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeNewAPI)
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, "public-chat")
+	info := &relaycommon.RelayInfo{OriginModelName: "public-chat", RelayMode: relayconstant.RelayModeChatCompletions, RelayFormat: kittypes.RelayFormatOpenAI, RequestURLPath: "/v1/chat/completions", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 95016, ChannelType: constant.ChannelTypeNewAPI, ChannelBaseUrl: server.URL, UpstreamModelName: "approved-target"}}
+	adaptor := &newapi.Adaptor{}
+	adaptor.Init(info)
+	for _, tc := range []struct {
+		name, body string
+		allowed    bool
+	}{
+		{"mapped", `{"model":"approved-target","messages":[]}`, true},
+		{"wrong", `{"model":"unapproved-target"}`, false},
+		{"missing", `{"messages":[]}`, false},
+		{"numeric", `{"model":1}`, false},
+		{"duplicate", `{"model":"approved-target","model":"approved-target"}`, false},
+		{"escaped duplicate", `{"model":"approved-target","mo\u0064el":"approved-target"}`, false},
+		{"escaped unique", `{"mo\u0064el":"approved-target"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := calls.Load()
+			response, sendErr := adaptor.DoRequest(c, info, strings.NewReader(tc.body))
+			if !tc.allowed {
+				require.Error(t, sendErr)
+				var denied *kittypes.NewAPIError
+				require.ErrorAs(t, sendErr, &denied)
+				assert.Equal(t, http.StatusForbidden, denied.StatusCode)
+				assert.True(t, kittypes.IsSkipRetryError(denied))
+				assert.Equal(t, before, calls.Load())
+				return
+			}
+			require.NoError(t, sendErr)
+			require.NoError(t, response.(*http.Response).Body.Close())
+			assert.Equal(t, before+1, calls.Load())
+			assert.Equal(t, tc.body, received)
+		})
+	}
+	storedWire := `{"model":"approved-target","messages":[]}`
+	storedBody, storage, err := relaycommon.NewOutboundJSONBody([]byte(storedWire))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, storage.Close()) })
+	storedResponse, err := adaptor.DoRequest(c, info, storedBody)
+	require.NoError(t, err)
+	require.NoError(t, storedResponse.(*http.Response).Body.Close())
+	assert.Equal(t, storedWire, received)
+	for _, fault := range []string{"open", "nil", "short", "long", "read", "close"} {
+		t.Run("replay "+fault, func(t *testing.T) {
+			body := `{"model":"approved-target"}`
+			replayBody := httpModelReplayBody{Reader: strings.NewReader(body), size: int64(len(body)), open: func() (io.ReadCloser, error) {
+				switch fault {
+				case "open":
+					return nil, errors.New("synthetic replay open")
+				case "nil":
+					return nil, nil
+				case "short":
+					return io.NopCloser(strings.NewReader(body[:len(body)-1])), nil
+				case "long":
+					return io.NopCloser(strings.NewReader(body + " ")), nil
+				case "read":
+					return httpModelReplayReader{readErr: errors.New("synthetic replay read")}, nil
+				default:
+					return httpModelReplayReader{Reader: strings.NewReader(body), closeErr: errors.New("synthetic replay close")}, nil
+				}
+			}}
+			before := calls.Load()
+			_, err := adaptor.DoRequest(c, info, replayBody)
+			require.Error(t, err)
+			assert.Equal(t, before, calls.Load())
+		})
+	}
+	info.ParamOverride = map[string]any{"model": "unapproved-target"}
+	body, err := relaycommon.ApplyParamOverrideWithRelayInfo([]byte(`{"model":"approved-target"}`), info)
+	require.NoError(t, err)
+	before := calls.Load()
+	_, err = adaptor.DoRequest(c, info, bytes.NewReader(body))
+	require.Error(t, err)
+	assert.Equal(t, before, calls.Load(), "actual parameter override cannot change the dispatched model")
+	_, err = adaptor.DoRequest(c, info, io.LimitReader(strings.NewReader(`{"model":"approved-target"}`), 100))
+	require.Error(t, err)
+	assert.Equal(t, before, calls.Load(), "non-replayable body is denied without reading the send cursor")
+	core.Models = noop
+	response, err := adaptor.DoRequest(c, info, io.LimitReader(strings.NewReader(`{"model":"unapproved-target"}`), 100))
+	require.NoError(t, err)
+	require.NoError(t, response.(*http.Response).Body.Close())
+	assert.Equal(t, before+1, calls.Load())
+	assert.Equal(t, `{"model":"unapproved-target"}`, received, "noop retains ordinary send behavior")
+}
+
 func runHostLegacyOwnerProjection(t *testing.T, noop core.ModelGate) {
 	t.Helper()
 	oldGate, oldRegistry, oldMemory := core.Models, jsplugin.DefaultRegistry, common.MemoryCacheEnabled
@@ -3587,6 +3729,7 @@ func runHostAdmissionCandidateAndCatalog(t *testing.T) {
 	assert.True(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeOpenAI))
 	assert.False(t, model.IsModelAdmittedForPublication("gpt-4o-mini", constant.ChannelTypeAnthropic))
 	assert.False(t, model.IsModelAdmittedForPublication("not-published"))
+	t.Run("http_final_model", func(t *testing.T) { runHostHTTPFinalModel(t, oldGate) })
 	t.Run("legacy_owner_projection", func(t *testing.T) { runHostLegacyOwnerProjection(t, oldGate) })
 	runHostPluginPublication(t, oldGate)
 	runHostSharedEndpointPreselection(t, oldGate)

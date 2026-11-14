@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/MoeForge/moego/regexp"
 	common2 "github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
@@ -398,6 +400,38 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	}
 	if err = signUpstreamRequest(a, c, info, req.Method, req.URL, req.Header); err != nil {
 		return nil, err
+	}
+	if core.ModelAdmissionEnabled() && info.ChannelType == appconstant.ChannelTypeNewAPI && info.RelayMode == constant.RelayModeChatCompletions && info.RelayFormat == types.RelayFormatOpenAI {
+		rejected := types.NewErrorWithStatusCode(errors.New("model admission denied"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		if req.GetBody == nil || req.ContentLength <= 0 || req.ContentLength == math.MaxInt64 {
+			return nil, rejected
+		}
+		replay, err := req.GetBody()
+		if err != nil || replay == nil {
+			if replay != nil {
+				_ = replay.Close()
+			}
+			return nil, rejected
+		}
+		// Inspect an independent final-body replay, never the live send cursor.
+		// This copies O(final body size); no new ingress or egress size cap is imposed.
+		body, readErr := io.ReadAll(io.LimitReader(replay, req.ContentLength+1))
+		closeErr := replay.Close()
+		if readErr != nil || closeErr != nil || int64(len(body)) != req.ContentLength || !ojson.ValidBytes(body) {
+			return nil, rejected
+		}
+		root := ojson.ParseBytes(body)
+		count, matches := 0, false
+		root.ForEach(func(key, value ojson.Result) bool {
+			if key.String() == "model" {
+				count++
+				matches = value.Type == ojson.String && value.String() != "" && value.String() == info.UpstreamModelName
+			}
+			return true
+		})
+		if !root.IsObject() || count != 1 || !matches {
+			return nil, rejected
+		}
 	}
 	resp, err := doRequest(c, req, info)
 	if err != nil {
