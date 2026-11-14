@@ -19,6 +19,14 @@
 父会话最终全扩展测试全部通过（domestic 8.817s），`go vet -p 2 ./relay/channel ./ext/...` 与diff-check exit 0。
 
 
+## 第69轮：HTTP2完整回归失败调查（未修复）
+
+失败测试与rc51字节一致（blob `4370e22b3429f2046c9c80920a563de1112f4ed9`）。其独立http2.Transport直接发送，不调用最终正文准入；raw服务器在收到END_STREAM后写GOAWAY立即Close，RST_STREAM与成功响应路径也立即关闭，可能未排空SETTINGS ACK等控制帧。证据支持关闭竞态，但没有失败抓包，不宣称确证TCP reset起源。
+
+有限完整channel固定三次实验为PASS/同一:540 wsarecv FAIL/PASS，不能归因确定性顺序污染。HTTP2 debug单次通过并观察到GOAWAY接收/重试，日志会扰动调度。仅api_request.go换rc51的overlay单次及三次通过，不是纯净整树基线，也不足证明因果。诊断test-only overlay给首连接加有界半关闭/排空后三次GOAWAY通过，但同包CannotRetryWithoutGetBody仍出现同类reset；这不是合格最终修复。所有实验作业已收齐，tracked工作树未改。
+
+后续若修测试，只能另行登记既有raw-server的协议感知有界收尾，保留次数/正文/缺失GetBody断言；当前49文件预算没有该测试文件空位。本轮不擅自修改它，不加生产POST reset重试、sleep、skip或放宽断言。资金/H4/H6实施拒绝与生产禁用保持不变。
+
 ## 第68轮：moderation显式模型边界
 
 中央实际NewAPI outbound验证显式mapped正例、缺失model的原始字节保持、转义重复/数字/空串拒绝、实际override错配零新增发送和noop旧行为；未调用完整moderation helper或资金结算。完整Host SQLite13.313s、定向vet/diff-check通过；独立只读复核无阻断。
