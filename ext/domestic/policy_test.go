@@ -595,3 +595,49 @@ func TestAdmissionGateBatchCancellationAndNoop(t *testing.T) {
 	assert.ErrorIs(t, gate.ValidateChannels(ctx, nil), context.Canceled)
 	assert.False(t, gate.Visible(ctx, candidate))
 }
+
+func TestPolicyOnlyStartup(t *testing.T) {
+	oldModels, oldHooks, oldExecutors, oldTargets := core.Models, core.PluginHooks, core.Executors, core.Destinations
+	oldStore, oldGrants := core.TaskContinuations, core.ContinuationGrants
+	oldBuild := BuildOperatorManifestSHA256
+	BuildOperatorManifestSHA256 = ""
+	t.Cleanup(func() {
+		core.Models, core.PluginHooks, core.Executors, core.Destinations = oldModels, oldHooks, oldExecutors, oldTargets
+		core.TaskContinuations, core.ContinuationGrants = oldStore, oldGrants
+		BuildOperatorManifestSHA256 = oldBuild
+	})
+	require.NoError(t, InstallPolicyOnly(nil))
+	assert.Equal(t, []any{oldModels, oldHooks, oldExecutors, oldTargets, oldStore, oldGrants}, []any{core.Models, core.PluginHooks, core.Executors, core.Destinations, core.TaskContinuations, core.ContinuationGrants})
+	assert.Equal(t, oldModels, core.Models)
+	require.EqualError(t, InstallPolicyOnly(map[string]string{"CMH_OPERATOR_MANIFEST_FILE": "missing"}), "extension policy startup rejected")
+	assert.Equal(t, []any{oldModels, oldHooks, oldExecutors, oldTargets, oldStore, oldGrants}, []any{core.Models, core.PluginHooks, core.Executors, core.Destinations, core.TaskContinuations, core.ContinuationGrants})
+	assert.Equal(t, oldModels, core.Models)
+	wire, err := EncodeOperatorManifest(OperatorManifest{Version: 1})
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "policy.json")
+	require.NoError(t, os.WriteFile(path, wire, 0600))
+	env := map[string]string{"CMH_OPERATOR_MANIFEST_FILE": path, "CMH_OPERATOR_MANIFEST_SHA256": fmt.Sprintf("%x", sha256.Sum256(wire))}
+	require.NoError(t, InstallPolicyOnly(env))
+	assert.True(t, core.ModelAdmissionEnabled())
+	assert.Same(t, core.Models, core.PluginHooks)
+	assert.Same(t, core.Models, core.Executors)
+	assert.True(t, core.DestinationAdmissionEnabled())
+	assert.ErrorIs(t, core.Models.Check(t.Context(), core.Admission{Phase: core.AdmissionPublic, Model: core.ModelIdentity{Public: "public-chat"}}), ErrAdmissionDenied)
+	assert.ErrorIs(t, core.PluginHooks.CheckHook(t.Context(), core.PluginHookIdentity{SourceSHA256: strings.Repeat("a", 64), Export: "run"}), ErrAdmissionDenied)
+	assert.ErrorIs(t, core.Executors.CheckExecutor(t.Context(), core.ExecutorIdentity{Kind: "plugin", Key: "fixture", SourceSHA256: strings.Repeat("a", 64), ConfigFingerprint: strings.Repeat("b", 64)}), ErrAdmissionDenied)
+	assert.ErrorIs(t, core.Destinations.CheckDestination(t.Context(), core.DestinationAdmission{}), ErrAdmissionDenied)
+	assert.Nil(t, core.TaskContinuations)
+	assert.Nil(t, core.ContinuationGrants)
+	request := core.ContinuationGrantRequest{Binding: core.ContinuationBinding{TaskID: "task", UserID: 1, ChannelID: 1}, Ref: core.ContinuationRef{ID: strings.Repeat("a", 64), Digest: strings.Repeat("b", 64)}, Purpose: core.ContinuationPoll, PluginKey: "fixture", SourceSHA256: strings.Repeat("c", 64), RuntimeSHA256: strings.Repeat("d", 64)}
+	grant := core.ContinuationGrant{Request: request, Hooks: []string{"buildQueryRequest", "parseTaskResult"}, ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	wire, err = EncodeOperatorManifest(OperatorManifest{Version: 1, Continuations: []core.ContinuationGrant{grant}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, wire, 0600))
+	env["CMH_OPERATOR_MANIFEST_SHA256"] = fmt.Sprintf("%x", sha256.Sum256(wire))
+	installed := core.Models
+	installedSet := []any{core.Models, core.PluginHooks, core.Executors, core.Destinations, core.TaskContinuations, core.ContinuationGrants}
+	require.EqualError(t, InstallPolicyOnly(env), "extension policy startup rejected")
+	assert.Equal(t, installedSet, []any{core.Models, core.PluginHooks, core.Executors, core.Destinations, core.TaskContinuations, core.ContinuationGrants})
+	assert.Same(t, installed, core.Models)
+	assert.Nil(t, core.ContinuationGrants)
+}

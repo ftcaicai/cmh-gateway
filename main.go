@@ -356,6 +356,13 @@ func InitResources() error {
 
 	logger.SetupLogger()
 
+	if err := extcore.InitializePolicies(map[string]string{
+		"CMH_OPERATOR_MANIFEST_FILE":   os.Getenv("CMH_OPERATOR_MANIFEST_FILE"),
+		"CMH_OPERATOR_MANIFEST_SHA256": os.Getenv("CMH_OPERATOR_MANIFEST_SHA256"),
+	}); err != nil {
+		return err
+	}
+
 	// Initialize model settings
 	ratio_setting.InitRatioSettings()
 

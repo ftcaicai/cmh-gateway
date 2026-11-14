@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `739f4e1e7c9353cbc71f73d0a6f3673ae71160cb`：main/develop一致，差异CI43560270480/43560265356 success；rc51完整同步已合入。第42轮legacy当前owner保守拒绝已发布，第43/80轮开展extension-only启动依赖预检设计及已允许的纯值资金合成契约，不安装策略、不接资金。默认sora/type1普通chat保守拒绝，不是完整legacy兼容。所有Gate仍noop，TaskContinuations/ContinuationGrants默认nil。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
+- 最近已推 `b3e28b389ddacbd3ba012a1cb7b67116a789326f`：main/develop一致，差异CI43561999192/43561995130 success；rc51完整同步已合入。第44/80轮负责人明确批准policy-only合同：本轮main早期接线/扩展回归/真实六类合成子进程通过，配置存在但无效即启动失败、非空grant拒绝、archive/grants禁用；全部缺省仍noop。没有生产启用、密钥读取或资金接入。默认sora/type1普通chat保守拒绝等限制不变。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。

@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/ext/brand"
 	"github.com/QuantumNous/new-api/ext/console"
 	"github.com/QuantumNous/new-api/ext/core"
+	"github.com/QuantumNous/new-api/ext/domestic"
 )
 
 func init() { Register() }
@@ -20,8 +21,9 @@ func init() { Register() }
 // Register installs every extension hook implementation into ext/core.
 // Idempotent; call order is the delivery order of the phases.
 func Register() {
-	core.Tenant = brand.Resolver{} // H2
-	core.Routes = routes{}         // H5
+	core.InitializePolicies = domestic.InstallPolicyOnly // H1, explicit host startup only
+	core.Tenant = brand.Resolver{}                       // H2
+	core.Routes = routes{}                               // H5
 }
 
 // routes is the single H5 registrar; each module mounts itself here in order.
