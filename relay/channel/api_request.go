@@ -401,7 +401,18 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err = signUpstreamRequest(a, c, info, req.Method, req.URL, req.Header); err != nil {
 		return nil, err
 	}
-	if core.ModelAdmissionEnabled() && info.ChannelType == appconstant.ChannelTypeNewAPI && info.RelayMode == constant.RelayModeChatCompletions && info.RelayFormat == types.RelayFormatOpenAI {
+	modelBodyKnown := false
+	switch info.GetFinalRequestRelayFormat() {
+	case types.RelayFormatOpenAI:
+		modelBodyKnown = info.RelayMode == constant.RelayModeChatCompletions || info.RelayMode == constant.RelayModeCompletions
+	case types.RelayFormatEmbedding:
+		modelBodyKnown = info.RelayMode == constant.RelayModeEmbeddings
+	case types.RelayFormatOpenAIResponses:
+		modelBodyKnown = info.RelayMode == constant.RelayModeResponses || info.RelayMode == constant.RelayModeResponsesCompact
+	case types.RelayFormatOpenAIResponsesCompaction:
+		modelBodyKnown = info.RelayMode == constant.RelayModeResponsesCompact
+	}
+	if core.ModelAdmissionEnabled() && info.ChannelType == appconstant.ChannelTypeNewAPI && modelBodyKnown {
 		rejected := types.NewErrorWithStatusCode(errors.New("model admission denied"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		if req.GetBody == nil || req.ContentLength <= 0 || req.ContentLength == math.MaxInt64 {
 			return nil, rejected

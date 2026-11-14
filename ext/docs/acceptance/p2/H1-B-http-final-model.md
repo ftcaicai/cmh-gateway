@@ -18,4 +18,16 @@
 
 父会话最终全扩展测试全部通过（domestic 8.817s），`go vet -p 2 ./relay/channel ./ext/...` 与diff-check exit 0。
 
-官方门禁相对rc51：49/49文件、4625/6000增删行，余1375行；named middleware/task_plugin.go例外仍14/40。80%范围复核保留，不增加官方文件。
+
+## 第66轮：有限已知JSON端点收口
+
+原chat-only判定还漏掉completions、embedding、Responses HTTP，以及临时改mode的chat→Responses转换。本轮仍在同一DoApiRequest挂载点，使用GetFinalRequestRelayFormat（显式final、转换链末项、入口格式的既有优先级），仅纳入：
+
+- OpenAI最终格式 + chat/completions模式；
+- Embedding最终格式 + embeddings模式；
+- Responses最终格式 + Responses或ResponsesCompact模式；
+- Compaction最终格式 + ResponsesCompact模式。
+
+compact准备链会将DTO投影为Responses并追加转换链，所以不能只接受入口Compaction；真实PrepareResponsesRequest正反例验证这一点。converted chat使用真实service.ConvertRequest→adaptor.Convert→Append链，入口OpenAI保持而最终为Responses。六组实际NewAPI HTTP正例字节保持、实际override错配无新增dispatch；Claude最终格式对照仍保留旧行为。普通表格正文仅为身份envelope，不代表每端点完整语义请求认证。图片JSON/multipart、moderation默认模型、其他provider/额外格式不混入本轮。
+
+原replay故障与duplicate检查全部保留。独立只读源码及中央测试复核无阻断。最终定向SQLite完整Host 13.250s、相关vet/diff-check exit0；父会话channel0.160s、relay5.806s、全部扩展tests（domestic8.842s）、相关vet及rootbuild通过。无DB行为修改，无新增三库认证或生产启用。最终门禁49/49文件、4636/6000增删行，余1364；named例外14/40。首次父会话diff-check发现文档EOF额外空行，已修正后重跑，不将后续shell成功覆盖该失败。

@@ -3385,6 +3385,120 @@ func runHostHTTPFinalModel(t *testing.T, noop core.ModelGate) {
 			assert.Equal(t, tc.body, received)
 		})
 	}
+	for _, tc := range []struct {
+		name, path string
+		mode       int
+		format     kittypes.RelayFormat
+		converted  bool
+	}{
+		{"chat", "/v1/chat/completions", relayconstant.RelayModeChatCompletions, kittypes.RelayFormatOpenAI, false},
+		{"completions", "/v1/completions", relayconstant.RelayModeCompletions, kittypes.RelayFormatOpenAI, false},
+		{"embeddings", "/v1/embeddings", relayconstant.RelayModeEmbeddings, kittypes.RelayFormatEmbedding, false},
+		{"responses", "/v1/responses", relayconstant.RelayModeResponses, kittypes.RelayFormatOpenAIResponses, false},
+		{"compact", "/v1/responses/compact", relayconstant.RelayModeResponsesCompact, kittypes.RelayFormatOpenAIResponsesCompaction, false},
+		{"converted chat", "/v1/responses", relayconstant.RelayModeResponses, kittypes.RelayFormatOpenAI, true},
+	} {
+		t.Run("native "+tc.name, func(t *testing.T) {
+			modeInfo := *info
+			modeInfo.RelayMode, modeInfo.RelayFormat, modeInfo.RequestURLPath = tc.mode, tc.format, tc.path
+			modeInfo.ParamOverride = nil
+			wire := []byte(`{"model":"approved-target","input":"synthetic"}`)
+			if tc.converted {
+				modeInfo.InitRequestConversionChain()
+				converted, convertErr := service.ConvertRequest(c, &modeInfo, kittypes.RelayFormatOpenAIResponses, &kitdto.GeneralOpenAIRequest{Model: "approved-target", Messages: []kitdto.Message{{Role: "user", Content: "synthetic"}}})
+				require.NoError(t, convertErr)
+				responses, ok := converted.Value.(*kitdto.OpenAIResponsesRequest)
+				require.True(t, ok)
+				convertedRequest, convertErr := adaptor.ConvertOpenAIResponsesRequest(c, &modeInfo, *responses)
+				require.NoError(t, convertErr)
+				relaycommon.AppendRequestConversionFromRequest(&modeInfo, convertedRequest)
+				wire, convertErr = common.Marshal(convertedRequest)
+				require.NoError(t, convertErr)
+				assert.Equal(t, kittypes.RelayFormat(kittypes.RelayFormatOpenAI), modeInfo.RelayFormat)
+				assert.Equal(t, kittypes.RelayFormat(kittypes.RelayFormatOpenAIResponses), modeInfo.GetFinalRequestRelayFormat())
+			}
+			modeTarget := target
+			modeTarget.AddressSHA256, err = core.DestinationAddress(server.URL + tc.path)
+			require.NoError(t, err)
+			core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{modeTarget})
+			require.NoError(t, err)
+			before := calls.Load()
+			response, sendErr := adaptor.DoRequest(c, &modeInfo, bytes.NewReader(wire))
+			require.NoError(t, sendErr)
+			require.NoError(t, response.(*http.Response).Body.Close())
+			assert.Equal(t, before+1, calls.Load())
+			assert.Equal(t, string(wire), received)
+			modeInfo.ParamOverride = map[string]any{"model": "unapproved-target"}
+			wrong, overrideErr := relaycommon.ApplyParamOverrideWithRelayInfo(wire, &modeInfo)
+			require.NoError(t, overrideErr)
+			_, sendErr = adaptor.DoRequest(c, &modeInfo, bytes.NewReader(wrong))
+			require.Error(t, sendErr)
+			var denied *kittypes.NewAPIError
+			require.ErrorAs(t, sendErr, &denied)
+			assert.Equal(t, http.StatusForbidden, denied.StatusCode)
+			assert.True(t, kittypes.IsSkipRetryError(denied))
+			assert.Equal(t, before+1, calls.Load(), "actual override mismatch must not dispatch")
+		})
+	}
+	t.Run("prepared compact final responses", func(t *testing.T) {
+		compactContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+		compactContext.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+		common.SetContextKey(compactContext, constant.ContextKeyChannelId, 95016)
+		common.SetContextKey(compactContext, constant.ContextKeyChannelType, constant.ChannelTypeNewAPI)
+		common.SetContextKey(compactContext, constant.ContextKeyOriginalModel, "public-chat")
+		common.SetContextKey(compactContext, constant.ContextKeyChannelBaseUrl, server.URL)
+		compactContext.Set("model_mapping", `{"public-chat":"approved-target"}`)
+		compactTarget := target
+		compactTarget.AddressSHA256, err = core.DestinationAddress(server.URL + "/v1/responses/compact")
+		require.NoError(t, err)
+		core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{compactTarget})
+		require.NoError(t, err)
+		for _, wrong := range []bool{false, true} {
+			override := map[string]any{}
+			if wrong {
+				override["model"] = "unapproved-target"
+			}
+			common.SetContextKey(compactContext, constant.ContextKeyChannelParamOverride, override)
+			compactInfo := &relaycommon.RelayInfo{OriginModelName: "public-chat", RelayMode: relayconstant.RelayModeResponsesCompact, RelayFormat: kittypes.RelayFormatOpenAIResponsesCompaction, RequestURLPath: "/v1/responses/compact"}
+			preparedAdaptor, preparedBody, closer, prepareErr := relay.PrepareResponsesRequest(compactContext, compactInfo, &kitdto.OpenAIResponsesRequest{Model: "public-chat"})
+			require.Nil(t, prepareErr)
+			require.NotNil(t, closer)
+			func() {
+				defer func() { require.NoError(t, closer.Close()) }()
+				assert.Equal(t, kittypes.RelayFormat(kittypes.RelayFormatOpenAIResponsesCompaction), compactInfo.RelayFormat)
+				assert.Equal(t, kittypes.RelayFormat(kittypes.RelayFormatOpenAIResponses), compactInfo.GetFinalRequestRelayFormat())
+				replay, replayErr := preparedBody.NewReader()
+				require.NoError(t, replayErr)
+				wire, replayErr := io.ReadAll(replay)
+				require.NoError(t, replayErr)
+				require.NoError(t, replay.Close())
+				before := calls.Load()
+				response, sendErr := preparedAdaptor.DoRequest(compactContext, compactInfo, preparedBody)
+				if wrong {
+					require.Error(t, sendErr)
+					assert.Equal(t, before, calls.Load())
+					return
+				}
+				require.NoError(t, sendErr)
+				require.NoError(t, response.(*http.Response).Body.Close())
+				assert.Equal(t, before+1, calls.Load())
+				assert.Equal(t, string(wire), received)
+			}()
+		}
+	})
+	core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{target})
+	require.NoError(t, err)
+	t.Run("other final format retains behavior", func(t *testing.T) {
+		otherInfo := *info
+		otherInfo.RelayFormat = kittypes.RelayFormatClaude
+		wire := `{"model":"unapproved-target"}`
+		before := calls.Load()
+		response, sendErr := adaptor.DoRequest(c, &otherInfo, strings.NewReader(wire))
+		require.NoError(t, sendErr)
+		require.NoError(t, response.(*http.Response).Body.Close())
+		assert.Equal(t, before+1, calls.Load())
+		assert.Equal(t, wire, received)
+	})
 	storedWire := `{"model":"approved-target","messages":[]}`
 	storedBody, storage, err := relaycommon.NewOutboundJSONBody([]byte(storedWire))
 	require.NoError(t, err)
