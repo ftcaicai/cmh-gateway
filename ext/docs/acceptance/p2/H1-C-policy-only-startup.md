@@ -19,4 +19,22 @@
 - 实施只有 main 早期7行与 ext业务/core桥；未改DB/迁移/schema，不读取档案密钥，无生产启用。既有 factory预main编译例外不变。
 - 合成脚本最初因系统脚本策略与无pwsh7失败；改为现有Windows PowerShell5.1兼容API和单进程ExecutionPolicy Bypass后六类成功，未更改系统策略。
 
+## 实际构建锚点补充验收（2026-11-14）
+
+源码 `5f596065a7e4a890486e24cce2c81832cde836a3`，无生产代码修改。实际EncodeOperatorManifest生成deny-all，原始SHA256为 `760d4043c11fb7b4af6e45cbcb5a7597ae54473974f0a54a2e07c8bcee9e68af`；执行：
+
+```powershell
+go build -p 2 -ldflags "-X github.com/QuantumNous/new-api/ext/domestic.BuildOperatorManifestSHA256=760d4043c11fb7b4af6e45cbcb5a7597ae54473974f0a54a2e07c8bcee9e68af" -o ops/.cache/build-anchor-proof.exe .
+```
+
+构建exit0，二进制SHA256 `68916329EFAA2FCA7E1EF24F900F79088A966F3B84B7D2E8E66000F24A4CBEF2`。三个实际子进程均使用全新无dotenv目录、清空继承环境，仅明确合成配置和故意无效SQL_DSN：
+
+| 场景 | exit | 固定policy拒绝 | 到达故意DB失败 |
+|---|---:|---|---|
+| 正确文件，仅build SHA，无env SHA | 1 | 否 | 是 |
+| 正确文件，冲突env SHA | 1 | 是 | 否 |
+| 文件追加LF，保留原build SHA，无env SHA | 1 | 是 | 否 |
+
+全部无SQLite文件，进程已退出，构建job已收；父代理复核执行脚本的隔离、错误断言及finally清理。证明真实链接注入、build-only锚点及env不能覆盖build锚点，不是成功Serving、真实DB、制品来源签名或生产启用证明。预main factory例外不变。
+
 仍不据此宣称 P1/P2 完成；原有严格兼容限制及跨节点运维、档案密钥合同未解决。
