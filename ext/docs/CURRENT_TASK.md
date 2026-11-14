@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `65c855b52b4ecce4382592ad398c8a9210c8b3c8`：main/develop一致，差异CI43574407321/43574399230 success。第47轮负责人批准有限资金首批设计方向：同步非流式纯文本chat、专属品牌token、独立客户/OEM账户；仅继续设计，不批准实施、扩预算或生产。第48轮完成token隔离只读清单：status_only宽写覆盖额度、Redis hydration/旧batch及用户硬删除旁路须纳入；见 `acceptance/p1/funding-token-fence-design.md`。rc51完整同步已合入；policy-only早期安装及合成Serving/精确目录对照已验，缺省仍noop、archive/grants禁用，无生产资金接入。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
+- 最近已推 `e4f7d2af5a01959a02266707dd6884eb46c8a438`，main/develop一致，门禁43576646406/43576634307 success。负责人已批准有限资金首批方向及经济/恢复/优先不持久化prompt设计依据，未批准实施或扩预算。第50轮只读工程审计收敛User-first/单participant/known-first claim协议，发现共享H2隐式重放、预controller BodyStorage落盘、日志/usage fallback及caller/defer风险；目前无具体生产模型具有可信计费上界，资格为空。至少18必需候选及条件项均不是硬预算，见 `acceptance/p1/funding-engineering-proof-gaps.md`。rc51同步、policy-only合成Serving与目录对照已验；整体P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
