@@ -19,6 +19,12 @@
 父会话最终全扩展测试全部通过（domestic 8.817s），`go vet -p 2 ./relay/channel ./ext/...` 与diff-check exit 0。
 
 
+## 第71轮：拒绝测试例外及撤销窗口调查
+
+用户明确选择“不批准，保留失败记录”：不批准第50个官方测试文件例外、不建立相关规则PR、不修改HTTP2 fixture/断言或生产重试；不重复申请同一权限。完整channel失败继续保留。
+
+目录/候选缓存只读审查未发现经公共API构造的已证实绕过；实际选择在发放凭据前读fresh DB，RequestAdmission比较当前映射和策略。最终HTTP派发的独立ignored实验使用可信Go自定义ReplayableBody切换可变合成gate，得到prior_allow=true/revoked=true/sent=1，仅证明该段未重查ModelGate；实际domestic policy不可变且仅启动安装，不能称客户端完整pipeline绕过。未动态确证真实DB mutation屏障，故不据此新增callback bridge，也不声称任意并发撤销TOCTOU已闭合。两实验作业已收齐，无生产/资金/H4/H6修改。
+
 ## 第70轮：rerank passthrough最终身份
 
 实际RerankHelper先映射DTO/authority，但passthrough发送原BodyStorage。修复前本地stub收到public-chat而authority为approved-target，测试要求403/零发送却实际400/一次发送：红测7.714s exit1。仅增加type60＋active Models＋最终Rerank格式＋Rerank模式，复用既有mandatory canonical model独立replay；不新增type60普通rerank converter。
