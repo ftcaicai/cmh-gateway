@@ -4,7 +4,7 @@
 
 ## 当前事实
 
-- 最近已推 `b3e28b389ddacbd3ba012a1cb7b67116a789326f`：main/develop一致，差异CI43561999192/43561995130 success；rc51完整同步已合入。第44/80轮负责人明确批准policy-only合同：本轮main早期接线/扩展回归/真实六类合成子进程通过，配置存在但无效即启动失败、非空grant拒绝、archive/grants禁用；全部缺省仍noop。没有生产启用、密钥读取或资金接入。默认sora/type1普通chat保守拒绝等限制不变。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
+- 最近已推 `dcba0c5f760328ddc9d677701a667ba45a649d7d`：main/develop一致，差异CI43563089410/43563086055 success；rc51完整同步已合入。第44/80轮负责人明确批准policy-only合同：本轮main早期接线/扩展回归/真实六类合成子进程通过，配置存在但无效即启动失败、非空grant拒绝、archive/grants禁用；全部缺省仍noop。没有生产启用、密钥读取或资金接入。默认sora/type1普通chat保守拒绝等限制不变。整体退出状态见 `acceptance/P0-P2-overall-status.md`，P1/P2未完成。
 - P0：20前端测试 +23 Go回归子场景 +13HTTP +7真实Chrome会话项通过。
 - 用户已批准R3最小官方前端回跳例外（ext/AGENTS v0.7）；真实官方生产表单复验5项PASS：匿名自动回CMH、已登录beforeLoad回CMH、重载、退出、普通dashboard仍SPA。证据 `acceptance/p0/T0.2-bridge-pass.md`。旧失败证据保留。
 - 官方相关前端99+10测试、类型1488文件/2项目、4文件lint与production构建均通过；独立只读R3安全复核无阻断问题。门禁8文件/97行。
@@ -25,7 +25,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 2. R3五项Chrome表单通过、R4工厂测试完整通过。纯官方rc50字节精确隔离archive定向复验已完成：controller同名SQLite矩阵和middleware日志文件cleanup失败复现；relay HTTP2单次通过、未复现，不能笼统归环境。证据 `acceptance/p1/windows-baseline-reproduction.md`。relaykit/tokenkit各 `GOWORK=off go build -p 2 ./...` exit0。
 3. grant redirectexpiry已于cc5898a62发布，initial1/后继0/Unavailable真实三库通过。本轮继续affinity主线：stored base + final effective各独立精确审批，官方merge一次、key前批准同一map；runtime仅允许ParamOverride差异且其它权威配置一致。真实规则cache miss/provider wire、双撤销/context与RelayInfo篡改/未批fresh base通过三库21.946s及相关tests/vet/fullbuild；独立静态agent复核无阻断。候选首次fixture缺provider身份witness导致三库断言失败，改真实filter重跑通过，未改生产检查。证据 `acceptance/p2/H1-C-affinity-effective.md`。仅有限provider新增positive，非task-affinity全协议/来源证明，不启用全局。
 4. P1已按资金RFC允许范围完成隔离纯值合成原型，12显式用例及独立复核通过，未导入任何生产资金路径；不是同事务/真实账本/Redis×BATCH证明。见 `acceptance/p1/funding-value-contract.md`。资金实施仍需独立批准，不用函数提前return跳过token/会话内部状态，不伪造缓存余额。
-6. 启动RFC `rfc/2026-11-14-startup-policy-installation-boundary.md` 已核对main真实顺序：InitResources内就有monitor/authcleanup；不能称返回后赋globals为完整原子屏障。建议policy-only明确禁archive/grants，或先批准archive密钥与迁移合同；两者均非本轮安装或生产授权。现有loader足够，不增加浅wrapper。
+6. 启动RFC `rfc/2026-11-14-startup-policy-installation-boundary.md` 的A policy-only合同已经明确批准并于dcba0c5f7接线；InitEnv/logger后DB/worker前安装，错误早停、含grant拒绝、archive/grants禁用。真实六类子进程与扩展测试通过，预main factory编译例外保留；第45轮同一实际二进制已成功合成Serving：loopback/全新SQLite3.50.4、真实Bearer普通用户，models200空、chat403 access_denied、未认证401对照、upstream0，全部gateway/stub退出；见 `acceptance/p2/H1-C-policy-only-serving.md`。不是三库启动认证/全协议可用或生产授权。
 5. 已从发布方取得便携MySQL8.0.44/PG17.12，独立loopback实例和SCRAM/随机测试账户用于本轮三库验证，均已优雅退出。引擎与专属数据在忽略 `ops/.cache/db-test`，启动脚本与env只本地保留，不提交凭据。今后可直接复用该独立环境；不借生产DSN。三库通过仅本批读查询/候选，不等于资金/事务升级全部通过。
 
 ## 命令与环境
@@ -34,7 +34,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `go test -p 2 ./ext/... -count=1` exit0，`go vet ./ext/...`此前exit0。race未通过：CGO/C编译器缺失，不宣称通过。
 - 控制台pnpm.cmd（历史bun缺失）；官方完整web使用portable exact Bun `ops/.cache/web-build-p0/bun-1.4.4/bun-windows-x64/bun.exe`，未全局安装。
 - 官方原始rc50构建旧SHA在失败复现证据；当前R3桥接资源/测试二进制的完整SHA绑定在 `acceptance/p0/T0.2-bridge-pass.md`。两者都是实际production模式构建，不是占位页。后续正式发布必须重新冻结源码重建，不把本地测试exe当上线制品。
-- 门禁目前49官方文件/4397行，只有命名middleware/task_plugin.go第49例外（该file14/40行）才生效49上限，累计6000不变；剩0新文件/1603行，不含任意第50文件。既有范围登记/80%复核和独立review保留。分支保护未认证。
+- 门禁目前49官方文件/4404行，只有命名middleware/task_plugin.go第49例外（该file14/40行）才生效49上限，累计6000不变；剩0新文件/1596行，不含任意第50文件。既有范围登记/80%复核和独立review保留。分支保护未认证。
 
 ## 临时资源与作业
 
@@ -42,7 +42,7 @@ R3/R4及H1专项多调用点/core导入均已批准。32文件硬限到达后，
 - `%TEMP%/cmh-gateway-ui-acceptance.exe`和旧proto.exe为本任务测试二进制，后续验收仍需，不删除。
 - `%TEMP%/cmh-p0-*.db`及独立Chrome profile为合成资料，禁止提交；清理前核对精确绝对路径与进程，不做广泛匹配删除。
 - 官方Web依赖/构建缓存 `web/node_modules`、`web/dist`、`ops/.cache` 为本轮所建，后续UI验收仍需，保留。
-- 接续总体剩余：有限static per_task授权已实接/真三库，批准制品loader可返回policy但全局仍未安装；batch/content/report/refresh/dynamic目的地task权限未覆盖。affinity双精确envelope provider及task选中/捕获/实际描述符提交/撤销已验；task body不应用普通provider operations，未改官方语义。type60普通未绑定路径为builtin，绑定路径仍拒绝；legacy当前by-type owner已无条件unknown，未声明模型保存/目录/DB与memory候选三库拒绝；默认sora/type1普通chat也保守拒绝，owner缺失/旧pinned/静态platform整体身份仍未解决。证据 `acceptance/p2/H1-C-legacy-owner-projection.md`。更广重试覆盖未认证；新实例requestplan与最终startup failclosed/keycustody备份GCM预算/完整启用验收仍未完。金融同事务RFC独立未批，timeout不改；不能因有限首批成功就装全局或宣称P1/P2完成。49/1603硬限保留，无第50file或命名sharedendpoint>40授权。
+- 接续总体剩余：有限static per_task授权已实接/真三库，批准制品loader与policy-only早期安装已接线且合成早停通过，默认无配置仍noop；batch/content/report/refresh/dynamic目的地task权限未覆盖。affinity双精确envelope provider及task选中/捕获/实际描述符提交/撤销已验；task body不应用普通provider operations，未改官方语义。type60普通未绑定路径为builtin，绑定路径仍拒绝；legacy当前by-type owner已无条件unknown，未声明模型保存/目录/DB与memory候选三库拒绝；默认sora/type1普通chat也保守拒绝，owner缺失/旧pinned/静态platform整体身份仍未解决。证据 `acceptance/p2/H1-C-legacy-owner-projection.md`。更广重试覆盖未认证；新实例requestplan与最终startup failclosed/keycustody备份GCM预算/完整启用验收仍未完。金融同事务RFC独立未批，timeout不改；不能因有限首批成功就装全局或宣称P1/P2完成。49/1596硬限保留，无第50file或命名sharedendpoint>40授权。
 - 本轮完整 `go build -p 2 ./...`、model/helper/plugins/ext tests和对应vet均exit0；三库最终修复后pass。全仓Windows失败历史仍未宣称消失。
 - 只提交精确源码和脱敏验收路径，不 `git add -A`扫数据库/缓存。
 
