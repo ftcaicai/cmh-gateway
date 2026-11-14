@@ -884,6 +884,19 @@ func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, 
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}
+	if core.ModelAdmissionEnabled() {
+		modelCount, modelMatches := 0, false
+		ojson.GetBytesNoCopy(event, "@this").ForEach(func(key, value ojson.Result) bool {
+			if key.String() == "model" {
+				modelCount++
+				modelMatches = value.Type == ojson.String && value.String() != "" && info != nil && info.ChannelMeta != nil && value.String() == info.UpstreamModelName
+			}
+			return true
+		})
+		if modelCount != 1 || !modelMatches {
+			return nil, types.NewErrorWithStatusCode(errors.New("model admission denied"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	}
 	return event, nil
 }
 

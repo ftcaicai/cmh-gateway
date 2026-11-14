@@ -2039,6 +2039,17 @@ func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
 	plugin, err := registry.RegisterFactory(`export const meta={apiVersion:1,key:"cmh-ws-context",name:"WS context",version:"1.0.0",author:{name:"Test"},relay:[{incoming_path:"/v1/responses",upstream_path:"/v1/responses",converter:"none"}],channelConfig:{type:"object",properties:{tier:{type:"string",title:{en:"Tier",zh:"档位"},default:"standard"}}}}; export function signRequest(){return {query:{synthetic_signature:"fixed"}}};`, jsplugin.Options{})
 	require.NoError(t, err)
 	var dials, creates atomic.Int32
+	wireModels := make(chan string, 32)
+	readWireModel := func(t *testing.T) string {
+		t.Helper()
+		select {
+		case wireModel := <-wireModels:
+			return wireModel
+		case <-time.After(5 * time.Second):
+			t.Fatal("upstream create model was not observed")
+			return ""
+		}
+	}
 	var blockHandshake atomic.Bool
 	handshakeEntered, releaseHandshake, targetClosed := make(chan struct{}, 1), make(chan struct{}), make(chan struct{}, 1)
 	var releaseOnce sync.Once
@@ -2063,8 +2074,14 @@ func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
 			defer func() { targetClosed <- struct{}{} }()
 		}
 		for {
-			if _, _, err := ws.ReadMessage(); err != nil {
+			_, payload, err := ws.ReadMessage()
+			if err != nil {
 				return
+			}
+			var event map[string]any
+			if common.Unmarshal(payload, &event) == nil {
+				wireModel, _ := event["model"].(string)
+				wireModels <- wireModel
 			}
 			index := creates.Add(1)
 			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_provider_%d","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, index)
@@ -2078,7 +2095,7 @@ func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
 		upstream.Close()
 	}()
 	base, setting := upstream.URL, `{"task_plugin_key":"cmh-ws-context","responses_websocket_enabled":true}`
-	channel := model.Channel{Id: 95014, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Key: "fixture", Models: "public-chat", Group: "default", BaseURL: &base, Setting: &setting, Other: "frozen-other", HeaderOverride: common.GetPointer(`{"Host":"synthetic-host.invalid"}`), OtherSettings: `{"plugin_config":{"tier":"standard"}}`}
+	channel := model.Channel{Id: 95014, Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Key: "fixture", Models: "public-chat", Group: "default", BaseURL: &base, Setting: &setting, Other: "frozen-other", ModelMapping: common.GetPointer(`{"public-chat":"approved-target"}`), HeaderOverride: common.GetPointer(`{"Host":"synthetic-host.invalid"}`), OtherSettings: `{"plugin_config":{"tier":"standard"}}`}
 	core.Models = noop
 	require.NoError(t, model.DB.Create(&channel).Error)
 	require.NoError(t, channel.AddAbilities(model.DB))
@@ -2092,13 +2109,13 @@ func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
 	require.NoError(t, err)
 	public, err := New([]string{"public-chat"}, []string{"61"})
 	require.NoError(t, err)
-	upstreamModels, err := New([]string{"public-chat"}, nil)
+	upstreamModels, err := New([]string{"approved-target"}, nil)
 	require.NoError(t, err)
 	gate, err := NewGate(public, upstreamModels, []core.ExecutorIdentity{identity})
 	require.NoError(t, err)
 	signedHash, err := core.DestinationAddress("ws" + strings.TrimPrefix(base, "http") + "/v1/responses?synthetic_signature=fixed")
 	require.NoError(t, err)
-	actualTarget := core.DestinationAdmission{Kind: "relay_websocket", Method: "GET", AddressSHA256: signedHash, HostSHA256: core.DestinationHost("synthetic-host.invalid"), Model: core.ModelIdentity{Public: "public-chat", Upstream: "public-chat"}, Channel: core.ChannelIdentity{Known: true, ID: channel.Id, Type: channel.Type}}
+	actualTarget := core.DestinationAdmission{Kind: "relay_websocket", Method: "GET", AddressSHA256: signedHash, HostSHA256: core.DestinationHost("synthetic-host.invalid"), Model: core.ModelIdentity{Public: "public-chat", Upstream: "approved-target"}, Channel: core.ChannelIdentity{Known: true, ID: channel.Id, Type: channel.Type}}
 	approvedTarget, err := NewDestinationPolicy([]core.DestinationAdmission{actualTarget})
 	require.NoError(t, err)
 	core.Destinations = approvedTarget
@@ -2118,6 +2135,7 @@ func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
 	proofInfo := relaycommon.GenRelayInfoResponses(proofContext, &kitdto.OpenAIResponsesRequest{Model: "public-chat"})
 	proofInfo.IsStream = true
 	proofInfo.InitChannelMeta(proofContext)
+	proofInfo.UpstreamModelName = "approved-target"
 	proofAdaptor := relay.GetAdaptor(proofInfo.ApiType)
 	proofAdaptor.Init(proofInfo)
 	proofConn, proof, err := relaychannel.DoWssRequestWithAdmission(proofAdaptor, proofContext, proofInfo, nil)
@@ -2175,6 +2193,7 @@ func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
 	for range 2 {
 		event := create()
 		require.Equal(t, "response.completed", event["type"], "provider create: %v", event)
+		assert.Equal(t, "approved-target", readWireModel(t))
 	}
 	assert.Equal(t, int32(1), dials.Load(), "the second create reuses the approved handshake")
 	assert.Equal(t, int32(2), creates.Load())
@@ -2196,6 +2215,7 @@ func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
 	core.Destinations = approvedTarget
 	assert.Equal(t, "response.completed", create()["type"])
 	assert.Equal(t, int32(3), creates.Load())
+	assert.Equal(t, "approved-target", readWireModel(t))
 	for _, patch := range []map[string]any{{"other": "changed-other"}, {"settings": `{"plugin_config":{"tier":"changed"}}`}} {
 		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(patch).Error)
 		event := create()
@@ -2253,7 +2273,137 @@ func runHostProviderAdmissionSocket(t *testing.T, noop core.ModelGate) {
 			t.Fatal("barrier session did not stop")
 		}
 	}
-	// Cleanup already joined the final barrier session.
+	blockHandshake.Store(false)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusEnabled).Error)
+	// Each variant is independently approved: a matching envelope must not
+	// authorize a different actual native Responses model after overrides.
+	for _, tc := range []struct {
+		name, override string
+		noop           bool
+	}{
+		{"wrong model", `{"model":"unapproved-target"}`, false},
+		{"missing model", `{"operations":[{"mode":"delete","path":"model"}]}`, false},
+		{"nonstring model", `{"model":7}`, false},
+		{"conditional reuse", `{"operations":[{"mode":"set","path":"model","value":"unapproved-target","conditions":[{"path":"input","mode":"full","value":"second"}]}]}`, false},
+		{"noop preserves override", `{"model":"unapproved-target"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			patched := channel
+			patched.ParamOverride = &tc.override
+			executor, err := model.PluginExecutorIdentity(&patched, plugin, registry.Generation().Number, "provider", "/v1/responses")
+			require.NoError(t, err)
+			approved, err := NewGate(public, upstreamModels, []core.ExecutorIdentity{executor})
+			require.NoError(t, err)
+			require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("param_override", tc.override).Error)
+			model.InitChannelCache()
+			core.Models = approved
+			if tc.noop {
+				core.Models = noop
+			}
+			core.Destinations = approvedTarget
+			beforeDials, beforeCreates := dials.Load(), creates.Load()
+			peer, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", nil)
+			require.NoError(t, err)
+			defer peer.Close()
+			send := func(input string) map[string]any {
+				body, err := common.Marshal(map[string]any{"type": "response.create", "model": "public-chat", "input": input})
+				require.NoError(t, err)
+				require.NoError(t, peer.WriteMessage(websocket.TextMessage, body))
+				require.NoError(t, peer.SetReadDeadline(time.Now().Add(5*time.Second)))
+				_, body, err = peer.ReadMessage()
+				require.NoError(t, err)
+				var event map[string]any
+				require.NoError(t, common.Unmarshal(body, &event))
+				return event
+			}
+			if tc.name == "conditional reuse" {
+				require.Equal(t, "response.completed", send("first")["type"])
+				assert.Equal(t, "approved-target", readWireModel(t))
+				beforeDials++
+				beforeCreates++
+			}
+			event := send("second")
+			if tc.noop {
+				assert.Equal(t, "response.completed", event["type"])
+				assert.Equal(t, "unapproved-target", readWireModel(t))
+				beforeDials++
+				beforeCreates++
+			} else {
+				assert.Equal(t, "error", event["type"])
+				failure, ok := event["error"].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, float64(403), event["status"])
+				assert.Equal(t, "model admission denied", failure["message"])
+			}
+			assert.Equal(t, beforeDials, dials.Load())
+			assert.Equal(t, beforeCreates, creates.Load())
+			require.NoError(t, peer.Close())
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("model override session did not stop")
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, body string
+		allowed    bool
+	}{
+		{"escaped model", `{"type":"response.create","m\u006fdel":"public-chat","input":"raw"}`, true},
+		{"duplicate model", `{"type":"response.create","model":"public-chat","model":"public-chat","input":"raw"}`, false},
+		{"escaped duplicate model", `{"type":"response.create","model":"public-chat","m\u006fdel":"public-chat","input":"raw"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			passthrough := channel
+			passthrough.Setting = common.GetPointer(`{"task_plugin_key":"cmh-ws-context","responses_websocket_enabled":true,"pass_through_body_enabled":true}`)
+			passthrough.ModelMapping = nil
+			passthrough.ParamOverride = nil
+			executor, err := model.PluginExecutorIdentity(&passthrough, plugin, registry.Generation().Number, "provider", "/v1/responses")
+			require.NoError(t, err)
+			rawModels, err := New([]string{"public-chat"}, nil)
+			require.NoError(t, err)
+			core.Models, err = NewGate(public, rawModels, []core.ExecutorIdentity{executor})
+			require.NoError(t, err)
+			rawTarget := actualTarget
+			rawTarget.Model.Upstream = "public-chat"
+			core.Destinations, err = NewDestinationPolicy([]core.DestinationAdmission{rawTarget})
+			require.NoError(t, err)
+			require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{"setting": *passthrough.Setting, "model_mapping": nil, "param_override": nil}).Error)
+			model.InitChannelCache()
+			beforeDials, beforeCreates := dials.Load(), creates.Load()
+			peer, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", nil)
+			require.NoError(t, err)
+			defer peer.Close()
+			require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(tc.body)))
+			require.NoError(t, peer.SetReadDeadline(time.Now().Add(5*time.Second)))
+			_, wire, err := peer.ReadMessage()
+			require.NoError(t, err)
+			var event map[string]any
+			require.NoError(t, common.Unmarshal(wire, &event))
+			if tc.allowed {
+				require.Equal(t, "response.completed", event["type"], "%v", event)
+				assert.Equal(t, "public-chat", readWireModel(t))
+				beforeDials++
+				beforeCreates++
+			} else {
+				assert.Equal(t, "error", event["type"])
+				assert.Equal(t, float64(403), event["status"])
+			}
+			assert.Equal(t, beforeDials, dials.Load())
+			assert.Equal(t, beforeCreates, creates.Load())
+			require.NoError(t, peer.Close())
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("raw model session did not stop")
+			}
+		})
+	}
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{"param_override": nil, "model_mapping": *channel.ModelMapping, "setting": setting}).Error)
+	model.InitChannelCache()
+	core.Models = gate
+	core.Destinations = approvedTarget
+	// Cleanup already joined every session.
 	done <- struct{}{}
 
 }
