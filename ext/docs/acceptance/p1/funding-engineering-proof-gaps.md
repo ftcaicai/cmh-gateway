@@ -26,6 +26,6 @@
 
 原条件候选controller/token.go、service/quota.go、service/funding_source.go保留；正文审计另标relay/common/outbound_body.go、service/error.go、relay/requestplugin/report.go为条件项：只有现有必需调用点可证明提前阻断时才可不改。测试、可能启动接线另计。清单不是实测diff或预算；H1现有额度不授权财务用途。
 
-剩余：具体DTO与schema/模型上界证据、全部raw/bulk/Redis/batch mutation覆盖、participant生命周期与多用户竞争、实际typed caller兼容、一次派发本地故障测试、三库升级/幂等/未知commit/Redis×BATCH守恒、元数据/usage/tombstone保留期限及历史删除。未运行这些验证，不具备实施申请条件。
+剩余：具体DTO与schema/模型上界证据、全部raw/bulk/Redis/batch mutation覆盖、participant生命周期与多用户竞争、实际typed caller兼容、一次派发本地故障测试、三库升级/幂等/未知commit/Redis×BATCH守恒、元数据/usage/tombstone保留期限及历史删除。以上未验证，不能批准无条件端到端或生产启用；但可以先形成有退出门槛的synthetic-only实施申请，以实现获取这些工程证据所需的代码。合成fixture不能授予真实模型资格，实施仍须独立范围/预算授权及rules PR。
 
 只读调查原稿位于本地ignored缓存，未提交敏感正文或凭据；本页保存可接续结论，不将源码阅读包装成测试通过。

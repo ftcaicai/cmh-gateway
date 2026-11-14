@@ -18,7 +18,7 @@
 
 每个reserve/append/settle/refund用同主库短事务共同提交：不可变tenant/customer/user/token/request及报价绑定、资金余额/有符号分录、预留状态、token限额/使用计数、阶段幂等事件、outbox。事务不跨网络。delta0结算也持久终态。commit成功才更新内存session。不同阶段键不能复用；相同键不同payload冲突。
 
-锁序候选request→官方User身份→Token→按稳定ID排序账户→reservation/event，需与管理写路径一起复核；model桥统一lockForUpdate，SQLite使用条件更新/version/RowsAffected与有界整事务重试，不声称SQLite有行锁。
+锁序已在后续只读设计收敛为全部User升序→全部Token升序→ownership→request/attempt→accounts升序→reservation/event/outbox；原request-first候选已废弃。Open只读，首次请求绑定经User-first runner创建，普通及品牌Token.Insert同样锁User以与HardDelete串行化。model桥统一lockForUpdate，SQLite使用条件更新/version/RowsAffected与有界整事务重试，不声称SQLite有行锁；这仍是待实施验证的协议，不是并发测试结果。
 
 专属token必须隔离所有官方消费、管理配额覆盖、状态/删除、Redis水合与旧batch队列；仅outbox清缓存不能解决stale hydration。禁止与主站混用同token。缓存和BATCH不是品牌财务事实，SQL桥不调用全局DB/异步增量方法。
 
@@ -34,9 +34,13 @@
 
 ## 后续实施预算与验收（未获批准）
 
-只读估算官方8–12文件/700–1250增删行含测试；管理/认证隔离可能12–14文件/1500行。不是实际diff、不是申请按该估算直接开工。需补齐精确函数清单、token所有mutation fence、会计科目/计价与崩溃恢复合同，独立复核后再请求硬预算与单独rules PR。
+早期8–12文件/700–1250增删行及12–14文件/1500行估算已被后续源码调查推翻，不能作为实施或审批依据。目前至少18个必需＋6个条件官方生产候选，测试及可能启动接线另计；精确清单与未通过证明见 `../acceptance/p1/funding-engineering-proof-gaps.md`。这仍不是实测diff或硬预算。需形成有边界的实施包、逐文件函数登记与独立复核，再请求专项授权及单独rules PR；不能借用H1预算。
 
 验收必须真实三库新建/代表升级/重复启动、Redis×BATCH四组合、并发/撤销/删除/管理覆盖、事务各点失败全回滚、重放冲突、outbox故障重启、uncertain不误退不重派、unsupported零资金零上游、主站noop等价。当前没有这些测试通过的结论。
+
+## 2026-11-14 后续实施决策
+
+负责人在具名18必需＋6条件、组合最多69官方路径的合成分阶段实施申请中明确选择“继续设计，不批准实施”。因此不创建实施rules PR，不扩大官方区预算，不编写资金仓储、事务桥或合成资金接线；现有业务/经济/恢复/privacy方向批准仍有效。后续仅收敛可审查设计与验证规格，不把本次拒绝解释成授权试做，也不反复请求相同实施批准。
 
 ## 负责人本次只需选择
 

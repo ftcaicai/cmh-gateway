@@ -16,6 +16,6 @@ dispatch已声明后网络/解析失败不自动退款或重派。仅凭可核�
 
 ## 仍未通过的工程合同
 
-独立复核v2确认可以讨论业务政策，但非实施就绪：core authority mint、model runner nonce、owner repository permit的非循环签发/消费尚待闭合；现有hard-delete事务接入及统一锁序待验证；最终dispatch强制操作、调用者typed outcome兼容性待确认。usage意图写入失败只能依赖已有DispatchClaimed恢复，不得声称观察到的usage已持久化。
+后续v3a只读设计已移除上述循环签发：Open只读、验证身份经User-first runner首次绑定、model单一提交者、同事务单次不可重入participant，HardDelete收养内部真实事务。设计闭合不等于工程证明，尚无实际代码、竞争/故障测试；最终实际body/usage、一次网络attempt、所有caller的typed outcome及memory-only入口仍待实施验证。usage意图写入失败只能依赖已有DispatchClaimed恢复，不得声称观察到的usage已持久化。
 
-没有资金代码/数据变更，无三库事务或守恒通过结论；13必需＋3条件文件仍是候选，不是硬预算。
+没有资金代码/数据变更，无三库事务或守恒通过结论；最新为至少18必需＋6条件官方生产候选，测试与可能启动接线另计，取代早期13＋3口径；不是硬预算。具体生产模型的可靠计费上界尚未证明，资格集合为空；不妨碍规划仅使用合成模型的隔离实现/故障验证，但任何此类实施仍需独立批准。
