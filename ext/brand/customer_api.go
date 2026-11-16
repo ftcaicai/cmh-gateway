@@ -16,6 +16,8 @@ import (
 func mountOEMCustomers(group *gin.RouterGroup) {
 	h := customerHTTP{}
 	group.GET("/sites/:id/customer-audits", middleware.RequirePermission(OEMRead), h.audits)
+	group.GET("/sites/:id/customers/:user_id/notes", middleware.RequirePermission(OEMRead), h.note)
+	group.PUT("/sites/:id/customers/:user_id/notes", middleware.RequirePermission(OEMWrite), h.updateNote)
 	group.GET("/sites/:id/customers", middleware.RequirePermission(OEMRead), h.list)
 	group.GET("/sites/:id/customer-invitations", middleware.RequirePermission(OEMRead), h.invitations)
 	group.POST("/sites/:id/customer-invitations", middleware.RequirePermission(OEMWrite), middleware.UserCriticalRateLimit("cmh-oem-customer-invite"), h.invite)
@@ -96,6 +98,51 @@ func (customerHTTP) accept(c *gin.Context) {
 	value, err := NewSiteStore(model.DB).AcceptCustomerInvitation(c.Request.Context(), c.GetInt("id"), input.Token)
 	oemResponse(c, value, err)
 }
+func (customerHTTP) note(c *gin.Context) {
+	userID, err := strconv.Atoi(c.Param("user_id"))
+	if err != nil || userID <= 0 {
+		oemResponse(c, nil, ErrOEMInvalid)
+		return
+	}
+	value, err := NewSiteStore(model.DB).CustomerNote(c.Request.Context(), c.GetInt("id"), c.Param("id"), userID)
+	oemResponse(c, value, err)
+}
+func (customerHTTP) updateNote(c *gin.Context) {
+	userID, err := strconv.Atoi(c.Param("user_id"))
+	if err != nil || userID <= 0 || c.ContentType() != "application/json" {
+		oemResponse(c, nil, ErrOEMInvalid)
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 8192))
+	if err != nil || !utf8.Valid(data) || !ojson.ValidBytes(data) {
+		oemResponse(c, nil, ErrOEMInvalid)
+		return
+	}
+	root := ojson.ParseBytes(data)
+	valid := root.IsObject()
+	seen := map[string]bool{}
+	root.ForEach(func(name, value ojson.Result) bool {
+		key := name.String()
+		if seen[key] {
+			valid = false
+			return false
+		}
+		seen[key] = true
+		valid = valid && ((key == "note" && value.Type == ojson.String) || (key == "version" && value.Type == ojson.Number))
+		return valid
+	})
+	var input struct {
+		Note    string `json:"note"`
+		Version int64  `json:"version"`
+	}
+	if !valid || len(seen) != 2 || !seen["note"] || !seen["version"] || common.Unmarshal(data, &input) != nil {
+		oemResponse(c, nil, ErrOEMInvalid)
+		return
+	}
+	value, err := NewSiteStore(model.DB).UpdateCustomerNote(c.Request.Context(), c.GetInt("id"), c.Param("id"), userID, input.Note, input.Version)
+	oemResponse(c, value, err)
+}
+
 func (customerHTTP) revoke(c *gin.Context) {
 	userID, err := strconv.Atoi(c.Param("user_id"))
 	if err != nil || userID <= 0 {

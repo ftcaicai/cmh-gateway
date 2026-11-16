@@ -6,13 +6,16 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Field, FieldLabel, FieldError } from "@/components/ui/field";
 import { CopyButton } from "@/components/copy-button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { api, type Customer } from "~/lib/api";
+import { api, ApiError, type Customer, type CustomerNote } from "~/lib/api";
 import {
   invitationSchema,
   acceptanceSchema,
+  customerNoteSchema,
+  type CustomerNoteForm,
   type InvitationForm,
   type AcceptanceForm,
 } from "~/features/customers/lib/schema";
@@ -122,6 +125,134 @@ function SelfMembership() {
   );
 }
 
+function CustomerNotes(props: { site: string; user: number; onClose: () => void }) {
+  const { t } = useTranslation();
+  const note = useQuery({
+    queryKey: ["oem-customer-note", props.site, props.user],
+    queryFn: () => api.customerNote(props.site, props.user),
+    retry: false,
+    gcTime: 0,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  return (
+    <section aria-label={t("Private notes")}>
+      <h3>
+        {t("Private notes")} · {t("User ID")}: {props.user}
+      </h3>
+      <p>{t("Visible only in merchant management. Not shared with the customer.")}</p>
+      {note.isPending && <p>{t("Loading...")}</p>}
+      {note.isError && <p role="alert">{t("Unable to load private notes.")}</p>}
+      {note.data ? (
+        <CustomerNoteEditor {...props} initial={note.data} />
+      ) : (
+        <>
+          {note.isError && (
+            <Button disabled={note.isFetching} onClick={() => void note.refetch()}>
+              {t("Reload")}
+            </Button>
+          )}
+          <Button variant="outline" onClick={props.onClose}>
+            {t("Close")}
+          </Button>
+        </>
+      )}
+    </section>
+  );
+}
+
+function CustomerNoteEditor(props: {
+  site: string;
+  user: number;
+  initial: CustomerNote;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const client = useQueryClient();
+  const [version, setVersion] = useState(props.initial.version);
+  const form = useForm<CustomerNoteForm>({
+    resolver: zodResolver(customerNoteSchema),
+    defaultValues: { note: props.initial.note },
+  });
+  const save = useMutation({
+    mutationFn: (values: CustomerNoteForm) =>
+      api.updateCustomerNote(props.site, props.user, version, values.note),
+    retry: false,
+    gcTime: 0,
+    onSuccess: (data) => {
+      setVersion(data.version);
+      form.reset({ note: data.note });
+      void client.invalidateQueries({ queryKey: ["oem-customer-audits", props.site] });
+    },
+  });
+  const reload = useMutation({
+    mutationFn: () => api.customerNote(props.site, props.user),
+    retry: false,
+    gcTime: 0,
+    onSuccess: (data) => {
+      setVersion(data.version);
+      form.reset({ note: data.note });
+      save.reset();
+    },
+  });
+  const busy = save.isPending || reload.isPending;
+  return (
+    <form
+      onSubmit={form.handleSubmit((values) => {
+        if (busy) return;
+        reload.reset();
+        save.mutate(values);
+      })}
+    >
+      <Field data-invalid={!!form.formState.errors.note}>
+        <FieldLabel htmlFor="customer-private-note">{t("Private notes")}</FieldLabel>
+        <Textarea
+          id="customer-private-note"
+          {...form.register("note")}
+          disabled={busy}
+          aria-invalid={!!form.formState.errors.note}
+        />
+        {form.formState.errors.note && (
+          <FieldError>
+            {t("Use at most 2000 UTF-8 bytes. Only tabs and line breaks are allowed as controls.")}
+          </FieldError>
+        )}
+      </Field>
+      {save.isSuccess && <p role="status">{t("Private notes saved.")}</p>}
+      {save.isError && (
+        <p role="alert">
+          {save.error instanceof ApiError && save.error.status === 409
+            ? t("Notes changed elsewhere. Reload before editing again.")
+            : t("Unable to save private notes. Check records before trying again.")}
+        </p>
+      )}
+      {reload.isError && <p role="alert">{t("Unable to load private notes.")}</p>}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="submit"
+          disabled={busy || (save.error instanceof ApiError && save.error.status === 409)}
+        >
+          {t("Save private notes")}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy}
+          onClick={() => {
+            if (!busy) reload.mutate();
+          }}
+        >
+          {t("Reload")}
+        </Button>
+        <Button type="button" variant="outline" disabled={busy} onClick={props.onClose}>
+          {t("Close")}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 function MerchantCustomers(props: { site: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
@@ -149,6 +280,7 @@ function MerchantCustomers(props: { site: string }) {
   });
   const [secret, setSecret] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [noteUser, setNoteUser] = useState<number | null>(null);
   const [revoking, setRevoking] = useState<Customer | null>(null);
   const invite = useMutation({
     mutationFn: (user: number) => api.inviteCustomer(props.site, user),
@@ -181,6 +313,9 @@ function MerchantCustomers(props: { site: string }) {
           <li key={customer.user_id}>
             {t("User ID")}: {customer.user_id} ·{" "}
             {customer.active ? t("Active association") : t("Revoked association")}{" "}
+            <Button variant="outline" onClick={() => setNoteUser(customer.user_id)}>
+              {t("Private notes")}
+            </Button>
             {customer.active && (
               <Button
                 variant="outline"
@@ -193,6 +328,14 @@ function MerchantCustomers(props: { site: string }) {
           </li>
         ))}
       </ul>
+      {noteUser !== null && (
+        <CustomerNotes
+          key={`${props.site}:${noteUser}`}
+          site={props.site}
+          user={noteUser}
+          onClose={() => setNoteUser(null)}
+        />
+      )}
       <ConfirmDialog
         open={!!revoking}
         onOpenChange={(open) => {
@@ -262,6 +405,7 @@ function MerchantCustomers(props: { site: string }) {
           let action = "Operation records";
           if (record.action === "customer.invited") action = "Create invitation";
           if (record.action === "customer.accepted") action = "Accept invitation";
+          if (record.action === "customer.note_updated") action = "Update private notes";
           if (record.action === "customer.revoked") action = "Revoke association";
           return (
             <li key={record.id}>

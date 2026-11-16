@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/ext/migrations"
@@ -25,6 +27,88 @@ type Customer struct {
 	JoinedAt  int64  `json:"joined_at"`
 	RevokedAt int64  `json:"revoked_at"`
 }
+type CustomerNote struct {
+	Note      string `json:"note"`
+	Version   int64  `json:"version"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+// CustomerNote requires an exact owner/site relationship, including a revoked
+// historical relationship. It grants no membership or gateway authority.
+func (s *SiteStore) CustomerNote(ctx context.Context, owner int, siteID string, userID int) (CustomerNote, error) {
+	if _, err := s.Get(ctx, owner, siteID); err != nil {
+		return CustomerNote{}, err
+	}
+	var customer migrations.OEMCustomerRecord
+	if err := s.db.WithContext(ctx).Where("user_id = ? AND site_id = ? AND owner_user_id = ?", userID, siteID, owner).First(&customer).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return CustomerNote{}, ErrOEMNotFound
+		}
+		return CustomerNote{}, err
+	}
+	var record migrations.OEMCustomerNoteRecord
+	err := s.db.WithContext(ctx).Where("user_id = ? AND site_id = ? AND owner_user_id = ?", userID, siteID, owner).First(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return CustomerNote{}, nil
+	}
+	if err != nil {
+		return CustomerNote{}, err
+	}
+	return CustomerNote{Note: record.Note, Version: record.Version, UpdatedAt: record.UpdatedAt}, nil
+}
+
+func (s *SiteStore) UpdateCustomerNote(ctx context.Context, owner int, siteID string, userID int, note string, version int64) (CustomerNote, error) {
+	if _, err := s.Get(ctx, owner, siteID); err != nil {
+		return CustomerNote{}, err
+	}
+	if userID <= 0 || version < 0 || version > (1<<53)-2 || !utf8.ValidString(note) || len(note) > 2000 {
+		return CustomerNote{}, ErrOEMInvalid
+	}
+	for _, r := range note {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return CustomerNote{}, ErrOEMInvalid
+		}
+	}
+	auditID, err := newOEMID()
+	if err != nil {
+		return CustomerNote{}, err
+	}
+	now := time.Now().Unix()
+	var committed migrations.OEMCustomerNoteRecord
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var customer migrations.OEMCustomerRecord
+		if err := tx.Where("user_id = ? AND site_id = ? AND owner_user_id = ?", userID, siteID, owner).First(&customer).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrOEMNotFound
+			}
+			return err
+		}
+		if version == 0 {
+			// Reserve the key without relying on MySQL's DoNothing RowsAffected.
+			// Every writer then performs the same version-zero CAS.
+			seed := migrations.OEMCustomerNoteRecord{UserID: userID, SiteID: siteID, OwnerUserID: owner}
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&seed).Error; err != nil {
+				return err
+			}
+		}
+		changed := tx.Model(&migrations.OEMCustomerNoteRecord{}).Where("user_id = ? AND site_id = ? AND owner_user_id = ? AND version = ?", userID, siteID, owner, version).Updates(map[string]any{"note": note, "version": version + 1, "updated_at": now})
+		if changed.Error != nil {
+			return changed.Error
+		}
+		if changed.RowsAffected != 1 {
+			return ErrOEMConflict
+		}
+		if err := tx.Create(&migrations.OEMCustomerAuditRecord{ID: auditID, SiteID: siteID, UserID: userID, ActorUserID: owner, Action: "customer.note_updated", CreatedAt: now}).Error; err != nil {
+			return err
+		}
+		return tx.Where("user_id = ? AND site_id = ? AND owner_user_id = ?", userID, siteID, owner).First(&committed).Error
+	})
+	if err != nil {
+		return CustomerNote{}, err
+	}
+	return CustomerNote{Note: committed.Note, Version: committed.Version, UpdatedAt: committed.UpdatedAt}, nil
+}
+
 type CustomerInvitation struct {
 	ID           string `json:"id"`
 	SiteID       string `json:"site_id"`

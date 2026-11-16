@@ -74,11 +74,23 @@ type OEMCustomerAuditRecord struct {
 
 func (OEMCustomerAuditRecord) TableName() string { return "cmh_oem_customer_audits" }
 
+// OEMCustomerNoteRecord is merchant-private and never projected into membership.
+type OEMCustomerNoteRecord struct {
+	UserID      int    `gorm:"primaryKey;autoIncrement:false"`
+	SiteID      string `gorm:"type:varchar(32);not null;index"`
+	OwnerUserID int    `gorm:"not null"`
+	Note        string `gorm:"type:text;not null"`
+	Version     int64  `gorm:"not null"`
+	UpdatedAt   int64  `gorm:"not null"`
+}
+
+func (OEMCustomerNoteRecord) TableName() string { return "cmh_oem_customer_notes" }
+
 // MigrateOEM is explicit: it is not registered as H6, run on requests, or
 // invoked by importing the extension. It never migrates official tables.
 func MigrateOEM(db *gorm.DB) error {
 	if db == nil {
 		return errors.New("OEM database unavailable")
 	}
-	return db.AutoMigrate(&OEMSiteRecord{}, &OEMSiteAuditRecord{}, &OEMCustomerInvitationRecord{}, &OEMCustomerRecord{}, &OEMCustomerAuditRecord{})
+	return db.AutoMigrate(&OEMSiteRecord{}, &OEMSiteAuditRecord{}, &OEMCustomerInvitationRecord{}, &OEMCustomerRecord{}, &OEMCustomerAuditRecord{}, &OEMCustomerNoteRecord{})
 }

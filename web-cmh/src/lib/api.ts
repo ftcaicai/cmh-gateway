@@ -129,6 +129,7 @@ export type CustomerInvitation = {
   created_at: number;
   accepted_at: number;
 };
+export type CustomerNote = { note: string; version: number; updated_at: number };
 export type CustomerAudit = { id: string; action: string; user_id: number; created_at: number };
 export type ModelCatalog = {
   models: string[];
@@ -153,6 +154,18 @@ export const api = {
     request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customer-audits`),
   customers: (site: string): Promise<Customer[]> =>
     request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customers`),
+  customerNote: (site: string, user: number): Promise<CustomerNote> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customers/${user}/notes`),
+  updateCustomerNote: (
+    site: string,
+    user: number,
+    version: number,
+    note: string,
+  ): Promise<CustomerNote> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customers/${user}/notes`, "PUT", {
+      note,
+      version,
+    }),
   invitations: (site: string): Promise<CustomerInvitation[]> =>
     request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customer-invitations`),
   inviteCustomer: (

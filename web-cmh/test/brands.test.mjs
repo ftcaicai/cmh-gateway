@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import axios from "axios";
 import { api, ApiError } from "../src/lib/api.ts";
+import { customerNoteSchema } from "../src/features/customers/lib/schema.ts";
 import { applyAuthBundle, clearAuthentication } from "@/lib/auth-session";
 
 beforeEach(() => {
@@ -29,6 +30,55 @@ beforeEach(() => {
   axios.defaults.adapter = async () => {
     throw new Error("Unexpected refresh");
   };
+});
+
+test("note form permits plain LF/tab without trimming and bounds UTF-8 bytes", () => {
+  for (const note of ["", "  text\n\t  ", "界".repeat(666) + "ab", "a".repeat(2000)]) {
+    assert.deepEqual(customerNoteSchema.parse({ note }), { note });
+  }
+  for (const note of ["界".repeat(667), "a".repeat(2001), "x\r", "x\u0000", "x\u007f", "x\u0085"]) {
+    assert.equal(customerNoteSchema.safeParse({ note }).success, false);
+  }
+});
+
+test("private notes read uses site/customer scope and retains exact plain text", async (t) => {
+  const data = { note: "  private\n\t<script>plain</script>  ", version: 0, updated_at: 0 };
+  t.mock.method(globalThis, "fetch", async (path, options) => {
+    assert.equal(path, "/api/ext/oem/sites/site%2F1/customers/2/notes");
+    assert.equal(options.method, "GET");
+    assert.equal(options.body, undefined);
+    return Response.json({ success: true, data });
+  });
+  assert.deepEqual(await api.customerNote("site/1", 2), data);
+});
+
+test("private note writes only note/version once and preserves CAS conflicts", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (path, options) => {
+    calls++;
+    assert.equal(path, "/api/ext/oem/sites/site-1/customers/2/notes");
+    assert.equal(options.method, "PUT");
+    assert.deepEqual(JSON.parse(options.body), { note: "  private\n\t", version: 0 });
+    return new Response(null, { status: 409 });
+  });
+  await assert.rejects(
+    api.updateCustomerNote("site-1", 2, 0, "  private\n\t"),
+    (error) => error instanceof ApiError && error.status === 409,
+  );
+  assert.equal(calls, 1);
+});
+
+test("private note 401 never refreshes or replays text", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    return new Response(null, { status: 401 });
+  });
+  await assert.rejects(
+    api.updateCustomerNote("site-1", 2, 1, "private"),
+    (error) => error instanceof ApiError && error.status === 401,
+  );
+  assert.equal(calls, 1);
 });
 
 test("customer invitation sends only target ID and accepts one-time response", async (t) => {
