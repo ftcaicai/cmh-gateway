@@ -31,11 +31,23 @@ func mountOEMCustomers(group *gin.RouterGroup) {
 type customerHTTP struct{}
 
 func (customerHTTP) audits(c *gin.Context) {
-	value, err := NewSiteStore(model.DB).CustomerAudits(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	store := NewSiteStore(model.DB)
+	owner, _, err := store.ReadSiteOwner(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	if err != nil {
+		oemResponse(c, nil, err)
+		return
+	}
+	value, err := store.CustomerAudits(c.Request.Context(), owner, c.Param("id"))
 	oemResponse(c, value, err)
 }
 func (customerHTTP) list(c *gin.Context) {
-	value, err := NewSiteStore(model.DB).Customers(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	store := NewSiteStore(model.DB)
+	owner, _, err := store.ReadSiteOwner(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	if err != nil {
+		oemResponse(c, nil, err)
+		return
+	}
+	value, err := store.Customers(c.Request.Context(), owner, c.Param("id"))
 	oemResponse(c, value, err)
 }
 func (customerHTTP) invitations(c *gin.Context) {

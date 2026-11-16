@@ -16,6 +16,7 @@ import {
   type BrandInput,
   type BrandSite,
   officialLoginUrl,
+  ownsBrand,
 } from "~/lib/api";
 
 export const Route = createFileRoute("/brands")({ component: Brands });
@@ -97,7 +98,7 @@ function Brands() {
     reload.reset();
   };
   const submit = form.handleSubmit((input) => {
-    if (save.isPending || reload.isPending) return;
+    if (save.isPending || reload.isPending || (selected && !ownsBrand(selected))) return;
     setNotice(false);
     save.mutate(input);
   });
@@ -149,7 +150,7 @@ function Brands() {
                 disabled={save.isPending || reload.isPending}
                 onClick={() => choose(site)}
               >
-                {t("Edit profile")}
+                {ownsBrand(site) ? t("Edit profile") : t("View shared profile")}
               </Button>
             </li>
           ))}
@@ -166,55 +167,14 @@ function Brands() {
               {t("Version")}: {selected.version}
             </p>
           )}
-          <form onSubmit={submit} noValidate style={{ display: "grid", gap: 12 }}>
-            {(
-              [
-                ["name", "Profile name"],
-                ["support_email", "Support email"],
-                ["description", "Description"],
-              ] as const
-            ).map(([name, label]) => (
-              <Controller
-                key={name}
-                name={name}
-                control={form.control}
-                render={({ field, fieldState }) => (
-                  <Field data-invalid={fieldState.invalid}>
-                    <FieldLabel htmlFor={`brand-${name}`}>{t(label)}</FieldLabel>
-                    <Input
-                      {...field}
-                      id={`brand-${name}`}
-                      disabled={save.isPending || reload.isPending}
-                      aria-invalid={fieldState.invalid}
-                      aria-describedby={fieldState.invalid ? `brand-${name}-error` : undefined}
-                    />
-                    {fieldState.invalid && (
-                      <FieldError id={`brand-${name}-error`} errors={[fieldState.error]} />
-                    )}
-                  </Field>
-                )}
-              />
-            ))}
-            <p>
-              {t(
-                "UTF-8 byte limits: name 100, email 254, description 1000. Single-line text only.",
-              )}
-            </p>
-            <div style={{ display: "flex", gap: 12 }}>
+          {selected && !ownsBrand(selected) ? (
+            <section>
+              <h3>{t("Shared read-only access")}</h3>
+              <p>{selected.name}</p>
+              <p>{selected.support_email || t("No support email")}</p>
+              <p>{selected.description}</p>
               <Button
-                type="submit"
-                disabled={
-                  save.isPending ||
-                  reload.isPending ||
-                  (save.error instanceof ApiError && save.error.status === 409)
-                }
-              >
-                {save.isPending ? t("Saving...") : t("Save profile")}
-              </Button>
-              <Button
-                type="button"
                 variant="outline"
-                disabled={save.isPending || reload.isPending}
                 onClick={() => {
                   setEditing(false);
                   setSelected(null);
@@ -222,8 +182,67 @@ function Brands() {
               >
                 {t("Close")}
               </Button>
-            </div>
-          </form>
+            </section>
+          ) : (
+            <form onSubmit={submit} noValidate style={{ display: "grid", gap: 12 }}>
+              {(
+                [
+                  ["name", "Profile name"],
+                  ["support_email", "Support email"],
+                  ["description", "Description"],
+                ] as const
+              ).map(([name, label]) => (
+                <Controller
+                  key={name}
+                  name={name}
+                  control={form.control}
+                  render={({ field, fieldState }) => (
+                    <Field data-invalid={fieldState.invalid}>
+                      <FieldLabel htmlFor={`brand-${name}`}>{t(label)}</FieldLabel>
+                      <Input
+                        {...field}
+                        id={`brand-${name}`}
+                        disabled={save.isPending || reload.isPending}
+                        aria-invalid={fieldState.invalid}
+                        aria-describedby={fieldState.invalid ? `brand-${name}-error` : undefined}
+                      />
+                      {fieldState.invalid && (
+                        <FieldError id={`brand-${name}-error`} errors={[fieldState.error]} />
+                      )}
+                    </Field>
+                  )}
+                />
+              ))}
+              <p>
+                {t(
+                  "UTF-8 byte limits: name 100, email 254, description 1000. Single-line text only.",
+                )}
+              </p>
+              <div style={{ display: "flex", gap: 12 }}>
+                <Button
+                  type="submit"
+                  disabled={
+                    save.isPending ||
+                    reload.isPending ||
+                    (save.error instanceof ApiError && save.error.status === 409)
+                  }
+                >
+                  {save.isPending ? t("Saving...") : t("Save profile")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={save.isPending || reload.isPending}
+                  onClick={() => {
+                    setEditing(false);
+                    setSelected(null);
+                  }}
+                >
+                  {t("Close")}
+                </Button>
+              </div>
+            </form>
+          )}
           {notice && <p role="status">{t("Profile saved.")}</p>}
           {save.isError && (
             <div role="alert">

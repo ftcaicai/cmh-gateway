@@ -86,11 +86,49 @@ type OEMCustomerNoteRecord struct {
 
 func (OEMCustomerNoteRecord) TableName() string { return "cmh_oem_customer_notes" }
 
+type OEMTeamInvitationRecord struct {
+	ExpectedMemberVersion int64  `gorm:"not null"`
+	ID                    string `gorm:"type:varchar(32);primaryKey"`
+	SiteID                string `gorm:"type:varchar(32);not null;index"`
+	OwnerUserID           int    `gorm:"not null"`
+	TargetUserID          int    `gorm:"not null"`
+	TokenHash             string `gorm:"type:varchar(64);not null;uniqueIndex"`
+	CreatedAt             int64  `gorm:"not null"`
+	ExpiresAt             int64  `gorm:"not null"`
+	AcceptedAt            int64  `gorm:"not null"`
+}
+
+func (OEMTeamInvitationRecord) TableName() string { return "cmh_oem_team_invitations" }
+
+type OEMTeamMemberRecord struct {
+	SiteID       string `gorm:"type:varchar(32);primaryKey"`
+	UserID       int    `gorm:"primaryKey;autoIncrement:false"`
+	OwnerUserID  int    `gorm:"not null"`
+	InvitationID string `gorm:"type:varchar(32);not null"`
+	Active       bool   `gorm:"not null"`
+	Version      int64  `gorm:"not null"`
+	JoinedAt     int64  `gorm:"not null"`
+	RevokedAt    int64  `gorm:"not null"`
+}
+
+func (OEMTeamMemberRecord) TableName() string { return "cmh_oem_team_members" }
+
+type OEMTeamAuditRecord struct {
+	ID          string `gorm:"type:varchar(32);primaryKey"`
+	SiteID      string `gorm:"type:varchar(32);not null;index"`
+	UserID      int    `gorm:"not null"`
+	ActorUserID int    `gorm:"not null"`
+	Action      string `gorm:"type:varchar(32);not null"`
+	CreatedAt   int64  `gorm:"not null"`
+}
+
+func (OEMTeamAuditRecord) TableName() string { return "cmh_oem_team_audits" }
+
 // MigrateOEM is explicit: it is not registered as H6, run on requests, or
 // invoked by importing the extension. It never migrates official tables.
 func MigrateOEM(db *gorm.DB) error {
 	if db == nil {
 		return errors.New("OEM database unavailable")
 	}
-	return db.AutoMigrate(&OEMSiteRecord{}, &OEMSiteAuditRecord{}, &OEMCustomerInvitationRecord{}, &OEMCustomerRecord{}, &OEMCustomerAuditRecord{}, &OEMCustomerNoteRecord{})
+	return db.AutoMigrate(&OEMSiteRecord{}, &OEMSiteAuditRecord{}, &OEMCustomerInvitationRecord{}, &OEMCustomerRecord{}, &OEMCustomerAuditRecord{}, &OEMCustomerNoteRecord{}, &OEMTeamInvitationRecord{}, &OEMTeamMemberRecord{}, &OEMTeamAuditRecord{})
 }

@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Field, FieldLabel, FieldError } from "@/components/ui/field";
 import { CopyButton } from "@/components/copy-button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { api, ApiError, type Customer, type CustomerNote } from "~/lib/api";
+import { api, ApiError, ownsBrand, type Customer, type CustomerNote } from "~/lib/api";
 import {
   invitationSchema,
   acceptanceSchema,
@@ -46,7 +46,13 @@ function Customers() {
           </Button>
         ))}
       </div>
-      {site && <MerchantCustomers key={site} site={site} />}
+      {site && sites.data?.some((item) => item.id === site) && (
+        <MerchantCustomers
+          key={`${site}:${sites.data.find((item) => item.id === site)?.access}`}
+          site={site}
+          owner={ownsBrand(sites.data.find((item) => item.id === site))}
+        />
+      )}
     </section>
   );
 }
@@ -253,7 +259,7 @@ function CustomerNoteEditor(props: {
   );
 }
 
-function MerchantCustomers(props: { site: string }) {
+function MerchantCustomers(props: { site: string; owner: boolean }) {
   const { t } = useTranslation();
   const client = useQueryClient();
   const customers = useQuery({
@@ -265,6 +271,7 @@ function MerchantCustomers(props: { site: string }) {
   const invitations = useQuery({
     queryKey: ["oem-invitations", props.site],
     queryFn: () => api.invitations(props.site),
+    enabled: props.owner,
     retry: false,
     gcTime: 0,
   });
@@ -313,10 +320,12 @@ function MerchantCustomers(props: { site: string }) {
           <li key={customer.user_id}>
             {t("User ID")}: {customer.user_id} ·{" "}
             {customer.active ? t("Active association") : t("Revoked association")}{" "}
-            <Button variant="outline" onClick={() => setNoteUser(customer.user_id)}>
-              {t("Private notes")}
-            </Button>
-            {customer.active && (
+            {props.owner && (
+              <Button variant="outline" onClick={() => setNoteUser(customer.user_id)}>
+                {t("Private notes")}
+              </Button>
+            )}
+            {props.owner && customer.active && (
               <Button
                 variant="outline"
                 onClick={() => setRevoking(customer)}
@@ -328,7 +337,7 @@ function MerchantCustomers(props: { site: string }) {
           </li>
         ))}
       </ul>
-      {noteUser !== null && (
+      {props.owner && noteUser !== null && (
         <CustomerNotes
           key={`${props.site}:${noteUser}`}
           site={props.site}
@@ -336,66 +345,75 @@ function MerchantCustomers(props: { site: string }) {
           onClose={() => setNoteUser(null)}
         />
       )}
-      <ConfirmDialog
-        open={!!revoking}
-        onOpenChange={(open) => {
-          if (!open && !revoke.isPending) setRevoking(null);
-        }}
-        title={t("Revoke association")}
-        desc={t("This removes only the management association. It does not disable relay access.")}
-        confirmText={t("Revoke association")}
-        isLoading={revoke.isPending}
-        handleConfirm={() => {
-          if (revoking) revoke.mutate(revoking.user_id);
-        }}
-      />
-      {revoke.isError && <p role="alert">{t("Unable to revoke association.")}</p>}
-      <form
-        onSubmit={form.handleSubmit((values) => {
-          setSecret(null);
-          setFailed(false);
-          invite.mutate(Number(values.target_user_id));
-        })}
-      >
-        <Field data-invalid={!!form.formState.errors.target_user_id}>
-          <FieldLabel htmlFor="target-user">{t("Target user ID")}</FieldLabel>
-          <Input
-            id="target-user"
-            inputMode="numeric"
-            {...form.register("target_user_id")}
-            disabled={invite.isPending}
-            aria-invalid={!!form.formState.errors.target_user_id}
+      {!props.owner && <p>{t("Shared read-only access")}</p>}
+      {props.owner && (
+        <>
+          <ConfirmDialog
+            open={!!revoking}
+            onOpenChange={(open) => {
+              if (!open && !revoke.isPending) setRevoking(null);
+            }}
+            title={t("Revoke association")}
+            desc={t(
+              "This removes only the management association. It does not disable relay access.",
+            )}
+            confirmText={t("Revoke association")}
+            isLoading={revoke.isPending}
+            handleConfirm={() => {
+              if (revoking) revoke.mutate(revoking.user_id);
+            }}
           />
-          {form.formState.errors.target_user_id && (
-            <FieldError>{t("Enter a positive user ID.")}</FieldError>
+          {revoke.isError && <p role="alert">{t("Unable to revoke association.")}</p>}
+          <form
+            onSubmit={form.handleSubmit((values) => {
+              setSecret(null);
+              setFailed(false);
+              invite.mutate(Number(values.target_user_id));
+            })}
+          >
+            <Field data-invalid={!!form.formState.errors.target_user_id}>
+              <FieldLabel htmlFor="target-user">{t("Target user ID")}</FieldLabel>
+              <Input
+                id="target-user"
+                inputMode="numeric"
+                {...form.register("target_user_id")}
+                disabled={invite.isPending}
+                aria-invalid={!!form.formState.errors.target_user_id}
+              />
+              {form.formState.errors.target_user_id && (
+                <FieldError>{t("Enter a positive user ID.")}</FieldError>
+              )}
+            </Field>
+            <Button type="submit" disabled={invite.isPending}>
+              {t("Create invitation")}
+            </Button>
+          </form>
+          {failed && (
+            <p role="alert">
+              {t("Invitation creation failed. Check records before trying again.")}
+            </p>
           )}
-        </Field>
-        <Button type="submit" disabled={invite.isPending}>
-          {t("Create invitation")}
-        </Button>
-      </form>
-      {failed && (
-        <p role="alert">{t("Invitation creation failed. Check records before trying again.")}</p>
+          {secret && (
+            <section aria-label={t("One-time invitation")}>
+              <p>{t("Copy now. The token is shown once and expires in 24 hours.")}</p>
+              <CopyButton value={secret} aria-label={t("Copy invitation token")} />
+              <Button onClick={() => setSecret(null)}>{t("Close")}</Button>
+            </section>
+          )}
+          <h3>{t("Invitations")}</h3>
+          {invitations.isPending && <p>{t("Loading...")}</p>}
+          {invitations.isError && <p role="alert">{t("Unable to load customer records.")}</p>}
+          {invitations.data?.length === 0 && <p>{t("No invitations.")}</p>}
+          <ul>
+            {invitations.data?.map((item) => (
+              <li key={item.id}>
+                {t("User ID")}: {item.target_user_id} ·{" "}
+                {item.accepted_at ? t("Accepted") : t("Not accepted")}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
-      {secret && (
-        <section aria-label={t("One-time invitation")}>
-          <p>{t("Copy now. The token is shown once and expires in 24 hours.")}</p>
-          <CopyButton value={secret} aria-label={t("Copy invitation token")} />
-          <Button onClick={() => setSecret(null)}>{t("Close")}</Button>
-        </section>
-      )}
-      <h3>{t("Invitations")}</h3>
-      {invitations.isPending && <p>{t("Loading...")}</p>}
-      {invitations.isError && <p role="alert">{t("Unable to load customer records.")}</p>}
-      {invitations.data?.length === 0 && <p>{t("No invitations.")}</p>}
-      <ul>
-        {invitations.data?.map((item) => (
-          <li key={item.id}>
-            {t("User ID")}: {item.target_user_id} ·{" "}
-            {item.accepted_at ? t("Accepted") : t("Not accepted")}
-          </li>
-        ))}
-      </ul>
       <h3>{t("Operation records")}</h3>
       {audits.isPending && <p>{t("Loading operation records...")}</p>}
       {audits.isError && <p role="alert">{t("Unable to load customer records.")}</p>}

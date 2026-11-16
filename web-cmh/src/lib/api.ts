@@ -107,6 +107,7 @@ export type BrandSite = BrandInput & {
   version: number;
   created_at: number;
   updated_at: number;
+  access: "owner" | "readonly";
 };
 export type BrandAudit = { id: string; action: string; version: number; created_at: number };
 
@@ -136,6 +137,14 @@ export type ModelCatalog = {
   model_policy_enabled: boolean;
   destination_policy_enabled: boolean;
 };
+
+export type TeamMember = Customer & { version: number };
+export type TeamInvitation = CustomerInvitation;
+export type TeamAudit = CustomerAudit;
+
+export function ownsBrand(site: BrandSite | null | undefined): boolean {
+  return site?.access === "owner";
+}
 
 export const api = {
   brands: (): Promise<BrandSite[]> => request("/api/ext/oem/sites"),
@@ -181,6 +190,25 @@ export const api = {
     request("/api/ext/oem/customer-membership"),
   acceptInvitation: (token: string): Promise<Customer> =>
     request("/api/ext/oem/customer-invitations/accept", "POST", { token }),
+  team: (site: string): Promise<TeamMember[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team`),
+  teamInvitations: (site: string): Promise<TeamInvitation[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team-invitations`),
+  teamAudits: (site: string): Promise<TeamAudit[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team-audits`),
+  inviteTeamMember: (
+    site: string,
+    user: number,
+  ): Promise<{ invitation: TeamInvitation; token: string }> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team-invitations`, "POST", {
+      target_user_id: user,
+    }),
+  acceptTeamInvitation: (token: string): Promise<TeamMember> =>
+    request("/api/ext/oem/team-invitations/accept", "POST", { token }),
+  revokeTeamMember: (site: string, user: number, version: number): Promise<TeamMember> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team/${user}/revoke`, "POST", {
+      version,
+    }),
   catalog: (): Promise<ModelCatalog> => request("/api/ext/oem/catalog"),
   self: (): Promise<SelfUser> => request<SelfUser>("/api/user/self"),
   status: (): Promise<Record<string, unknown>> => request<Record<string, unknown>>("/api/status"),

@@ -1,4 +1,4 @@
-# OEM V1 客户私有备注验收（进行中）
+# OEM V1 客户私有备注验收（已发布增量）
 
 ## 精确业务合同
 
@@ -11,7 +11,7 @@
 
 ## 当前验证状态
 
-后端与页面源码已交回，最终实际 Chrome 组合验收 **20 项 PASS**，尚待提交发布。此前 14 项全部保留，新增备注真实 LF/tab 保存、冷刷新持久化、独立 React 文档旧版本 409 后显式重新加载、CDP 暂停真实 GET 后切换品牌不串草稿、精确 note/version wire、membership 与审计不含正文等检查。结果为 `ops/.cache/oem-notes-browser-1794815564961/results.json`；12 项生产输入 SHA 前后完全一致。二进制 SHA256 `45601a98a041a11c93ea0e1f0060a7b7b42d20545bdbdb2e04505533d089c173`，嵌入 index `36015aff6fe21a7bbc37e6cd3cfee9d9bcf789a8b3e2b65bda31e72dc23fa348`。验收及清理任务 exit 0，进程 0，38189/39389 无监听；无旧数据、生产或付费调用。合成官方会话不等于真人密码/MFA、TLS 或上游供应商验证。
+后端与页面源码已交回，最终实际 Chrome 组合验收 **20 项 PASS**。已发布提交 `0ac685b39b8053bbc7159b944454b44069e627c8` 至 main/develop，远程差异门禁 `43828064197` / `43828054179` 均 success。此前 14 项全部保留，新增备注真实 LF/tab 保存、冷刷新持久化、独立 React 文档旧版本 409 后显式重新加载、CDP 暂停真实 GET 后切换品牌不串草稿、精确 note/version wire、membership 与审计不含正文等检查。结果为 `ops/.cache/oem-notes-browser-1794815564961/results.json`；12 项生产输入 SHA 前后完全一致。二进制 SHA256 `45601a98a041a11c93ea0e1f0060a7b7b42d20545bdbdb2e04505533d089c173`，嵌入 index `36015aff6fe21a7bbc37e6cd3cfee9d9bcf789a8b3e2b65bda31e72dc23fa348`。验收及清理任务 exit 0，进程 0，38189/39389 无监听；无旧数据、生产或付费调用。合成官方会话不等于真人密码/MFA、TLS 或上游供应商验证。
 
 - 真实 SQLite 3.50.4 / MySQL 8.0.44 / PostgreSQL 17.12：`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ops/.cache/db-test/run-oem-customers-matrix.ps1`，最终矩阵 exit 0，分别 0.75 / 0.87 / 1.09 秒，包 8.370 秒。六表新建重复两次、已有五表含资料/审计/归属升级重复两次、新连接重读及主键唯一性均通过。
 - 两独立连接池在备注不存在版本 0、已有版本 1 的相同版本竞争均只有一方成功、一次版本递增及一条审计；不是已证实锁重叠或 race 检测认证。审计失败更新回滚、历史已撤销关系编辑/清空、UTF-8/控制字符/字节/版本边界、跨所有者/错误品牌 404、自助端点 403 及正文不泄露均通过。

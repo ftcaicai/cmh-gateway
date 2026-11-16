@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import axios from "axios";
-import { api, ApiError } from "../src/lib/api.ts";
+import { api, ApiError, ownsBrand } from "../src/lib/api.ts";
 import { customerNoteSchema } from "../src/features/customers/lib/schema.ts";
 import { applyAuthBundle, clearAuthentication } from "@/lib/auth-session";
 
@@ -30,6 +30,54 @@ beforeEach(() => {
   axios.defaults.adapter = async () => {
     throw new Error("Unexpected refresh");
   };
+});
+
+test("ownership hints grant controls only for exact owner and reject unknown/missing access", () => {
+  assert.equal(ownsBrand({ access: "owner" }), true);
+  for (const value of [null, undefined, {}, { access: "readonly" }, { access: "admin" }])
+    assert.equal(ownsBrand(value), false);
+});
+
+test("team invite and self acceptance send only explicit target or token", async (t) => {
+  const seen = [];
+  t.mock.method(globalThis, "fetch", async (path, options) => {
+    seen.push([path, options.method, JSON.parse(options.body)]);
+    return Response.json({ success: true, data: { token: "synthetic", invitation: { id: "i" } } });
+  });
+  await api.inviteTeamMember("site/1", 9);
+  await api.acceptTeamInvitation("synthetic");
+  assert.deepEqual(seen, [
+    ["/api/ext/oem/sites/site%2F1/team-invitations", "POST", { target_user_id: 9 }],
+    ["/api/ext/oem/team-invitations/accept", "POST", { token: "synthetic" }],
+  ]);
+});
+
+test("team revoke sends exact CAS version once on conflict", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (path, options) => {
+    calls++;
+    assert.equal(path, "/api/ext/oem/sites/site-1/team/9/revoke");
+    assert.deepEqual(JSON.parse(options.body), { version: 3 });
+    return new Response(null, { status: 409 });
+  });
+  await assert.rejects(
+    api.revokeTeamMember("site-1", 9, 3),
+    (error) => error instanceof ApiError && error.status === 409,
+  );
+  assert.equal(calls, 1);
+});
+
+test("team self acceptance does not replay token after unauthorized response", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    return new Response(null, { status: 401 });
+  });
+  await assert.rejects(
+    api.acceptTeamInvitation("synthetic"),
+    (error) => error instanceof ApiError && error.status === 401,
+  );
+  assert.equal(calls, 1);
 });
 
 test("note form permits plain LF/tab without trimming and bounds UTF-8 bytes", () => {

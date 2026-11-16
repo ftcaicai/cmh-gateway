@@ -38,6 +38,7 @@ func MountOEM(engine *gin.Engine) {
 	})
 	MountOEMCatalog(group)
 	mountOEMCustomers(group)
+	mountOEMTeam(group)
 	handler := siteHTTP{store: func() *SiteStore { return NewSiteStore(model.DB) }}
 	group.GET("/sites", middleware.RequirePermission(OEMRead), handler.list)
 	group.GET("/sites/:id/audits", middleware.RequirePermission(OEMRead), handler.audits)
@@ -66,16 +67,28 @@ func oemResponse(c *gin.Context, data any, err error) {
 }
 
 func (h siteHTTP) list(c *gin.Context) {
-	value, err := h.store().List(c.Request.Context(), c.GetInt("id"))
+	value, err := h.store().ReadableSites(c.Request.Context(), c.GetInt("id"))
 	oemResponse(c, value, err)
 }
 func (h siteHTTP) get(c *gin.Context) {
-	value, err := h.store().Get(c.Request.Context(), c.GetInt("id"), c.Param("id"))
-	oemResponse(c, value, err)
+	store := h.store()
+	owner, access, err := store.ReadSiteOwner(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	if err != nil {
+		oemResponse(c, nil, err)
+		return
+	}
+	value, err := store.Get(c.Request.Context(), owner, c.Param("id"))
+	oemResponse(c, ReadableSite{Site: value, Access: access}, err)
 }
 
 func (h siteHTTP) audits(c *gin.Context) {
-	value, err := h.store().Audits(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	store := h.store()
+	owner, _, err := store.ReadSiteOwner(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	if err != nil {
+		oemResponse(c, nil, err)
+		return
+	}
+	value, err := store.Audits(c.Request.Context(), owner, c.Param("id"))
 	oemResponse(c, value, err)
 }
 

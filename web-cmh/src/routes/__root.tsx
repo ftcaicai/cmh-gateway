@@ -55,6 +55,7 @@ function ConsoleLayout() {
             <Link to="/">{t("Overview")}</Link>
             <Link to="/brands">{t("Brand profiles")}</Link>
             <Link to="/customers">{t("Customers")}</Link>
+            <Link to="/team">{t("Read-only team")}</Link>
             <Link to="/catalog">{t("Model catalog")}</Link>
             <Link to="/whoami">{t("Current account")}</Link>
           </nav>
