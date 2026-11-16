@@ -31,5 +31,6 @@ type routes struct{}
 
 func (routes) Register(engine *gin.Engine) {
 	brand.Routes{}.Register(engine) // brand hosts first: they must never reach official fallbacks
+	brand.MountOEM(engine)          // official-session OEM management API
 	console.Mount(engine)           // /cmh/* operations console
 }

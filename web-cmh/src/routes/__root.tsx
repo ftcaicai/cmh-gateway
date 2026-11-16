@@ -53,6 +53,9 @@ function ConsoleLayout() {
           <strong>{t("Operations console")}</strong>
           <nav style={{ display: "flex", gap: 12 }}>
             <Link to="/">{t("Overview")}</Link>
+            <Link to="/brands">{t("Brand profiles")}</Link>
+            <Link to="/customers">{t("Customers")}</Link>
+            <Link to="/catalog">{t("Model catalog")}</Link>
             <Link to="/whoami">{t("Current account")}</Link>
           </nav>
         </header>

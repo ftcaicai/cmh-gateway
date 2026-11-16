@@ -28,8 +28,12 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: "/api/user/self" | "/api/status"): Promise<T> {
-  const authenticated = path === "/api/user/self";
+async function request<T>(
+  path: string,
+  method: "GET" | "POST" | "PUT" = "GET",
+  input?: unknown,
+): Promise<T> {
+  const authenticated = path !== "/api/status";
   if (authenticated) {
     const outcome = await resolveAuthentication();
     if (outcome.kind !== "authenticated") {
@@ -38,9 +42,8 @@ async function request<T>(path: "/api/user/self" | "/api/status"): Promise<T> {
   }
   const initialSID = useAuthStore.getState().auth.session?.sid;
 
-  // Only these read-only endpoints can be replayed. Never use this loop for
-  // mutations or one-time security proofs.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Read-only requests may refresh once; mutations are never automatically replayed.
+  for (let attempt = 0; attempt < (method === "GET" ? 2 : 1); attempt++) {
     const headers: Record<string, string> = {
       Accept: "application/json",
       "Cache-Control": "no-cache, no-store",
@@ -54,10 +57,12 @@ async function request<T>(path: "/api/user/self" | "/api/status"): Promise<T> {
       if (useAuthStore.getState().auth.session?.sid !== initialSID) throw new ApiError(409);
     }
 
+    if (input !== undefined) headers["Content-Type"] = "application/json";
     let response: Response;
     try {
       response = await fetch(path, {
-        method: "GET",
+        method,
+        ...(method === "GET" ? {} : { body: JSON.stringify(input) }),
         credentials: "same-origin",
         mode: "same-origin",
         cache: "no-store",
@@ -70,7 +75,7 @@ async function request<T>(path: "/api/user/self" | "/api/status"): Promise<T> {
     if (authenticated && useAuthStore.getState().auth.session?.sid !== initialSID)
       throw new ApiError(409);
     if (response.status === 401 && authenticated) {
-      if (attempt === 1) {
+      if (attempt === 1 || method !== "GET") {
         clearAuthentication(false);
         throw new ApiError(401);
       }
@@ -96,7 +101,74 @@ async function request<T>(path: "/api/user/self" | "/api/status"): Promise<T> {
   throw new ApiError(401);
 }
 
+export type BrandInput = { name: string; support_email: string; description: string };
+export type BrandSite = BrandInput & {
+  id: string;
+  version: number;
+  created_at: number;
+  updated_at: number;
+};
+export type BrandAudit = { id: string; action: string; version: number; created_at: number };
+
+export function brandInput(input: BrandInput): BrandInput {
+  return { name: input.name, support_email: input.support_email, description: input.description };
+}
+
+export type Customer = {
+  user_id: number;
+  site_id: string;
+  active: boolean;
+  joined_at: number;
+  revoked_at: number;
+};
+export type CustomerInvitation = {
+  id: string;
+  site_id: string;
+  target_user_id: number;
+  expires_at: number;
+  created_at: number;
+  accepted_at: number;
+};
+export type CustomerAudit = { id: string; action: string; user_id: number; created_at: number };
+export type ModelCatalog = {
+  models: string[];
+  model_policy_enabled: boolean;
+  destination_policy_enabled: boolean;
+};
+
 export const api = {
+  brands: (): Promise<BrandSite[]> => request("/api/ext/oem/sites"),
+  brand: (id: string): Promise<BrandSite> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}`),
+  createBrand: (input: BrandInput): Promise<BrandSite> =>
+    request("/api/ext/oem/sites", "POST", brandInput(input)),
+  updateBrand: (id: string, version: number, input: BrandInput): Promise<BrandSite> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}`, "PUT", {
+      ...brandInput(input),
+      version,
+    }),
+  brandAudits: (id: string): Promise<BrandAudit[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/audits`),
+  customerAudits: (site: string): Promise<CustomerAudit[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customer-audits`),
+  customers: (site: string): Promise<Customer[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customers`),
+  invitations: (site: string): Promise<CustomerInvitation[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customer-invitations`),
+  inviteCustomer: (
+    site: string,
+    targetUserID: number,
+  ): Promise<{ invitation: CustomerInvitation; token: string }> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customer-invitations`, "POST", {
+      target_user_id: targetUserID,
+    }),
+  revokeCustomer: (site: string, user: number): Promise<Customer> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customers/${user}/revoke`, "POST", {}),
+  membership: (): Promise<{ membership: Customer | null }> =>
+    request("/api/ext/oem/customer-membership"),
+  acceptInvitation: (token: string): Promise<Customer> =>
+    request("/api/ext/oem/customer-invitations/accept", "POST", { token }),
+  catalog: (): Promise<ModelCatalog> => request("/api/ext/oem/catalog"),
   self: (): Promise<SelfUser> => request<SelfUser>("/api/user/self"),
   status: (): Promise<Record<string, unknown>> => request<Record<string, unknown>>("/api/status"),
 };
