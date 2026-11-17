@@ -1,0 +1,121 @@
+/* The console reuses the official design system as-is (read-only import), so
+ * the official components it renders look the same as in the main site. */
+@import "../../web/src/styles/index.css";
+@source "../../web/src/components";
+@source "./";
+
+/* Shared look for console pages. Pages are written with plain semantic
+ * elements; this layer turns them into headers, cards, lists and notices. */
+@layer components {
+  .cmh-content > section > h2,
+  .cmh-content > section > header h2 {
+    font-size: 1.5rem;
+    line-height: 2rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .cmh-content h2 + p {
+    margin-top: 0.25rem;
+    color: var(--muted-foreground);
+  }
+  .cmh-content h3 {
+    margin-top: 1.75rem;
+    margin-bottom: 0.625rem;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+  .cmh-content p {
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+  .cmh-content p + p {
+    margin-top: 0.375rem;
+  }
+  .cmh-content section section {
+    margin-top: 1.25rem;
+    padding: 1.25rem;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    background: var(--card);
+  }
+  .cmh-content section section > h3:first-child {
+    margin-top: 0;
+  }
+  .cmh-content section section section {
+    background: transparent;
+  }
+  .cmh-content ul {
+    margin-top: 0.5rem;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0.625rem;
+    background: var(--card);
+  }
+  .cmh-content li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 0.75rem;
+    padding: 0.75rem 1rem;
+    font-size: 0.875rem;
+    border-top: 1px solid var(--border);
+  }
+  .cmh-content li:first-child {
+    border-top: 0;
+  }
+  .cmh-content form {
+    display: grid;
+    gap: 0.875rem;
+    max-width: 34rem;
+    margin-top: 0.75rem;
+  }
+  .cmh-content form button[type="submit"] {
+    justify-self: start;
+  }
+  .cmh-content dl {
+    display: grid;
+    grid-template-columns: 8rem 1fr;
+    gap: 0.75rem 1rem;
+    margin-top: 1rem;
+    padding: 1.25rem;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    background: var(--card);
+    font-size: 0.875rem;
+  }
+  .cmh-content dt {
+    color: var(--muted-foreground);
+  }
+  .cmh-content dd {
+    overflow-wrap: anywhere;
+  }
+  .cmh-content [role="alert"],
+  .cmh-content [role="status"] {
+    margin-top: 0.75rem;
+    padding: 0.625rem 0.875rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+  }
+  .cmh-content [role="alert"] {
+    border-color: color-mix(in oklab, var(--destructive) 35%, transparent);
+    background: color-mix(in oklab, var(--destructive) 8%, transparent);
+    color: var(--destructive);
+  }
+  .cmh-content [role="status"] {
+    background: var(--muted);
+  }
+  .cmh-content [role="alert"] button {
+    margin-top: 0.5rem;
+  }
+  .cmh-muted {
+    color: var(--muted-foreground);
+  }
+  .cmh-mono {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.75rem;
+    color: var(--muted-foreground);
+    overflow-wrap: anywhere;
+  }
+}

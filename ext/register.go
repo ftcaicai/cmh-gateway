@@ -8,6 +8,8 @@
 package ext
 
 import (
+	"os"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/QuantumNous/new-api/ext/brand"
@@ -24,6 +26,13 @@ func Register() {
 	core.InitializePolicies = domestic.InstallPolicyOnly // H1, explicit host startup only
 	core.Tenant = brand.Resolver{}                       // H2
 	core.Routes = routes{}                               // H5
+	brand.RegisterDomains()                              // T2.5: verified-domain sync topic and DNS check task
+	// H8 is off unless the operator opts in at startup. Before the first start
+	// with it on, run `oem-migrate -backfill-main-auth` with the gateway
+	// stopped; see ext/docs/OEM_V1_OPERATOR_GUIDE.md.
+	if os.Getenv("CMH_BRAND_AUTH") == "1" {
+		brand.EnableAuth()
+	}
 }
 
 // routes is the single H5 registrar; each module mounts itself here in order.

@@ -19,7 +19,14 @@ void i18n
     fallbackLng: "en",
     keySeparator: false,
     interpolation: { escapeValue: false },
-    detection: { order: ["navigator", "htmlTag"], caches: [] },
+    detection: {
+      // Same origin as the main console: follow the language chosen there
+      // (it stores zhCN / zhTW), then the browser, then the page language.
+      order: ["localStorage", "navigator", "htmlTag"],
+      caches: [],
+      convertDetectedLanguage: (code: string) =>
+        code === "zhCN" ? "zh" : code === "zhTW" ? "zh-TW" : code,
+    },
   });
 
 export default i18n;

@@ -25,6 +25,38 @@
 
 合同已消除“查不到绑定就当历史主站”的歧义：候选启用流程要求维护窗口显式迁移历史主站记录，启用后缺失绑定拒绝；此迁移仍未实施，未批准生产执行。也明确官方因子使用发生在最终事务之前：错误 scope 必须在因子使用前拒绝；正确作用域的因子使用不承诺随后续绑定失败回滚。独立复核代理此前均失败无结论，新有限复核正在收回，未计作通过。认证专项官方 diff 仍为 0/1800。
 
+## H8 已接线（2026-11-17，默认关闭）
+
+九个具名官方文件已接线，实测 353/1800 增删行，差异门禁通过。设计与候选合同一致：model 为唯一提交者，`model.AuthScopeParticipant`（Admit/Bind/Check）由 `ext/brand/auth_scope.go` 实现，flow/session 行与 `cmh_auth_scope_bindings` 同事务写入；H2 在请求 context 放入主站或品牌 scope（站点、精确 origin、host-only 浏览器 Cookie 摘要）；登录、两步验证、刷新、退出及全部浏览器身份中间件按 scope 核对，越界请求无副作用。品牌域只放行密码登录、两步验证码、刷新、退出、`/account` 与 `GET /api/ext/brand/self`；仅有效客户可登录。品牌页面移入 `brandweb/`。开启、回填与关闭步骤见操作手册第 8 节。
+
+与候选合同的差异：身份核对接口为 Admit（登录策略前）并在 Bind（事务内）与每次 Check 中复核；启用开关是启动时环境变量而非“迁移就绪标记”，未回填就开启的后果是主站既有会话全部被拒（失败关闭）；关闭前必须运行 `oem-migrate -revoke-brand-sessions`，否则品牌会话会被主站接受——这是当前实现的已知约束，不是合同中“保留绑定读取拒绝”的等价实现。
+
+验收状态见 `acceptance/H8-brand-direct-login.md`：SQLite 自动化套件与本地真实浏览器流程通过；**MySQL/PostgreSQL 未执行、TLS 为模拟、无人工独立复核**，因此本专项尚不能记为完成，也不得启用于生产域名。
+
 ## 参考安全要求
 
 复用官方认证和会话，而不是复制旧凭据逻辑；适用 [OWASP Authentication](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html) 与 [Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)，包括 TLS、服务端授权、抗枚举/暴力攻击、会话失效和敏感信息不落日志。尚未声称 ASVS 全面符合。
+
+## 客户站页面与商家后台产品化（2026-11-17）
+
+品牌域新增首页、模型价格（`/pricing`，数据来自公开只读接口 `GET /api/ext/brand/pricing`）与接入文档（`/docs`），带统一导航；这些页面不依赖 `CMH_BRAND_AUTH`，未开启时登录页只显示“尚未开通”提示。模型价格显示 `default` 分组的标准价：按官方定义换算（倍率×2 美元/百万 token×分组倍率，或按次价×分组倍率），展示币种为 CNY 时乘以系统汇率，其余展示类型按美元；表达式计费或插件计费的模型只显示“按模型计费规则计价”。品牌专属价格（H4）不存在，页面不改变任何计费。接入文档不含平台主体与域名，接口地址与密钥由品牌客服提供——品牌域目前没有密钥管理与模型调用入口。
+
+商家后台 `/cmh/` 接入官方同款样式（Tailwind 插件取自 `web/node_modules`，只读引用 `web/src/styles/index.css`），改为侧边导航布局；语言跟随主站已选语言。品牌档案列表显示可复制的站点 ID。
+
+未验证：价格页只在空模型库上看过空状态，未用真实模型数据核对金额；页面截图因浏览器窗格不在前台未取得，只做了 DOM 与控制台检查。品牌域注册与企业空间未做，见交付说明。
+
+## 域名自助接入（T2.5，2026-11-17）
+
+每个品牌一个自有域名：所有者保存域名后得到专属 CNAME 目标 `<32位挑战>.<CMH_BRAND_CNAME_ROOT>`，公网 CNAME 精确匹配即验证通过；验证结果写入 `cmh_oem_site_domains.verified_host`（唯一索引保证一个域名只服务一个品牌）。H2 解析器读内存映射，不查库；映射在本节点变更时立即重载，其他节点通过官方同步主题 `cmh_brand_domains` 重载。待验证域名由官方系统任务 `cmh_brand_domain_verify` 每分钟检查一批（20 个、单次 DNS 5 秒、整轮 45 秒）。换域名或移除立即使旧域名失效并换新挑战；平台自有域与接入根域不可认领。证书由前置代理按需签发，网关只提供许可端点 `GET /api/ext/brand/tls-allowed`。商家后台品牌档案里新增“自有域名”面板。
+
+已验证：SQLite 上的存储与解析回归（规范化、越权、缺失/不匹配/被占用、换域名即失效、定时批次、审计）；临时实例上经真实接口保存、检查（得到 `cname_missing`）、保留域拒绝、未验证域名不提供品牌站、证书许可 404、清除。
+
+未验证或未做：MySQL/PostgreSQL 未跑（新表含可空唯一索引）；没有真实域名，真实 DNS 匹配成功的路径只由替身解析器覆盖；定时任务在运行实例中是否被调度未确认；多节点同步未验证；后台域名面板只通过了类型检查与构建，没有在浏览器里操作过；无改域名的二次密码确认、无已生效域名的定期复查、无暂停状态、无 HTTPS 就绪检测、网关内不签发证书。
+
+## 外观与 SEO（T2.4 / T2.7，2026-11-17）
+
+新增 `cmh_oem_site_appearances`（主题、SEO 标题/描述/关键词、收录开关、版本）与 `cmh_oem_site_logos`（图片字节）。所有者接口：`GET/PUT /api/ext/oem/sites/:id/appearance`（版本 CAS）、`GET/PUT /api/ext/oem/sites/:id/logo`（base64，空串为移除，服务端完整解码校验类型与尺寸）。品牌站模板输出转义后的 title/description/keywords/robots/Open Graph、canonical（仅来自已验证域名）、主题属性与 Logo；新增 `/brand-assets/logo`、`/robots.txt`、`/sitemap.xml`。样式改为 CSS 变量，三个主题为配色与标题字体的差异。后台品牌档案新增“外观与 SEO”面板。
+
+已验证：SQLite 回归（校验、越权、版本冲突、转义、默认回退、canonical/robots/sitemap、登录页恒 noindex、Logo 增删与类型）；临时实例上经真实接口保存主题与 SEO、拒绝非图片与 4096 像素图片、上传并回读 PNG，品牌站页头输出与 Logo 响应符合预期，浏览器中深色主题生效、Logo 加载、控制台无报错。迁移命令连续执行两次成功。
+
+未验证或未做：MySQL/PostgreSQL 未跑（Logo 为二进制列）；后台“外观与 SEO”面板只通过类型检查与构建，没有在浏览器里操作过；品牌站截图未取得，只做了计算样式检查；没有主题预览、没有按主题区分的页面构图、没有 Logo 历史。

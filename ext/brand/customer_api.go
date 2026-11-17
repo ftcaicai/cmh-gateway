@@ -77,7 +77,7 @@ func decodeCustomerInput(c *gin.Context, key string, target any) bool {
 	root.ForEach(func(name, value ojson.Result) bool {
 		count++
 		valid = valid && name.String() == key
-		if key == "token" {
+		if key == "token" || key == "host" {
 			valid = valid && value.Type == ojson.String
 		} else {
 			valid = valid && value.Type == ojson.Number
@@ -162,5 +162,12 @@ func (customerHTTP) revoke(c *gin.Context) {
 		return
 	}
 	value, err := NewSiteStore(model.DB).RevokeCustomer(c.Request.Context(), c.GetInt("id"), c.Param("id"), userID)
+	if err == nil && authEnabled {
+		// The relationship is already inactive, which rejects these sessions;
+		// revoking them as well is best effort and must not fail the request.
+		if revokeErr := RevokeCustomerSessions(model.DB, c.Param("id"), userID); revokeErr != nil {
+			common.SysLog(common.LogText("brand customer session revoke failed: %s", revokeErr.Error()))
+		}
+	}
 	oemResponse(c, value, err)
 }

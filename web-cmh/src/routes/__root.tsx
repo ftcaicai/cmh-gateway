@@ -1,5 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRootRoute, Link, Outlet } from "@tanstack/react-router";
+import {
+  ArrowLeft,
+  Boxes,
+  CircleUser,
+  LayoutDashboard,
+  Store,
+  Users,
+  UsersRound,
+} from "lucide-react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -16,6 +25,15 @@ export const Route = createRootRoute({
   component: ConsoleLayout,
   notFoundComponent: NotFound,
 });
+
+const navigation = [
+  { to: "/", label: "Overview", icon: LayoutDashboard },
+  { to: "/brands", label: "Brand profiles", icon: Store },
+  { to: "/customers", label: "Customers", icon: Users },
+  { to: "/team", label: "Read-only team", icon: UsersRound },
+  { to: "/catalog", label: "Model catalog", icon: Boxes },
+  { to: "/whoami", label: "Current account", icon: CircleUser },
+] as const;
 
 function ConsoleLayout() {
   const { t } = useTranslation();
@@ -38,29 +56,46 @@ function ConsoleLayout() {
     [],
   );
 
+  const links = navigation.map(({ to, label, icon: Icon }) => (
+    <Link
+      key={to}
+      to={to}
+      activeOptions={{ exact: to === "/" }}
+      className="text-muted-foreground hover:bg-accent hover:text-foreground flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors"
+      activeProps={{ className: "bg-accent text-foreground" }}
+    >
+      <Icon className="size-4" aria-hidden="true" />
+      {t(label)}
+    </Link>
+  ));
+
   return (
     <QueryClientProvider client={queryClient}>
-      <div style={{ fontFamily: "system-ui, sans-serif", margin: "2rem auto", maxWidth: 960 }}>
-        <header
-          style={{
-            display: "flex",
-            gap: 16,
-            alignItems: "baseline",
-            borderBottom: "1px solid #ddd",
-            paddingBottom: 8,
-          }}
-        >
-          <strong>{t("Operations console")}</strong>
-          <nav style={{ display: "flex", gap: 12 }}>
-            <Link to="/">{t("Overview")}</Link>
-            <Link to="/brands">{t("Brand profiles")}</Link>
-            <Link to="/customers">{t("Customers")}</Link>
-            <Link to="/team">{t("Read-only team")}</Link>
-            <Link to="/catalog">{t("Model catalog")}</Link>
-            <Link to="/whoami">{t("Current account")}</Link>
-          </nav>
+      <div className="bg-muted/40 text-foreground flex min-h-svh flex-col md:flex-row">
+        <aside className="bg-background hidden w-60 shrink-0 flex-col border-r md:flex">
+          <div className="flex h-14 items-center gap-2 border-b px-5 font-semibold">
+            <Store className="text-primary size-5" aria-hidden="true" />
+            {t("Operations console")}
+          </div>
+          <nav className="flex flex-1 flex-col gap-1 p-3">{links}</nav>
+          <a
+            href="/"
+            className="text-muted-foreground hover:text-foreground flex items-center gap-2 border-t px-5 py-3 text-sm"
+          >
+            <ArrowLeft className="size-4" aria-hidden="true" />
+            {t("Back to main site")}
+          </a>
+        </aside>
+        <header className="bg-background border-b md:hidden">
+          <div className="flex h-12 items-center justify-between px-4 font-semibold">
+            {t("Operations console")}
+            <a href="/" className="text-muted-foreground text-sm font-normal">
+              {t("Back to main site")}
+            </a>
+          </div>
+          <nav className="flex gap-1 overflow-x-auto px-2 pb-2">{links}</nav>
         </header>
-        <main style={{ paddingTop: 16 }}>
+        <main className="cmh-content mx-auto w-full max-w-5xl min-w-0 flex-1 px-4 py-6 md:px-8 md:py-8">
           <Outlet />
         </main>
       </div>

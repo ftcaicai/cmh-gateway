@@ -109,6 +109,27 @@ export type BrandSite = BrandInput & {
   updated_at: number;
   access: "owner" | "readonly";
 };
+export type BrandDomain = {
+  available: boolean;
+  host: string;
+  cname_target: string;
+  verified: boolean;
+  verified_at: number;
+  checked_at: number;
+  last_error: string;
+};
+export type BrandAppearanceInput = {
+  theme: string;
+  seo_title: string;
+  seo_description: string;
+  seo_keywords: string;
+  allow_indexing: boolean;
+};
+export type BrandAppearance = BrandAppearanceInput & {
+  has_logo: boolean;
+  logo_updated_at: number;
+  version: number;
+};
 export type BrandAudit = { id: string; action: string; version: number; created_at: number };
 
 export function brandInput(input: BrandInput): BrandInput {
@@ -157,6 +178,30 @@ export const api = {
       ...brandInput(input),
       version,
     }),
+  brandDomain: (id: string): Promise<BrandDomain> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/domain`),
+  setBrandDomain: (id: string, host: string): Promise<BrandDomain> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/domain`, "PUT", { host }),
+  verifyBrandDomain: (id: string): Promise<BrandDomain> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/domain/verify`, "POST", {}),
+  brandAppearance: (id: string): Promise<BrandAppearance> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/appearance`),
+  updateBrandAppearance: (
+    id: string,
+    input: BrandAppearanceInput & { version: number },
+  ): Promise<BrandAppearance> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/appearance`, "PUT", {
+      theme: input.theme,
+      seo_title: input.seo_title,
+      seo_description: input.seo_description,
+      seo_keywords: input.seo_keywords,
+      allow_indexing: input.allow_indexing,
+      version: input.version,
+    }),
+  brandLogo: (id: string): Promise<{ content_type: string; image: string }> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/logo`),
+  setBrandLogo: (id: string, image: string): Promise<BrandAppearance> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/logo`, "PUT", { image }),
   brandAudits: (id: string): Promise<BrandAudit[]> =>
     request(`/api/ext/oem/sites/${encodeURIComponent(id)}/audits`),
   customerAudits: (site: string): Promise<CustomerAudit[]> =>

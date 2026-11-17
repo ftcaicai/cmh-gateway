@@ -8,7 +8,10 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldLabel, FieldError } from "@/components/ui/field";
+import { CopyButton } from "@/components/copy-button";
 import { LoadingState } from "@/components/loading-state";
+import { BrandAppearance } from "~/features/brands/brand-appearance";
+import { BrandDomain } from "~/features/brands/brand-domain";
 import {
   api,
   ApiError,
@@ -20,6 +23,16 @@ import {
 } from "~/lib/api";
 
 export const Route = createFileRoute("/brands")({ component: Brands });
+const auditLabels: Record<string, string> = {
+  "site.created": "Profile created",
+  "site.updated": "Profile updated",
+  "site.domain_set": "Domain saved",
+  "site.domain_verified": "Domain verified",
+  "site.domain_cleared": "Domain removed",
+  "site.appearance_updated": "Appearance updated",
+  "site.logo_updated": "Logo updated",
+  "site.logo_removed": "Logo removed",
+};
 const blank: BrandInput = { name: "", support_email: "", description: "" };
 
 function errorKey(error: unknown): string {
@@ -116,7 +129,7 @@ function Brands() {
     );
   return (
     <section>
-      <header style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+      <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2>{t("Brand profiles")}</h2>
           <p>{t("Manage owned profiles, not live domains or gateway accounts.")}</p>
@@ -129,21 +142,18 @@ function Brands() {
       {list.data.length === 0 ? (
         <p>{t("No brand profiles yet. Create your first profile.")}</p>
       ) : (
-        <ul style={{ padding: 0, listStyle: "none" }}>
+        <ul>
           {list.data.map((site) => (
-            <li
-              key={site.id}
-              style={{
-                borderBottom: "1px solid #ddd",
-                padding: "12px 0",
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 12,
-              }}
-            >
-              <div>
+            <li key={site.id}>
+              <div className="min-w-0">
                 <strong>{site.name}</strong>
-                <div>{site.support_email || t("No support email")}</div>
+                <div className="cmh-muted">{site.support_email || t("No support email")}</div>
+                <div className="flex items-center gap-1">
+                  <span className="cmh-mono">
+                    {t("Site ID")}: {site.id}
+                  </span>
+                  <CopyButton value={site.id} aria-label={t("Copy site ID")} />
+                </div>
               </div>
               <Button
                 variant="outline"
@@ -157,10 +167,7 @@ function Brands() {
         </ul>
       )}
       {editing && (
-        <section
-          aria-label={t("Profile editor")}
-          style={{ border: "1px solid #ddd", padding: 20, marginTop: 24 }}
-        >
+        <section aria-label={t("Profile editor")}>
           <h3>{selected ? t("Edit profile") : t("Create profile")}</h3>
           {selected && (
             <p>
@@ -184,7 +191,7 @@ function Brands() {
               </Button>
             </section>
           ) : (
-            <form onSubmit={submit} noValidate style={{ display: "grid", gap: 12 }}>
+            <form onSubmit={submit} noValidate>
               {(
                 [
                   ["name", "Profile name"],
@@ -213,12 +220,12 @@ function Brands() {
                   )}
                 />
               ))}
-              <p>
+              <p className="cmh-muted">
                 {t(
                   "UTF-8 byte limits: name 100, email 254, description 1000. Single-line text only.",
                 )}
               </p>
-              <div style={{ display: "flex", gap: 12 }}>
+              <div className="flex flex-wrap gap-3">
                 <Button
                   type="submit"
                   disabled={
@@ -260,6 +267,18 @@ function Brands() {
             </div>
           )}
           {reload.isError && <p role="alert">{t(errorKey(reload.error))}</p>}
+          {selected && ownsBrand(selected) && (
+            <section aria-label={t("Appearance and SEO")}>
+              <h3>{t("Appearance and SEO")}</h3>
+              <BrandAppearance key={selected.id} siteID={selected.id} />
+            </section>
+          )}
+          {selected && ownsBrand(selected) && (
+            <section aria-label={t("Custom domain")}>
+              <h3>{t("Custom domain")}</h3>
+              <BrandDomain key={selected.id} siteID={selected.id} />
+            </section>
+          )}
           {selected && (
             <section>
               <h3>{t("Operation records")}</h3>
@@ -278,8 +297,8 @@ function Brands() {
                 <ul>
                   {audits.data.map((record) => (
                     <li key={record.id}>
-                      {t(record.action === "site.created" ? "Profile created" : "Profile updated")}{" "}
-                      · {t("Version")} {record.version}
+                      {t(auditLabels[record.action] ?? "Profile updated")} · {t("Version")}{" "}
+                      {record.version}
                     </li>
                   ))}
                 </ul>

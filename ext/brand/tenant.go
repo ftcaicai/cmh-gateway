@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/gin-gonic/gin"
 )
 
@@ -33,9 +35,19 @@ func loadHosts() {
 	for _, pair := range strings.Split(os.Getenv("CMH_BRAND_PROTOTYPE_HOSTS"), ",") {
 		host, id, ok := strings.Cut(strings.TrimSpace(pair), "=")
 		if ok && host != "" && id != "" {
-			hostMap[strings.ToLower(host)] = id
+			// Same normalization as the lookup, so a key written with a port,
+			// upper case or a trailing dot still selects the brand.
+			hostMap[hostName(host)] = id
+			if authEnabled && !validSiteID(id) {
+				common.SysError(common.LogText("CMH_BRAND_PROTOTYPE_HOSTS: %q needs the 32-character lowercase hex site ID from /cmh/brands; brand login stays unavailable on that host", hostName(host)))
+			}
 		}
 	}
+}
+
+func validSiteID(id string) bool {
+	_, err := core.NewBrandAuthScope(id, "https://site.invalid", strings.Repeat("0", 64))
+	return err == nil
 }
 
 func hostName(raw string) string {
@@ -48,7 +60,12 @@ func hostName(raw string) string {
 // BrandIDForHost returns the brand id mapped to host, or "" for the main site.
 func BrandIDForHost(host string) string {
 	hostsOnce.Do(loadHosts)
-	return hostMap[hostName(host)]
+	name := hostName(host)
+	if id := hostMap[name]; id != "" {
+		return id
+	}
+	// Self-service domains verified through their CNAME (domains.go).
+	return verifiedSiteForHost(name)
 }
 
 // Resolver implements core.TenantResolver (H2).
@@ -59,9 +76,15 @@ func BrandIDForHost(host string) string {
 // admin/console routes can never be reached through a brand domain.
 type Resolver struct{}
 
+// With H8 enabled it also puts the request's authentication scope into the
+// request context: the main-site scope for every other host, the brand scope
+// (site, exact origin, browser) for a brand host.
 func (Resolver) Resolve(c *gin.Context) {
 	id := BrandIDForHost(c.Request.Host)
 	if id == "" {
+		if authEnabled {
+			c.Request = c.Request.WithContext(core.WithAuthScope(c.Request.Context(), core.MainAuthScope()))
+		}
 		c.Next()
 		return
 	}
@@ -70,20 +93,48 @@ func (Resolver) Resolve(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	// The public price list carries no identity, so it needs no auth scope
+	// (and no browser cookie).
+	if authEnabled && c.Request.URL.Path != "/api/ext/brand/pricing" {
+		scope, ok := brandAuthScope(c, id)
+		if !ok {
+			return
+		}
+		c.Request = c.Request.WithContext(core.WithAuthScope(c.Request.Context(), scope))
+	}
 	c.Next()
 }
 
 // allowedOnBrandHost is the P0 allowlist. T2 replaces it with the full list
-// ported from the old system's middleware/brand.go.
+// ported from the old system's middleware/brand.go. With H8 enabled it also
+// admits exactly the password/TOTP login, refresh, logout and own-profile
+// calls; registration, recovery, OAuth and Passkey stay closed.
 func allowedOnBrandHost(method, path string) bool {
+	if authEnabled {
+		switch method + " " + path {
+		case "GET /account", "GET /api/user/login/encryption-key", "GET /api/ext/brand/self",
+			"POST /api/user/login", "POST /api/user/login/verify",
+			"POST /api/user/auth/refresh", "POST /api/user/auth/logout":
+			return true
+		}
+	}
 	if method != http.MethodGet && method != http.MethodHead {
 		return false
 	}
 	switch path {
-	case "/", "/pricing", "/docs", "/login", "/register", "/favicon.ico", "/robots.txt":
+	case "/", "/pricing", "/docs", "/login", "/register", "/favicon.ico", "/robots.txt", "/sitemap.xml", "/api/ext/brand/pricing":
 		return true
 	}
 	return strings.HasPrefix(path, "/brand-assets/")
+}
+
+// hostAuthority is the lower-case host with its port kept, as an origin needs.
+func hostAuthority(raw string) string {
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		return hostName(raw)
+	}
+	return net.JoinHostPort(hostName(host), port)
 }
 
 // BrandID reads the brand id set by Resolve; "" for the main site.

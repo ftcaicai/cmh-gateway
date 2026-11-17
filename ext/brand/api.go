@@ -45,6 +45,13 @@ func MountOEM(engine *gin.Engine) {
 	group.GET("/sites/:id", middleware.RequirePermission(OEMRead), handler.get)
 	group.POST("/sites", middleware.RequirePermission(OEMWrite), handler.create)
 	group.PUT("/sites/:id", middleware.RequirePermission(OEMWrite), handler.update)
+	group.GET("/sites/:id/appearance", middleware.RequirePermission(OEMRead), handler.appearance)
+	group.PUT("/sites/:id/appearance", middleware.RequirePermission(OEMWrite), handler.updateAppearance)
+	group.GET("/sites/:id/logo", middleware.RequirePermission(OEMRead), handler.logo)
+	group.PUT("/sites/:id/logo", middleware.RequirePermission(OEMWrite), middleware.UserCriticalRateLimit("cmh-oem-logo"), handler.setLogo)
+	group.GET("/sites/:id/domain", middleware.RequirePermission(OEMRead), handler.domain)
+	group.PUT("/sites/:id/domain", middleware.RequirePermission(OEMWrite), middleware.UserCriticalRateLimit("cmh-oem-domain"), handler.setDomain)
+	group.POST("/sites/:id/domain/verify", middleware.RequirePermission(OEMWrite), middleware.UserCriticalRateLimit("cmh-oem-domain"), handler.verifyDomain)
 }
 
 type siteHTTP struct{ store func() *SiteStore }
@@ -144,5 +151,28 @@ func (h siteHTTP) update(c *gin.Context) {
 		return
 	}
 	value, err := h.store().Update(c.Request.Context(), c.GetInt("id"), c.Param("id"), input.Version, input.SiteInput)
+	oemResponse(c, value, err)
+}
+
+// The domain endpoints are owner-only: a shared read-only collaborator cannot
+// see or change where a brand is served.
+func (h siteHTTP) domain(c *gin.Context) {
+	value, err := h.store().Domain(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	oemResponse(c, value, err)
+}
+
+func (h siteHTTP) setDomain(c *gin.Context) {
+	var input struct {
+		Host string `json:"host"`
+	}
+	if !decodeCustomerInput(c, "host", &input) {
+		return
+	}
+	value, err := h.store().SetDomain(c.Request.Context(), c.GetInt("id"), c.Param("id"), input.Host)
+	oemResponse(c, value, err)
+}
+
+func (h siteHTTP) verifyDomain(c *gin.Context) {
+	value, err := h.store().VerifyDomain(c.Request.Context(), c.GetInt("id"), c.Param("id"))
 	oemResponse(c, value, err)
 }

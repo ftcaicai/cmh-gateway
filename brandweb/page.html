@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.Title}}</title>
+{{if .Description}}<meta name="description" content="{{.Description}}">{{end}}
+{{if .Keywords}}<meta name="keywords" content="{{.Keywords}}">{{end}}
+<meta name="robots" content="{{if .NoIndex}}noindex,nofollow{{else}}index,follow{{end}}">
+{{if .Canonical}}<link rel="canonical" href="{{.Canonical}}">{{end}}
+<meta property="og:title" content="{{.Title}}">
+{{if .Description}}<meta property="og:description" content="{{.Description}}">{{end}}
+{{if .Logo}}<link rel="icon" href="/brand-assets/logo?v={{.LogoVersion}}">{{end}}
+<link rel="stylesheet" href="/brand-assets/site.css">
+</head>
+<body data-page="{{.Page}}" data-theme="{{.Theme}}">
+<header>
+<a class="brand" href="/">{{if .Logo}}<img src="/brand-assets/logo?v={{.LogoVersion}}" alt="">{{end}}{{.Name}}</a>
+<nav aria-label="主导航">
+<a href="/"{{if eq .Page "home"}} aria-current="page"{{end}}>首页</a>
+<a href="/pricing"{{if eq .Page "pricing"}} aria-current="page"{{end}}>模型价格</a>
+<a href="/docs"{{if eq .Page "docs"}} aria-current="page"{{end}}>接入文档</a>
+</nav>
+{{if .Auth}}<a class="button small" id="nav-account" href="/login">登录</a>{{end}}
+</header>
+<main>
+{{if eq .Page "home"}}
+<section class="banner">
+<div>
+<p class="label">国产模型 · 统一 API 接入</p>
+<h1>连接模型能力，<br><span>开启业务新可能。</span></h1>
+<p class="lead">从文本对话到图像与视频生成，在 {{.Name}} 发现适合你的模型，用熟悉的接口接入业务。</p>
+<p class="actions"><a class="button" href="/pricing">探索全部模型</a><a class="button outline" href="/docs">开始接入</a></p>
+<p class="muted">按量计费 · 独立密钥 · 用量可查</p>
+</div>
+<ol class="features">
+<li><strong>语言的力量</strong><span>对话 · 推理 · 内容创作</span></li>
+<li><strong>让想象可见</strong><span>图像生成 · 视觉表达</span></li>
+<li><strong>让画面流动</strong><span>视频生成 · 动态叙事</span></li>
+</ol>
+</section>
+{{else if eq .Page "pricing"}}
+<section class="content">
+<p class="label">MODEL LIBRARY</p>
+<h1>模型价格</h1>
+<p class="muted">以下为标准价，实际扣费以账单为准。</p>
+<div class="toolbar">
+<label class="sr-only" for="model-search">搜索模型</label>
+<input id="model-search" type="search" placeholder="搜索模型名称或厂商" autocomplete="off">
+<span id="model-count" class="muted" role="status"></span>
+</div>
+<p id="status" role="status">正在加载模型…</p>
+<div id="models" class="models"></div>
+</section>
+{{else if eq .Page "docs"}}
+<section class="content doc">
+<p class="label">QUICK START</p>
+<h1>接入文档</h1>
+<p class="muted">接口与 OpenAI 协议兼容，已有的 SDK 和工具只需替换接口地址与密钥。</p>
+<h2>1. 准备</h2>
+<p>向 {{.Name}} 客服获取接口地址（Base URL）与 API 密钥。密钥等同于账号凭证，请勿写入前端代码或公开仓库。</p>
+<h2>2. 发起对话请求</h2>
+<pre><code>curl https://&lt;接口地址&gt;/v1/chat/completions \
+  -H "Authorization: Bearer &lt;API 密钥&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "&lt;模型名称&gt;",
+    "messages": [{"role": "user", "content": "你好"}]
+  }'</code></pre>
+<p>模型名称见<a href="/pricing">模型价格</a>页。需要流式输出时在请求体中加入 <code>"stream": true</code>。</p>
+<h2>3. 使用 SDK</h2>
+<pre><code>from openai import OpenAI
+
+client = OpenAI(base_url="https://&lt;接口地址&gt;/v1", api_key="&lt;API 密钥&gt;")
+reply = client.chat.completions.create(
+    model="&lt;模型名称&gt;",
+    messages=[{"role": "user", "content": "你好"}],
+)
+print(reply.choices[0].message.content)</code></pre>
+<h2>4. 常见错误</h2>
+<dl>
+<dt>401</dt><dd>密钥无效或已停用，请检查 Authorization 请求头。</dd>
+<dt>403</dt><dd>当前密钥无权使用该模型或线路。</dd>
+<dt>429</dt><dd>请求过于频繁，请降低并发后重试。</dd>
+<dt>5xx</dt><dd>服务暂时不可用，建议使用指数退避重试。</dd>
+</dl>
+</section>
+{{else}}
+<div class="layout">
+<section class="hero">
+<div class="symbol" aria-hidden="true">✳</div>
+<h1>从灵感，<br>到下一次创造。</h1>
+<p>登录 {{.Name}}，管理你的账号与服务。</p>
+<div class="points">01 · 探索模型<br>02 · 管理服务<br>03 · 接入应用</div>
+</section>
+{{if eq .Page "account"}}
+<section class="panel">
+<div class="label">MY ACCOUNT</div>
+<h2>我的账号</h2>
+<p id="status" role="status">正在加载…</p>
+<dl id="profile" hidden>
+<dt>账号</dt><dd id="profile-username"></dd>
+<dt>显示名称</dt><dd id="profile-display-name"></dd>
+<dt>邮箱</dt><dd id="profile-email"></dd>
+<dt>所属品牌</dt><dd id="profile-site"></dd>
+</dl>
+<button id="logout" type="button" hidden>退出登录</button>
+</section>
+{{else if .Auth}}
+<section class="panel">
+<div class="label">WELCOME BACK</div>
+<h2>欢迎回来</h2>
+<p>登录品牌站，继续你的工作。</p>
+<form id="login-form" autocomplete="on" novalidate>
+<label for="username">账号</label>
+<input id="username" name="username" type="text" autocomplete="username" maxlength="128" required>
+<label for="password">密码</label>
+<input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" required>
+<button type="submit">登录</button>
+</form>
+<form id="verify-form" autocomplete="off" novalidate hidden>
+<label for="code">两步验证码或备用码</label>
+<input id="code" name="code" type="text" inputmode="text" autocomplete="one-time-code" maxlength="32" required>
+<button type="submit">验证并登录</button>
+</form>
+<p id="status" class="error" role="alert" hidden></p>
+<p class="hint">暂不支持在本站注册或找回密码，如需帮助请联系品牌客服。</p>
+</section>
+{{else}}
+<section class="panel">
+<div class="label">WELCOME BACK</div>
+<h2>欢迎回来</h2>
+<div class="notice" role="status"><strong>品牌身份认证尚未开通</strong><span>暂不能登录或注册；请勿提交账号或密码。</span></div>
+<a class="back" href="/">返回首页</a>
+</section>
+{{end}}
+</div>
+{{end}}
+</main>
+<script src="/brand-assets/site.js"></script>
+</body>
+</html>

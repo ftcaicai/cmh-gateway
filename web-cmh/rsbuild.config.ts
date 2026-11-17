@@ -7,13 +7,15 @@ import { defineConfig } from "@rsbuild/core";
 import { pluginReact } from "@rsbuild/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/rspack";
 
+import { pluginTailwindcss } from "@rsbuild/plugin-tailwindcss";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(({ envMode }) => {
   const isProd = envMode === "production";
   const serverUrl = process.env.CMH_DEV_SERVER_URL || "http://localhost:3000";
   return {
-    plugins: [pluginReact()],
+    plugins: [pluginReact(), pluginTailwindcss({ optimize: false })],
     source: { entry: { index: "./src/main.tsx" } },
     resolve: {
       alias: {

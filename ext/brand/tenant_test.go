@@ -1,12 +1,24 @@
 package brand
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"image"
+	"image/png"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/ext/core"
+	"github.com/QuantumNous/new-api/ext/migrations"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // Official API routes are registered BEFORE H5, as in router.SetRouter.
@@ -49,8 +61,8 @@ func TestHostIsolation(t *testing.T) {
 		{"main_api", "GET", "www.main.test", "/api/user/self", 200, "official api"},
 		{"main_auth", "POST", "www.main.test", "/api/user/login", 200, "official auth"},
 		{"main_port", "GET", "www.main.test:3000", "/", 200, "official index"},
-		{"brand_home", "GET", "demo.brand.test", "/", 200, "品牌身份认证尚未开通"},
-		{"normalized_host", "GET", "DEMO.brand.test:443", "/", 200, "品牌身份认证尚未开通"},
+		{"brand_home", "GET", "demo.brand.test", "/", 200, "探索全部模型"},
+		{"normalized_host", "GET", "DEMO.brand.test:443", "/", 200, "探索全部模型"},
 		{"brand_login", "GET", "demo.brand.test", "/login", 200, "品牌身份认证尚未开通"},
 		{"brand_login_head", "HEAD", "demo.brand.test", "/login", 200, ""},
 		{"brand_login_post", "POST", "demo.brand.test", "/login", 404, ""},
@@ -60,7 +72,10 @@ func TestHostIsolation(t *testing.T) {
 		{"official_mfa_blocked", "POST", "demo.brand.test", "/api/user/login/verify", 404, ""},
 		{"official_api_blocked", "GET", "demo.brand.test", "/api/user/self", 404, ""},
 		{"console_blocked", "GET", "demo.brand.test", "/cmh/whoami", 404, ""},
-		{"unimplemented_pricing", "GET", "demo.brand.test", "/pricing", 404, ""},
+		{"brand_pricing", "GET", "demo.brand.test", "/pricing", 200, "模型价格"},
+		{"brand_docs", "GET", "demo.brand.test", "/docs", 200, "接入文档"},
+		{"brand_account_closed", "GET", "demo.brand.test", "/account", 404, ""},
+		{"brand_unknown_page", "GET", "demo.brand.test", "/register", 404, ""},
 		{"unimplemented_asset", "GET", "demo.brand.test", "/brand-assets/missing.js", 404, ""},
 		{"brand_post", "POST", "demo.brand.test", "/", 404, ""},
 		{"brand_head", "HEAD", "demo.brand.test", "/", 200, ""},
@@ -72,7 +87,7 @@ func TestHostIsolation(t *testing.T) {
 			w := httptest.NewRecorder()
 			e.ServeHTTP(w, r)
 			require.Equal(t, tc.status, w.Code)
-			if tc.name == "brand_home" || tc.name == "normalized_host" || tc.name == "brand_login" {
+			if tc.status == 200 && tc.host != "www.main.test" && tc.host != "www.main.test:3000" && tc.method == "GET" {
 				require.Contains(t, w.Body.String(), tc.body)
 				require.NotContains(t, w.Body.String(), "official index")
 				require.NotContains(t, w.Body.String(), "<form")
@@ -101,4 +116,215 @@ func TestHostIsolation(t *testing.T) {
 		require.Equal(t, 200, w.Code)
 		require.Equal(t, "official index", w.Body.String())
 	})
+}
+
+func TestSelfServiceDomain(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/domains.sqlite"), &gorm.Config{Logger: logger.Discard})
+	require.NoError(t, err)
+	connection, err := db.DB()
+	require.NoError(t, err)
+	require.NoError(t, migrations.MigrateOEM(db))
+	require.NoError(t, db.AutoMigrate(&model.SystemTask{}))
+	oldDB, oldConfig, oldLookup, oldHosts := model.DB, domainConfig, lookupCNAME, hostMap
+	hostsOnce.Do(func() {})
+	model.DB, hostMap = db, map[string]string{}
+	domainConfig = func() domainSettings {
+		return domainSettings{root: "brands.platform.test", reserved: []string{"platform.test", "brands.platform.test"}}
+	}
+	records := map[string]string{}
+	lookupCNAME = func(_ context.Context, name string) (string, error) {
+		if target, ok := records[name]; ok {
+			return target, nil
+		}
+		return "", errors.New("no such host")
+	}
+	t.Cleanup(func() {
+		model.DB, domainConfig, lookupCNAME, hostMap = oldDB, oldConfig, oldLookup, oldHosts
+		verifiedHosts.Store(nil)
+		require.NoError(t, connection.Close())
+	})
+	ctx, store := context.Background(), NewSiteStore(db)
+	siteA, err := store.Create(ctx, 1, SiteInput{Name: "A"})
+	require.NoError(t, err)
+	siteB, err := store.Create(ctx, 2, SiteInput{Name: "B"})
+	require.NoError(t, err)
+
+	for _, host := range []string{"localhost", "1.2.3.4", "single", "shop.platform.test", "x.brands.platform.test", "bad_host.com", "shop.example.com:443", "shop.example.test"} {
+		_, err := store.SetDomain(ctx, 1, siteA.ID, host)
+		assert.ErrorIs(t, err, ErrOEMInvalid, host)
+	}
+	_, err = store.SetDomain(ctx, 2, siteA.ID, "shop.example.com")
+	assert.ErrorIs(t, err, ErrOEMNotFound, "another owner cannot set the domain")
+	_, err = store.Domain(ctx, 2, siteA.ID)
+	assert.ErrorIs(t, err, ErrOEMNotFound)
+
+	saved, err := store.SetDomain(ctx, 1, siteA.ID, " Shop.Example.com. ")
+	require.NoError(t, err)
+	assert.Equal(t, "shop.example.com", saved.Host)
+	assert.Regexp(t, `^[0-9a-f]{32}\.brands\.platform\.test$`, saved.CNAMETarget)
+	assert.False(t, saved.Verified)
+	assert.Empty(t, BrandIDForHost("shop.example.com"), "an unverified domain serves nothing")
+
+	checked, err := store.VerifyDomain(ctx, 1, siteA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainErrorMissing, checked.LastError)
+	records["shop.example.com."] = "other.brands.platform.test."
+	checked, err = store.VerifyDomain(ctx, 1, siteA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainErrorMismatch, checked.LastError)
+	assert.False(t, checked.Verified)
+
+	records["shop.example.com."] = strings.ToUpper(saved.CNAMETarget) + "."
+	checked, err = store.VerifyDomain(ctx, 1, siteA.ID)
+	require.NoError(t, err)
+	assert.True(t, checked.Verified)
+	assert.Empty(t, checked.LastError)
+	assert.Equal(t, siteA.ID, BrandIDForHost("SHOP.example.com:443"))
+
+	// A second site cannot take a host that is already served, even with a
+	// CNAME that matches its own target.
+	other, err := store.SetDomain(ctx, 2, siteB.ID, "shop.example.com")
+	require.NoError(t, err)
+	records["shop.example.com."] = other.CNAMETarget + "."
+	other, err = store.VerifyDomain(ctx, 2, siteB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainErrorTaken, other.LastError)
+	assert.False(t, other.Verified)
+	assert.Equal(t, siteA.ID, BrandIDForHost("shop.example.com"))
+
+	// Changing the domain takes the old one out of service at once; the
+	// scheduled pass then verifies the new one.
+	moved, err := store.SetDomain(ctx, 1, siteA.ID, "new.example.com")
+	require.NoError(t, err)
+	assert.NotEqual(t, saved.CNAMETarget, moved.CNAMETarget)
+	assert.Empty(t, BrandIDForHost("shop.example.com"))
+	records["new.example.com."] = moved.CNAMETarget + "."
+	verified, err := store.verifyPendingDomains(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, verified, "the new domain and the host site B was waiting for")
+	assert.Equal(t, siteA.ID, BrandIDForHost("new.example.com"))
+	assert.Equal(t, siteB.ID, BrandIDForHost("shop.example.com"))
+
+	cleared, err := store.SetDomain(ctx, 1, siteA.ID, "")
+	require.NoError(t, err)
+	assert.Empty(t, cleared.Host)
+	assert.Empty(t, BrandIDForHost("new.example.com"))
+	audits, err := store.Audits(ctx, 1, siteA.ID)
+	require.NoError(t, err)
+	actions := map[string]int{}
+	for _, audit := range audits {
+		actions[audit.Action]++
+	}
+	assert.Equal(t, map[string]int{"site.created": 1, "site.domain_set": 2, "site.domain_verified": 2, "site.domain_cleared": 1}, actions)
+}
+
+func TestStorefrontAppearance(t *testing.T) {
+	engine := newEngine(t)
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/appearance.sqlite"), &gorm.Config{Logger: logger.Discard})
+	require.NoError(t, err)
+	connection, err := db.DB()
+	require.NoError(t, err)
+	require.NoError(t, migrations.MigrateOEM(db))
+	oldDB := model.DB
+	model.DB = db
+	t.Cleanup(func() {
+		model.DB = oldDB
+		verifiedHosts.Store(nil)
+		require.NoError(t, connection.Close())
+	})
+	ctx, store := context.Background(), NewSiteStore(db)
+	site, err := store.Create(ctx, 1, SiteInput{Name: "Orange & Moon", Description: "profile description"})
+	require.NoError(t, err)
+	hostMap["demo.brand.test"] = site.ID
+	get := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest("GET", path, nil)
+		request.Host = "demo.brand.test"
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, request)
+		return response
+	}
+	pngOf := func(width, height int) []byte {
+		var buffer bytes.Buffer
+		require.NoError(t, png.Encode(&buffer, image.NewRGBA(image.Rect(0, 0, width, height))))
+		return buffer.Bytes()
+	}
+
+	// Defaults: profile name and description, default theme, indexable, no logo.
+	home := get("/").Body.String()
+	assert.Contains(t, home, "<title>Orange &amp; Moon</title>")
+	assert.Contains(t, home, `data-theme="default"`)
+	assert.Contains(t, home, `content="profile description"`)
+	assert.Contains(t, home, `content="index,follow"`)
+	assert.NotContains(t, home, "canonical")
+	assert.NotContains(t, home, "/brand-assets/logo")
+	assert.Equal(t, 404, get("/brand-assets/logo").Code)
+
+	for name, input := range map[string]SiteAppearanceInput{
+		"unknown theme":  {Theme: "neon", AllowIndexing: true},
+		"long title":     {Theme: "default", SEOTitle: strings.Repeat("字", 121)},
+		"control chars":  {Theme: "default", SEODescription: "line\nbreak"},
+		"long keywords":  {Theme: "default", SEOKeywords: strings.Repeat("k", 201)},
+		"negative token": {Theme: "default", Version: -1},
+	} {
+		_, err := store.UpdateAppearance(ctx, 1, site.ID, input)
+		assert.ErrorIs(t, err, ErrOEMInvalid, name)
+	}
+	_, err = store.UpdateAppearance(ctx, 2, site.ID, SiteAppearanceInput{Theme: "technology"})
+	assert.ErrorIs(t, err, ErrOEMNotFound, "another owner")
+	saved, err := store.UpdateAppearance(ctx, 1, site.ID, SiteAppearanceInput{
+		Theme: "technology", SEOTitle: `Best <script>alert(1)</script> "API"`, SEODescription: "seo description", SEOKeywords: "ai,api", AllowIndexing: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), saved.Version)
+	_, err = store.UpdateAppearance(ctx, 1, site.ID, SiteAppearanceInput{Theme: "business", Version: 0})
+	assert.ErrorIs(t, err, ErrOEMConflict, "a stale version must not overwrite")
+
+	for name, data := range map[string][]byte{"not an image": []byte("<svg onload=alert(1)>"), "too wide": pngOf(2049, 1), "too large": make([]byte, logoMaxBytes+1)} {
+		_, err := store.SetLogo(ctx, 1, site.ID, data)
+		assert.ErrorIs(t, err, ErrOEMInvalid, name)
+	}
+	_, err = store.SetLogo(ctx, 2, site.ID, pngOf(8, 8))
+	assert.ErrorIs(t, err, ErrOEMNotFound)
+	logo := pngOf(8, 8)
+	withLogo, err := store.SetLogo(ctx, 1, site.ID, logo)
+	require.NoError(t, err)
+	assert.True(t, withLogo.HasLogo)
+
+	pricing := get("/pricing").Body.String()
+	assert.Contains(t, pricing, "<title>模型价格 - Best &lt;script&gt;alert(1)&lt;/script&gt; &#34;API&#34;</title>")
+	assert.NotContains(t, pricing, "<script>alert(1)</script>")
+	assert.Contains(t, pricing, `data-theme="technology"`)
+	assert.Contains(t, pricing, `content="seo description"`)
+	assert.Contains(t, pricing, `content="ai,api"`)
+	assert.Contains(t, pricing, `<img src="/brand-assets/logo?v=`)
+	served := get("/brand-assets/logo")
+	assert.Equal(t, "image/png", served.Header().Get("Content-Type"))
+	assert.Equal(t, logo, served.Body.Bytes())
+	assert.Contains(t, get("/login").Body.String(), `content="noindex,nofollow"`, "sign-in is never indexed")
+
+	// Without a verified domain there is no canonical address to publish.
+	assert.NotContains(t, get("/robots.txt").Body.String(), "Sitemap:")
+	assert.NotContains(t, get("/sitemap.xml").Body.String(), "<loc>")
+	bound := "shop.example.com"
+	require.NoError(t, db.Create(&migrations.OEMSiteDomainRecord{SiteID: site.ID, OwnerUserID: 1, Host: bound, Challenge: strings.Repeat("a", 32), VerifiedHost: &bound}).Error)
+	assert.Contains(t, get("/docs").Body.String(), `<link rel="canonical" href="https://shop.example.com/docs">`)
+	assert.Contains(t, get("/robots.txt").Body.String(), "Sitemap: https://shop.example.com/sitemap.xml")
+	sitemap := get("/sitemap.xml").Body.String()
+	assert.Equal(t, 3, strings.Count(sitemap, "<loc>https://shop.example.com/"))
+	assert.NotContains(t, sitemap, "/login")
+
+	// Turning indexing off closes every door at once.
+	_, err = store.UpdateAppearance(ctx, 1, site.ID, SiteAppearanceInput{Theme: "business", AllowIndexing: false, Version: 1})
+	require.NoError(t, err)
+	hidden := get("/").Body.String()
+	assert.Contains(t, hidden, `content="noindex,nofollow"`)
+	assert.NotContains(t, hidden, "canonical")
+	assert.Contains(t, hidden, "<title>Orange &amp; Moon</title>", "an empty SEO title falls back to the profile name")
+	assert.Equal(t, "User-agent: *\nDisallow: /\n", get("/robots.txt").Body.String())
+	assert.NotContains(t, get("/sitemap.xml").Body.String(), "<loc>")
+
+	removed, err := store.SetLogo(ctx, 1, site.ID, nil)
+	require.NoError(t, err)
+	assert.False(t, removed.HasLogo)
+	assert.Equal(t, 404, get("/brand-assets/logo").Code)
 }

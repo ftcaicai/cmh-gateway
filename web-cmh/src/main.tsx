@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import "./i18n";
+import "./styles.css";
 import { routeTree } from "./routeTree.gen";
 
 // The app lives under /cmh/ (ext serves it there); basepath keeps the file
