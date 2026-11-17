@@ -13,16 +13,25 @@ import (
 // This catches the Gin rule that engine.Use only attaches to later routes.
 func newEngine(t *testing.T) *gin.Engine {
 	t.Helper()
+	previousHosts := hostMap
+	previousMode := gin.Mode()
 	t.Setenv("CMH_BRAND_PROTOTYPE_HOSTS", "demo.brand.test=brand-demo")
 	loadHosts()
 	hostsOnce.Do(func() {})
 	previousTenant, previousRoutes := core.Tenant, core.Routes
-	t.Cleanup(func() { core.Tenant, core.Routes = previousTenant, previousRoutes })
+	t.Cleanup(func() {
+		core.Tenant, core.Routes = previousTenant, previousRoutes
+		hostMap = previousHosts
+		gin.SetMode(previousMode)
+	})
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	core.Tenant, core.Routes = Resolver{}, Routes{}
 	engine.Use(core.TenantMiddleware())
 	engine.GET("/api/user/self", func(c *gin.Context) { c.String(200, "official api") })
+	for _, path := range []string{"/api/user/login", "/api/user/auth/refresh", "/api/user/register", "/api/user/login/verify"} {
+		engine.POST(path, func(c *gin.Context) { c.String(200, "official auth") })
+	}
 	core.RegisterRoutes(engine)
 	engine.GET("/cmh/whoami", func(c *gin.Context) { c.String(200, "private console") })
 	engine.NoRoute(func(c *gin.Context) { c.String(200, "official index") })
@@ -38,9 +47,17 @@ func TestHostIsolation(t *testing.T) {
 	}{
 		{"main_index", "GET", "www.main.test", "/", 200, "official index"},
 		{"main_api", "GET", "www.main.test", "/api/user/self", 200, "official api"},
+		{"main_auth", "POST", "www.main.test", "/api/user/login", 200, "official auth"},
 		{"main_port", "GET", "www.main.test:3000", "/", 200, "official index"},
-		{"brand_home", "GET", "demo.brand.test", "/", 200, "brand: brand-demo"},
-		{"normalized_host", "GET", "DEMO.brand.test:443", "/", 200, "brand: brand-demo"},
+		{"brand_home", "GET", "demo.brand.test", "/", 200, "品牌身份认证尚未开通"},
+		{"normalized_host", "GET", "DEMO.brand.test:443", "/", 200, "品牌身份认证尚未开通"},
+		{"brand_login", "GET", "demo.brand.test", "/login", 200, "品牌身份认证尚未开通"},
+		{"brand_login_head", "HEAD", "demo.brand.test", "/login", 200, ""},
+		{"brand_login_post", "POST", "demo.brand.test", "/login", 404, ""},
+		{"official_login_blocked", "POST", "demo.brand.test", "/api/user/login", 404, ""},
+		{"official_refresh_blocked", "POST", "demo.brand.test", "/api/user/auth/refresh", 404, ""},
+		{"official_register_blocked", "POST", "demo.brand.test", "/api/user/register", 404, ""},
+		{"official_mfa_blocked", "POST", "demo.brand.test", "/api/user/login/verify", 404, ""},
 		{"official_api_blocked", "GET", "demo.brand.test", "/api/user/self", 404, ""},
 		{"console_blocked", "GET", "demo.brand.test", "/cmh/whoami", 404, ""},
 		{"unimplemented_pricing", "GET", "demo.brand.test", "/pricing", 404, ""},
@@ -55,12 +72,33 @@ func TestHostIsolation(t *testing.T) {
 			w := httptest.NewRecorder()
 			e.ServeHTTP(w, r)
 			require.Equal(t, tc.status, w.Code)
-			if tc.name == "brand_home" || tc.name == "normalized_host" {
+			if tc.name == "brand_home" || tc.name == "normalized_host" || tc.name == "brand_login" {
 				require.Contains(t, w.Body.String(), tc.body)
 				require.NotContains(t, w.Body.String(), "official index")
+				require.NotContains(t, w.Body.String(), "<form")
+				require.NotContains(t, w.Body.String(), "type=\"password\"")
+				require.Contains(t, w.Header().Get("Content-Security-Policy"), "form-action 'none'")
 			} else {
 				require.Equal(t, tc.body, w.Body.String())
 			}
 		})
 	}
+	t.Run("forwarded_host_cannot_escape_brand", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/api/user/login", nil)
+		r.Host = "demo.brand.test"
+		r.Header.Set("X-Forwarded-Host", "www.main.test")
+		w := httptest.NewRecorder()
+		e.ServeHTTP(w, r)
+		require.Equal(t, 404, w.Code)
+		require.Empty(t, w.Body.String())
+	})
+	t.Run("forwarded_host_does_not_select_brand", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/login", nil)
+		r.Host = "www.main.test"
+		r.Header.Set("X-Forwarded-Host", "demo.brand.test")
+		w := httptest.NewRecorder()
+		e.ServeHTTP(w, r)
+		require.Equal(t, 200, w.Code)
+		require.Equal(t, "official index", w.Body.String())
+	})
 }
