@@ -62,6 +62,22 @@
 | H1-C | Pinned候选typedview | 值DTO接口 | `dto/channel_constraints.go` | ChannelCandidateSnapshot / PluginCandidateView / ChannelFilter.PluginView | 2026-11-14 | key-free host snapshot+coreAdmission接口，真实generation保留于model私有wrapper，不引dto/jsplugin循环或name-number反查 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Shared endpoint提前预选同源 | 值投影/准入 | `middleware/task_plugin.go` | RouteTaskPluginEndpoint / PinTaskPluginEndpoint | 2026-11-14 | 预选filter携实际generation typedview，Pin沿selected/captured/current优先序；仅≤40行命名第49文件例外，不改decoder/排序/计费 | `rfc/2026-11-14-shared-endpoint-file-exception.md` | ftcaicai |
 
+## H8 有限认证专项（批准登记，尚未接线）
+
+以下仅在独立 rules PR 合入后允许实施；行号实施后更新。相对固定起点 `17d70f116946f8099e977cfaa654d9590f96cc33` 九文件合计≤1800增删行，不使用H1余量。统一依据 `rfc/2026-11-17-brand-direct-login-boundary.md`，加入日期2026-11-17，负责人ftcaicai。
+
+| 编号 | 文件 | 调用阶段与用途 |
+|---|---|---|
+| H8 | `controller/user.go` | Login/setupLogin：传递可信请求scope；密码验证后准入，官方MFA保持；会话响应前要求绑定成功 |
+| H8 | `controller/login_verification.go` | TOTP/备用码及二因素入口：验证flow scope及浏览器绑定先于因子消费；品牌不支持的ceremony拒绝 |
+| H8 | `controller/auth_session.go` | RefreshAuth/AuthLogout：scope检查先于刷新旋转、撤销及Cookie副作用 |
+| H8 | `service/login_verification.go` | 创建/验证/完成login flow：显式scope贯穿，因子副作用前与提交阶段复核 |
+| H8 | `service/auth_session.go` | 创建/验证/刷新会话：显式scope、绑定成功后发凭据，刷新副作用前复核 |
+| H8 | `model/auth_flow.go` | flow创建与扩展scope记录同一事务；失败整体回滚 |
+| H8 | `model/login_verification.go` | MFA消费flow、创建session及扩展绑定同事务，提交后发布缓存 |
+| H8 | `model/user_session.go` | 普通session创建及扩展绑定同事务；model唯一commit owner，提交后缓存 |
+| H8 | `middleware/auth.go` | UserAuth/TryUserAuth/TokenOrUserAuth：所有浏览器身份入口核对请求与持久scope，主站和不同品牌相互拒绝 |
+
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 
 | 编号 | 名称 | 形态 | 预计文件 |
@@ -124,4 +140,13 @@ controller/task.go
 relay/requestplugin/task_report.go
 dto/channel_constraints.go
 middleware/task_plugin.go
+controller/user.go
+controller/login_verification.go
+controller/auth_session.go
+service/login_verification.go
+service/auth_session.go
+model/auth_flow.go
+model/login_verification.go
+model/user_session.go
+middleware/auth.go
 ```

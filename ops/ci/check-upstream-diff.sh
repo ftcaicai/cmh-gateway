@@ -67,7 +67,33 @@ max_files=48
 exception_file='middleware/task_plugin.go'
 exception_max_lines=40
 max_lines=6000
+auth_base=17d70f116946f8099e977cfaa654d9590f96cc33
+auth_files=$'controller/user.go\ncontroller/login_verification.go\ncontroller/auth_session.go\nservice/login_verification.go\nservice/auth_session.go\nmodel/auth_flow.go\nmodel/login_verification.go\nmodel/user_session.go\nmiddleware/auth.go'
+if ! git rev-parse -q --verify "${auth_base}^{commit}" >/dev/null; then
+  echo '::error::fixed authentication baseline is missing'
+  exit 2
+fi
+auth_count=0
+auth_lines=0
 allowed_changed=$(grep -xF -f <(printf '%s\n' "$whitelist") <<<"$changed" || true)
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  if grep -qxF "$f" <<<"$auth_files"; then
+    if ! git cat-file -e "${auth_base}:${f}" 2>/dev/null; then
+      echo "::error::authentication scope requires existing fixed-base file: $f"
+      exit 1
+    fi
+    stats=$(git diff --numstat "$auth_base" -- "$f")
+    if ! awk '{if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/) exit 1}' <<<"$stats"; then
+      echo "::error::unmeasurable authentication diff: $f"
+      exit 1
+    fi
+    n=$(awk '{a+=$1; d+=$2} END {print a+d+0}' <<<"$stats")
+    auth_count=$((auth_count + 1))
+    auth_lines=$((auth_lines + n))
+  fi
+done <<<"$allowed_changed"
+allowed_changed=$(grep -vxF -f <(printf '%s\n' "$auth_files") <<<"$allowed_changed" || true)
 files_count=$(sed '/^[[:space:]]*$/d' <<<"$allowed_changed" | wc -l | tr -d ' ')
 lines_count=0
 if [[ -n "$allowed_changed" ]]; then
@@ -112,9 +138,16 @@ main_ext_imports=$(grep -n -E '"github.com/QuantumNous/new-api/ext(/[^"]*)?"' ma
 # ---- report -----------------------------------------------------------------
 echo "baseline: $baseline"
 echo "official-zone files changed (whitelisted): $files_count / $max_files"
-echo "official-zone lines changed (whitelisted): $lines_count / $max_lines"
+echo "H1 official-zone lines changed (whitelisted): $lines_count / $max_lines"
+echo "authentication files changed: $auth_count / 9"
+echo "authentication lines changed from $auth_base: $auth_lines / 1800"
+echo "combined official files changed: $((files_count + auth_count)) / 58"
 
 status=0
+if (( auth_count > 9 || auth_lines > 1800 || files_count + auth_count > 58 || lines_count + auth_lines > 7800 )); then
+  echo '::error::authentication or combined hook budget exceeded'
+  status=1
+fi
 if (( ${#violations[@]} > 0 )); then
   echo "::error::official-zone files changed but NOT registered in $hooks_file:"
   printf '  - %s\n' "${violations[@]}"
