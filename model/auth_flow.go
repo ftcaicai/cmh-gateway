@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -147,6 +148,29 @@ func authFlowTokenHash(token string) string {
 
 func CreateAuthFlow(input AuthFlowCreate) (string, *AuthFlow, error) {
 	return createAuthFlowWithTx(DB, input)
+}
+
+// CreateAuthFlowScoped commits a login flow and its H8 scope binding together,
+// so the flow can only be completed from the site and browser that started it.
+func CreateAuthFlowScoped(scope core.AuthScope, input AuthFlowCreate) (string, *AuthFlow, error) {
+	var token string
+	var flow *AuthFlow
+	create := func(tx *gorm.DB) (err error) {
+		if token, flow, err = createAuthFlowWithTx(tx, input); err != nil {
+			return err
+		}
+		return bindAuthScopeWithTx(tx, scope, core.AuthBindingFlow, flow.TokenHash, flow.UserId, flow.ExpiresAt.Unix())
+	}
+	var err error
+	if authScopeParticipant == nil {
+		err = create(DB)
+	} else {
+		err = DB.Transaction(create)
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	return token, flow, nil
 }
 
 func createAuthFlowWithTx(tx *gorm.DB, input AuthFlowCreate) (string, *AuthFlow, error) {

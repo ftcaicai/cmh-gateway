@@ -31,7 +31,12 @@ func VerifyLogin(c *gin.Context) {
 		writeSecurityOperationError(c, service.ErrProofMethod)
 		return
 	}
-	bundle, migration, err := service.VerifyLoginCode(request.FlowToken, request.Code, c.ClientIP(), c.Request.UserAgent())
+	scope, err := model.RequestAuthScope(c.Request.Context())
+	if err != nil {
+		writeSecurityOperationError(c, model.ErrAuthFlowInvalid)
+		return
+	}
+	bundle, migration, err := service.VerifyLoginCodeScoped(scope, request.FlowToken, request.Code, c.ClientIP(), c.Request.UserAgent())
 	if err != nil {
 		writeSecurityOperationError(c, err)
 		return
@@ -48,7 +53,7 @@ func LoginPasskeyBegin(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
-	verification, err := service.RequireLoginVerification(request.FlowToken, service.VerificationMethodPasskey)
+	verification, err := requireScopedLoginVerification(c, request.FlowToken, service.VerificationMethodPasskey)
 	if err != nil {
 		writeSecurityOperationError(c, err)
 		return
@@ -94,7 +99,7 @@ func LoginPasskeyFinish(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
-	verification, err := service.RequireLoginVerification(request.FlowToken, service.VerificationMethodPasskey)
+	verification, err := requireScopedLoginVerification(c, request.FlowToken, service.VerificationMethodPasskey)
 	if err != nil {
 		writeSecurityOperationError(c, err)
 		return
@@ -144,6 +149,16 @@ func LoginPasskeyFinish(c *gin.Context) {
 		return
 	}
 	completeVerifiedLoginResponse(c, bundle, service.VerificationMethodPasskey, migration)
+}
+
+// requireScopedLoginVerification resolves the H8 request scope first, so a flow
+// started on another site or browser is rejected before its ceremony begins.
+func requireScopedLoginVerification(c *gin.Context, flowToken, method string) (*service.LoginVerification, error) {
+	scope, err := model.RequestAuthScope(c.Request.Context())
+	if err != nil {
+		return nil, model.ErrAuthFlowInvalid
+	}
+	return service.RequireLoginVerificationScoped(scope, flowToken, method)
 }
 
 func completeVerifiedLoginResponse(c *gin.Context, bundle *service.AuthBundle, method string, migration *service.LegacyGitHubMigration) {

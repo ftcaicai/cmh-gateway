@@ -207,16 +207,25 @@ func classifyDashboardCredential(c *gin.Context) (*model.UserBase, service.AuthI
 	if !ok {
 		return nil, service.AuthIdentity{}, dashboardCredentialUnmatched, nil
 	}
+	// H8: every browser identity is checked against the site and browser the
+	// request arrived on; a brand site accepts no access token at all.
+	scope, scopeErr := model.RequestAuthScope(c.Request.Context())
 	identity, internal, err := service.ParseDashboardAccessToken(raw)
 	if internal {
 		if err != nil {
 			return nil, service.AuthIdentity{}, dashboardCredentialInternal, err
 		}
-		_, user, err := service.ValidateLoginSession(identity)
+		if scopeErr != nil {
+			return nil, service.AuthIdentity{}, dashboardCredentialInternal, service.ErrLoginSessionScope
+		}
+		_, user, err := service.ValidateLoginSessionScoped(scope, identity)
 		if err != nil {
 			return nil, service.AuthIdentity{}, dashboardCredentialInternal, err
 		}
 		return user, identity, dashboardCredentialInternal, nil
+	}
+	if scopeErr != nil || !scope.IsMain() {
+		return nil, service.AuthIdentity{}, dashboardCredentialPAT, service.ErrLoginSessionScope
 	}
 	lookup := lookupAccessToken(c, raw)
 	if lookup.user != nil {
@@ -399,7 +408,7 @@ func writeDashboardAuthError(c *gin.Context, err error) {
 		abortWithWebMessage(c, http.StatusUnauthorized, "AUTH_SESSION_REVOKED", common.NewMessage("Unauthorized, not logged in and no access token provided"))
 		return
 	}
-	if errors.Is(err, service.ErrAuthTokenInvalid) {
+	if errors.Is(err, service.ErrAuthTokenInvalid) || errors.Is(err, service.ErrLoginSessionScope) {
 		abortWithWebMessage(c, http.StatusUnauthorized, "AUTH_UNAUTHORIZED", common.NewMessage("Unauthorized, invalid access token"))
 		return
 	}
@@ -438,7 +447,12 @@ func TokenOrUserAuth() func(c *gin.Context) {
 				writeDashboardAuthError(c, err)
 				return
 			}
-			_, user, err := service.ValidateLoginSession(identity)
+			scope, err := model.RequestAuthScope(c.Request.Context())
+			if err != nil {
+				writeDashboardAuthError(c, service.ErrLoginSessionScope)
+				return
+			}
+			_, user, err := service.ValidateLoginSessionScoped(scope, identity)
 			if err != nil {
 				writeDashboardAuthError(c, err)
 				return

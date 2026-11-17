@@ -62,21 +62,21 @@
 | H1-C | Pinned候选typedview | 值DTO接口 | `dto/channel_constraints.go` | ChannelCandidateSnapshot / PluginCandidateView / ChannelFilter.PluginView | 2026-11-14 | key-free host snapshot+coreAdmission接口，真实generation保留于model私有wrapper，不引dto/jsplugin循环或name-number反查 | `rfc/2026-11-13-admission-hook-budget.md` | ftcaicai |
 | H1-C | Shared endpoint提前预选同源 | 值投影/准入 | `middleware/task_plugin.go` | RouteTaskPluginEndpoint / PinTaskPluginEndpoint | 2026-11-14 | 预选filter携实际generation typedview，Pin沿selected/captured/current优先序；仅≤40行命名第49文件例外，不改decoder/排序/计费 | `rfc/2026-11-14-shared-endpoint-file-exception.md` | ftcaicai |
 
-## H8 有限认证专项（批准登记，尚未接线）
+## H8 有限认证专项（2026-11-17 已接线，默认关闭）
 
-以下仅在独立 rules PR 合入后允许实施；行号实施后更新。相对固定起点 `17d70f116946f8099e977cfaa654d9590f96cc33` 九文件合计≤1800增删行，不使用H1余量。统一依据 `rfc/2026-11-17-brand-direct-login-boundary.md`，加入日期2026-11-17，负责人ftcaicai。
+相对固定起点 `17d70f116946f8099e977cfaa654d9590f96cc33` 九文件合计≤1800增删行（接线时实测 353），不使用H1余量。统一依据 `rfc/2026-11-17-brand-direct-login-boundary.md`，加入日期2026-11-17，负责人ftcaicai。未设置 `CMH_BRAND_AUTH=1` 时不注册参与者：全部 scope 视为主站、不写不读绑定，官方行为不变，品牌域认证入口保持404。接口为 `model.AuthScopeParticipant`（Admit/Bind/Check），值类型在 `ext/core/auth_scope.go`，实现在 `ext/brand/auth_scope.go`。
 
-| 编号 | 文件 | 调用阶段与用途 |
-|---|---|---|
-| H8 | `controller/user.go` | Login/setupLogin：传递可信请求scope；密码验证后准入，官方MFA保持；会话响应前要求绑定成功 |
-| H8 | `controller/login_verification.go` | TOTP/备用码及二因素入口：验证flow scope及浏览器绑定先于因子消费；品牌不支持的ceremony拒绝 |
-| H8 | `controller/auth_session.go` | RefreshAuth/AuthLogout：scope检查先于刷新旋转、撤销及Cookie副作用 |
-| H8 | `service/login_verification.go` | 创建/验证/完成login flow：显式scope贯穿，因子副作用前与提交阶段复核 |
-| H8 | `service/auth_session.go` | 创建/验证/刷新会话：显式scope、绑定成功后发凭据，刷新副作用前复核 |
-| H8 | `model/auth_flow.go` | flow创建与扩展scope记录同一事务；失败整体回滚 |
-| H8 | `model/login_verification.go` | MFA消费flow、创建session及扩展绑定同事务，提交后发布缓存 |
-| H8 | `model/user_session.go` | 普通session创建及扩展绑定同事务；model唯一commit owner，提交后缓存 |
-| H8 | `middleware/auth.go` | UserAuth/TryUserAuth/TokenOrUserAuth：所有浏览器身份入口核对请求与持久scope，主站和不同品牌相互拒绝 |
+| 编号 | 文件 | 函数 | 调用阶段与用途 |
+|---|---|---|---|
+| H8 | `controller/user.go` | setupLogin / setupLoginAtAuthVersion / writeLoginScopeRejected | 取H2解析的请求scope，先经 AdmitAuthScope 核对身份（早于登录策略与限额），再传入flow与session创建；scope拒绝与密码错误同一响应 |
+| H8 | `controller/login_verification.go` | VerifyLogin / LoginPasskeyBegin / LoginPasskeyFinish / requireScopedLoginVerification | 因子ceremony前按请求scope核对flow绑定 |
+| H8 | `controller/auth_session.go` | RefreshAuth / AuthLogout | scope解析与绑定核对先于刷新旋转、撤销及清Cookie |
+| H8 | `service/login_verification.go` | StartLoginVerificationScoped / RequireLoginVerificationScoped / VerifyLoginCodeScoped / CompleteLoginVerification | flow随scope创建；品牌只提供2FA码，Passkey-only安全失败；因子读取前核对；提交阶段沿用已核对scope。旧导出函数委托主站scope |
+| H8 | `service/auth_session.go` | CreateLoginSessionScoped / ValidateLoginSessionScoped / RefreshLoginSessionScoped / RevokeByRefreshTokenScoped / ErrLoginSessionScope | 绑定提交后才发凭据；刷新在版本撤销与旋转前核对；越界登出不撤销。旧导出函数委托主站scope |
+| H8 | `model/auth_flow.go` | CreateAuthFlowScoped | flow行与scope绑定同一事务 |
+| H8 | `model/login_verification.go` | CreateUserSessionFromLoginFlowScoped | 事务内复核flow绑定，session行与session绑定同提交，之后才发布缓存 |
+| H8 | `model/user_session.go` | AuthScopeParticipant / RegisterAuthScopeParticipant / RequestAuthScope / AdmitAuthScope / CheckAuthScope / CreateUserSessionScoped | 参与者注册（一次）、请求scope读取、无副作用核对；model为唯一commit owner |
+| H8 | `middleware/auth.go` | classifyDashboardCredential / TokenOrUserAuth / writeDashboardAuthError | 所有浏览器身份入口核对请求与持久scope；品牌域不接受访问令牌 |
 
 ## 预留（尚未实施，实施前须按 §3.4 补 RFC）
 

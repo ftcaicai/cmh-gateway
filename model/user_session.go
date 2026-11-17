@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 
 	"gorm.io/gorm"
 )
@@ -132,9 +133,106 @@ func userSessionCacheDeadline() time.Time {
 	return time.Now().Add(time.Duration(userCacheTTLSeconds()) * time.Second)
 }
 
+// AuthScopeParticipant is the H8 persistence participant (ext/docs/HOOKS.md).
+// The model owns every transaction: Bind runs inside the one that creates the
+// official flow or session row, Check reads through the handle it is given.
+// An implementation finishes its SQL before returning and never commits,
+// rolls back, starts a goroutine or creates another flow or session.
+type AuthScopeParticipant interface {
+	// Admit reports whether the user may sign in on scope at all.
+	Admit(tx *gorm.DB, scope core.AuthScope, userID int) error
+	Bind(tx *gorm.DB, binding core.AuthScopeBinding) error
+	Check(tx *gorm.DB, scope core.AuthScope, kind core.AuthBindingKind, recordID string, userID int) error
+}
+
+var authScopeParticipant AuthScopeParticipant
+
+// RegisterAuthScopeParticipant installs the participant once, before the
+// server accepts requests. Without one, only main-site scopes are accepted and
+// the official behavior is unchanged.
+func RegisterAuthScopeParticipant(participant AuthScopeParticipant) error {
+	if participant == nil || authScopeParticipant != nil {
+		return core.ErrAuthScopeRejected
+	}
+	authScopeParticipant = participant
+	return nil
+}
+
+// RequestAuthScope returns the scope H2 resolved for the request. With a
+// participant installed a request without a resolved scope is rejected rather
+// than treated as main-site.
+func RequestAuthScope(ctx context.Context) (core.AuthScope, error) {
+	if authScopeParticipant == nil {
+		return core.MainAuthScope(), nil
+	}
+	return core.RequestAuthScope(ctx)
+}
+
+// AdmitAuthScope runs right after primary authentication and before any login
+// policy or limit is evaluated, so every refusal that follows a rejected scope
+// identity looks the same as a wrong password.
+func AdmitAuthScope(scope core.AuthScope, userID int) error {
+	if authScopeParticipant == nil {
+		if scope.IsMain() {
+			return nil
+		}
+		return core.ErrAuthScopeRejected
+	}
+	return authScopeParticipant.Admit(DB, scope, userID)
+}
+
+// CheckAuthScope compares the durable binding of a login flow or session with
+// scope. It never changes the official row, so callers run it before any
+// credential check that rotates, revokes or consumes.
+func CheckAuthScope(scope core.AuthScope, kind core.AuthBindingKind, recordID string, userID int) error {
+	return checkAuthScopeWithTx(DB, scope, kind, recordID, userID)
+}
+
+func checkAuthScopeWithTx(tx *gorm.DB, scope core.AuthScope, kind core.AuthBindingKind, recordID string, userID int) error {
+	if authScopeParticipant == nil {
+		if scope.IsMain() {
+			return nil
+		}
+		return core.ErrAuthScopeRejected
+	}
+	return authScopeParticipant.Check(tx, scope, kind, recordID, userID)
+}
+
+func bindAuthScopeWithTx(tx *gorm.DB, scope core.AuthScope, kind core.AuthBindingKind, recordID string, userID int, expiresAt int64) error {
+	if authScopeParticipant == nil {
+		if scope.IsMain() {
+			return nil
+		}
+		return core.ErrAuthScopeRejected
+	}
+	binding, err := core.NewAuthScopeBinding(scope, kind, recordID, userID, expiresAt, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	return authScopeParticipant.Bind(tx, binding)
+}
+
 func CreateUserSession(session *UserSession) error {
+	return CreateUserSessionScoped(core.MainAuthScope(), session)
+}
+
+// CreateUserSessionScoped commits the session and its scope binding together;
+// the cache is published only after that commit.
+func CreateUserSessionScoped(scope core.AuthScope, session *UserSession) error {
 	cacheDeadline := userSessionCacheDeadline()
-	if err := createUserSessionWithTx(DB, session); err != nil {
+	create := func(tx *gorm.DB) error {
+		if err := createUserSessionWithTx(tx, session); err != nil {
+			return err
+		}
+		return bindAuthScopeWithTx(tx, scope, core.AuthBindingSession, session.SID, session.UserID, session.ExpiresAt)
+	}
+	var err error
+	if authScopeParticipant == nil {
+		err = create(DB)
+	} else {
+		err = DB.Transaction(create)
+	}
+	if err != nil {
 		return err
 	}
 	return publishCreatedUserSession(session, cacheDeadline)

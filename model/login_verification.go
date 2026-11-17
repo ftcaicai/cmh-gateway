@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"gorm.io/gorm"
 )
 
@@ -50,6 +51,12 @@ func getUserVerificationState(tx *gorm.DB, userID int, forUpdate bool) (*UserVer
 // and session issuance, including the per-user session limits. validate runs
 // inside the transaction and may write through tx.
 func CreateUserSessionFromLoginFlow(token string, session *UserSession, validate func(*gorm.DB, *AuthFlow, *UserVerificationState) error) error {
+	return CreateUserSessionFromLoginFlowScoped(core.MainAuthScope(), token, session, validate)
+}
+
+// CreateUserSessionFromLoginFlowScoped additionally rechecks the flow's H8
+// scope binding and binds the new session to scope in the same transaction.
+func CreateUserSessionFromLoginFlowScoped(scope core.AuthScope, token string, session *UserSession, validate func(*gorm.DB, *AuthFlow, *UserVerificationState) error) error {
 	if session == nil || validate == nil {
 		return ErrUserSessionInvalid
 	}
@@ -57,6 +64,9 @@ func CreateUserSessionFromLoginFlow(token string, session *UserSession, validate
 	_, err := ConsumeAuthFlowWithAction(token, AuthFlowMatch{
 		Purpose: AuthFlowPurposeLoginVerification, UserId: session.UserID,
 	}, func(tx *gorm.DB, flow *AuthFlow) error {
+		if err := checkAuthScopeWithTx(tx, scope, core.AuthBindingFlow, flow.TokenHash, session.UserID); err != nil {
+			return err
+		}
 		state, err := getUserVerificationState(tx, session.UserID, true)
 		if err != nil {
 			return err
@@ -81,7 +91,10 @@ func CreateUserSessionFromLoginFlow(token string, session *UserSession, validate
 		if issuanceCount >= int64(common.UserSessionIssuanceLimit) {
 			return ErrUserSessionIssuanceLimit
 		}
-		return createUserSessionWithTx(tx, session)
+		if err := createUserSessionWithTx(tx, session); err != nil {
+			return err
+		}
+		return bindAuthScopeWithTx(tx, scope, core.AuthBindingSession, session.SID, session.UserID, session.ExpiresAt)
 	})
 	if err != nil {
 		return err

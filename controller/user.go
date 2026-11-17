@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
@@ -148,7 +149,16 @@ func recordLoginAudit(user *model.User, c *gin.Context) {
 // pending legacy GitHub binding rewrite travels inside the challenge and is
 // written only when the verification completes.
 func setupLogin(user *model.User, migration *service.LegacyGitHubMigration, c *gin.Context) {
-	challenge, err := service.StartLoginVerification(user, loginMethodFromContext(c), migration)
+	scope, err := model.RequestAuthScope(c.Request.Context())
+	if err != nil || (user != nil && model.AdmitAuthScope(scope, user.Id) != nil) {
+		writeLoginScopeRejected(c)
+		return
+	}
+	challenge, err := service.StartLoginVerificationScoped(scope, user, loginMethodFromContext(c), migration)
+	if errors.Is(err, core.ErrAuthScopeRejected) {
+		writeLoginScopeRejected(c)
+		return
+	}
 	if err != nil {
 		writeSecurityOperationError(c, err)
 		return
@@ -161,9 +171,21 @@ func setupLogin(user *model.User, migration *service.LegacyGitHubMigration, c *g
 	setupLoginAtAuthVersion(user, user.AuthVersion, c)
 }
 
+// writeLoginScopeRejected answers a login the H8 request scope does not admit
+// with the same body as a wrong password, so a brand site does not reveal
+// whether an account exists elsewhere.
+func writeLoginScopeRejected(c *gin.Context) {
+	common.ApiErrorT(c, "Username or password is incorrect, or user has been banned")
+}
+
 func setupLoginAtAuthVersion(user *model.User, expectedAuthVersion int64, c *gin.Context) {
 	if user == nil || user.Id <= 0 || user.Status != common.UserStatusEnabled {
 		common.ApiErrorT(c, "User has been banned")
+		return
+	}
+	scope, err := model.RequestAuthScope(c.Request.Context())
+	if err != nil || model.AdmitAuthScope(scope, user.Id) != nil {
+		writeLoginScopeRejected(c)
 		return
 	}
 	currentUser, err := model.GetSelfUserById(user.Id)
@@ -171,22 +193,17 @@ func setupLoginAtAuthVersion(user *model.User, expectedAuthVersion int64, c *gin
 		common.ApiError(c, err)
 		return
 	}
-	var bundle *service.AuthBundle
-	if expectedAuthVersion > 0 {
-		bundle, err = service.CreateLoginSessionAtAuthVersion(
-			user.Id,
-			expectedAuthVersion,
-			loginMethodFromContext(c),
-			c.ClientIP(),
-			c.Request.UserAgent(),
-		)
-	} else {
-		bundle, err = service.CreateLoginSession(
-			user.Id,
-			loginMethodFromContext(c),
-			c.ClientIP(),
-			c.Request.UserAgent(),
-		)
+	bundle, err := service.CreateLoginSessionScoped(
+		scope,
+		user.Id,
+		max(expectedAuthVersion, 0),
+		loginMethodFromContext(c),
+		c.ClientIP(),
+		c.Request.UserAgent(),
+	)
+	if errors.Is(err, core.ErrAuthScopeRejected) {
+		writeLoginScopeRejected(c)
+		return
 	}
 	if err != nil {
 		writeAuthSessionError(c, err)

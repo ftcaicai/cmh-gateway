@@ -1,9 +1,11 @@
 package service
 
 import (
+	"slices"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/model"
 	"gorm.io/gorm"
 )
@@ -40,9 +42,18 @@ type LoginVerification struct {
 	Flow    *model.AuthFlow
 	State   *model.UserVerificationState
 	payload loginFlowPayload
+	// scope is the H8 request scope the flow binding was checked against.
+	scope core.AuthScope
 }
 
 func StartLoginVerification(user *model.User, loginMethod string, migration *LegacyGitHubMigration) (*LoginChallenge, error) {
+	return StartLoginVerificationScoped(core.MainAuthScope(), user, loginMethod, migration)
+}
+
+// StartLoginVerificationScoped binds the challenge to scope. A brand scope
+// only offers the 2FA code; an account whose required verification is not
+// available there fails closed instead of signing in without it.
+func StartLoginVerificationScoped(scope core.AuthScope, user *model.User, loginMethod string, migration *LegacyGitHubMigration) (*LoginChallenge, error) {
 	if user == nil || user.Id <= 0 || user.AuthVersion <= 0 || loginMethod == "" {
 		return nil, model.ErrAuthFlowInvalid
 	}
@@ -62,6 +73,11 @@ func StartLoginVerification(user *model.User, loginMethod string, migration *Leg
 		}
 		return nil, err
 	}
+	if !scope.IsMain() {
+		methods = slices.DeleteFunc(methods, func(option VerificationMethodOption) bool {
+			return option.Method != VerificationMethodTwoFA
+		})
+	}
 	available := false
 	for _, method := range methods {
 		available = available || method.Available
@@ -78,7 +94,7 @@ func StartLoginVerification(user *model.User, loginMethod string, migration *Leg
 		return nil, err
 	}
 	expiresAt := time.Now().Add(LoginVerificationTTL)
-	token, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+	token, _, err := model.CreateAuthFlowScoped(scope, model.AuthFlowCreate{
 		Purpose: model.AuthFlowPurposeLoginVerification, UserId: user.Id,
 		Payload: string(encoded), ExpiresAt: expiresAt,
 	})
@@ -89,9 +105,22 @@ func StartLoginVerification(user *model.User, loginMethod string, migration *Leg
 }
 
 func RequireLoginVerification(token, method string) (*LoginVerification, error) {
+	return RequireLoginVerificationScoped(core.MainAuthScope(), token, method)
+}
+
+// RequireLoginVerificationScoped rejects a flow started on another site or
+// browser before any factor is read, so a wrong-scope request cannot consume a
+// backup code or count as a failed attempt.
+func RequireLoginVerificationScoped(scope core.AuthScope, token, method string) (*LoginVerification, error) {
 	flow, err := model.GetAuthFlow(token, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeLoginVerification})
 	if err != nil {
 		return nil, err
+	}
+	if model.CheckAuthScope(scope, core.AuthBindingFlow, flow.TokenHash, flow.UserId) != nil {
+		return nil, model.ErrAuthFlowInvalid
+	}
+	if !scope.IsMain() && method != VerificationMethodTwoFA {
+		return nil, ErrProofMethod
 	}
 	var payload loginFlowPayload
 	if err := common.UnmarshalJsonStr(flow.Payload, &payload); err != nil || payload.AuthVersion <= 0 || payload.LoginMethod == "" {
@@ -107,7 +136,7 @@ func RequireLoginVerification(token, method string) (*LoginVerification, error) 
 	if err := requireLoginVerificationMethod(state, method); err != nil {
 		return nil, err
 	}
-	return &LoginVerification{Flow: flow, State: state, payload: payload}, nil
+	return &LoginVerification{Flow: flow, State: state, payload: payload, scope: scope}, nil
 }
 
 func requireLoginVerificationMethod(state *model.UserVerificationState, method string) error {
@@ -128,7 +157,11 @@ func requireLoginVerificationMethod(state *model.UserVerificationState, method s
 }
 
 func VerifyLoginCode(token, code, ip, userAgent string) (*AuthBundle, *LegacyGitHubMigration, error) {
-	verification, err := RequireLoginVerification(token, VerificationMethodTwoFA)
+	return VerifyLoginCodeScoped(core.MainAuthScope(), token, code, ip, userAgent)
+}
+
+func VerifyLoginCodeScoped(scope core.AuthScope, token, code, ip, userAgent string) (*AuthBundle, *LegacyGitHubMigration, error) {
+	verification, err := RequireLoginVerificationScoped(scope, token, VerificationMethodTwoFA)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -156,7 +189,7 @@ func CompleteLoginVerification(token string, verification *LoginVerification, me
 		return nil, nil, err
 	}
 	var migration *LegacyGitHubMigration
-	if err := model.CreateUserSessionFromLoginFlow(token, session, func(tx *gorm.DB, flow *model.AuthFlow, state *model.UserVerificationState) error {
+	if err := model.CreateUserSessionFromLoginFlowScoped(verification.scope, token, session, func(tx *gorm.DB, flow *model.AuthFlow, state *model.UserVerificationState) error {
 		var payload loginFlowPayload
 		if flow.Id != verification.Flow.Id || common.UnmarshalJsonStr(flow.Payload, &payload) != nil || payload != verification.payload {
 			return model.ErrAuthFlowInvalid

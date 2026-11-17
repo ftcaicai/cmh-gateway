@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 const RefreshCookieName = "new_api_refresh"
@@ -28,6 +30,9 @@ var (
 	ErrLoginSessionMismatch = errors.New("login session does not match the expected session")
 	ErrRefreshTokenInvalid  = errors.New("refresh token is invalid")
 	ErrRefreshRace          = errors.New("refresh token was already rotated")
+	// ErrLoginSessionScope means the credential belongs to another site or
+	// browser (H8). The session it names is left untouched.
+	ErrLoginSessionScope = errors.New("login session belongs to another scope")
 )
 
 type LoginSessionView struct {
@@ -50,17 +55,20 @@ type AuthBundle struct {
 }
 
 func CreateLoginSession(userID int, loginMethod, ip, userAgent string) (*AuthBundle, error) {
-	return createLoginSession(userID, 0, loginMethod, ip, userAgent)
+	return CreateLoginSessionScoped(core.MainAuthScope(), userID, 0, loginMethod, ip, userAgent)
 }
 
 func CreateLoginSessionAtAuthVersion(userID int, expectedAuthVersion int64, loginMethod, ip, userAgent string) (*AuthBundle, error) {
 	if expectedAuthVersion <= 0 {
 		return nil, ErrLoginSessionInvalid
 	}
-	return createLoginSession(userID, expectedAuthVersion, loginMethod, ip, userAgent)
+	return CreateLoginSessionScoped(core.MainAuthScope(), userID, expectedAuthVersion, loginMethod, ip, userAgent)
 }
 
-func createLoginSession(userID int, expectedAuthVersion int64, loginMethod, ip, userAgent string) (*AuthBundle, error) {
+// CreateLoginSessionScoped issues credentials only after the session and its
+// H8 scope binding committed together. expectedAuthVersion zero skips the
+// version comparison.
+func CreateLoginSessionScoped(scope core.AuthScope, userID int, expectedAuthVersion int64, loginMethod, ip, userAgent string) (*AuthBundle, error) {
 	user, err := model.GetUserCache(userID)
 	if err != nil {
 		return nil, err
@@ -90,7 +98,7 @@ func createLoginSession(userID int, expectedAuthVersion int64, loginMethod, ip, 
 	if err != nil {
 		return nil, err
 	}
-	if err := model.CreateUserSession(session); err != nil {
+	if err := model.CreateUserSessionScoped(scope, session); err != nil {
 		return nil, err
 	}
 	bundle, err := issueAuthBundle(session, session.SID+"."+refreshSecret, true)
@@ -145,6 +153,19 @@ func ValidateLoginSession(identity AuthIdentity) (*model.UserSession, *model.Use
 	}
 	if user.Status != common.UserStatusEnabled || user.AuthVersion != identity.UserAuthVersion {
 		return nil, nil, ErrLoginSessionRevoked
+	}
+	return session, user, nil
+}
+
+// ValidateLoginSessionScoped is ValidateLoginSession for a browser request: the
+// session must also be bound to the site and browser the request arrived on.
+func ValidateLoginSessionScoped(scope core.AuthScope, identity AuthIdentity) (*model.UserSession, *model.UserBase, error) {
+	session, user, err := ValidateLoginSession(identity)
+	if err != nil {
+		return nil, nil, err
+	}
+	if model.CheckAuthScope(scope, core.AuthBindingSession, session.SID, session.UserID) != nil {
+		return nil, nil, ErrLoginSessionScope
 	}
 	return session, user, nil
 }
@@ -232,6 +253,12 @@ func advanceCurrentSessionToVersion(identity AuthIdentity, nextUserAuthVersion i
 }
 
 func RefreshLoginSession(rawRefreshToken, expectedSID, ip, userAgent string) (*AuthBundle, *model.User, error) {
+	return RefreshLoginSessionScoped(core.MainAuthScope(), rawRefreshToken, expectedSID, ip, userAgent)
+}
+
+// RefreshLoginSessionScoped checks the H8 scope binding before the security
+// version revoke and the rotation, so a wrong-scope request changes nothing.
+func RefreshLoginSessionScoped(scope core.AuthScope, rawRefreshToken, expectedSID, ip, userAgent string) (*AuthBundle, *model.User, error) {
 	sid, secret, ok := splitRefreshToken(rawRefreshToken)
 	if !ok {
 		return nil, nil, ErrRefreshTokenInvalid
@@ -248,6 +275,9 @@ func RefreshLoginSession(rawRefreshToken, expectedSID, ip, userAgent string) (*A
 	}
 	if session.Status != model.UserSessionStatusActive || session.RevokedAt != 0 || session.ExpiresAt <= time.Now().Unix() {
 		return nil, nil, ErrLoginSessionRevoked
+	}
+	if model.CheckAuthScope(scope, core.AuthBindingSession, sid, session.UserID) != nil {
+		return nil, nil, ErrLoginSessionScope
 	}
 	userCache, err := model.GetUserCache(session.UserID)
 	if err != nil {
@@ -294,6 +324,12 @@ func RefreshLoginSession(rawRefreshToken, expectedSID, ip, userAgent string) (*A
 }
 
 func RevokeByRefreshToken(rawRefreshToken, expectedSID, reason string) error {
+	return RevokeByRefreshTokenScoped(core.MainAuthScope(), rawRefreshToken, expectedSID, reason)
+}
+
+// RevokeByRefreshTokenScoped revokes only a session bound to scope. Naming a
+// session of another site or browser is an error and leaves it active.
+func RevokeByRefreshTokenScoped(scope core.AuthScope, rawRefreshToken, expectedSID, reason string) error {
 	sid, secret, ok := splitRefreshToken(rawRefreshToken)
 	if !ok {
 		return nil
@@ -301,7 +337,17 @@ func RevokeByRefreshToken(rawRefreshToken, expectedSID, reason string) error {
 	if expectedSID = strings.TrimSpace(expectedSID); expectedSID != "" && expectedSID != sid {
 		return ErrLoginSessionMismatch
 	}
-	_, err := model.RevokeUserSessionByRefreshHash(sid, hashRefreshSecret(secret), reason)
+	session, err := model.GetUserSessionBySID(sid)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if model.CheckAuthScope(scope, core.AuthBindingSession, sid, session.UserID) != nil {
+		return ErrLoginSessionScope
+	}
+	_, err = model.RevokeUserSessionByRefreshHash(sid, hashRefreshSecret(secret), reason)
 	return err
 }
 
@@ -474,7 +520,7 @@ func authSessionErrorCode(err error) (int, string) {
 		return http.StatusUnauthorized, "AUTH_TOKEN_EXPIRED"
 	case errors.Is(err, ErrLoginSessionRevoked):
 		return http.StatusUnauthorized, "AUTH_SESSION_REVOKED"
-	case errors.Is(err, ErrRefreshTokenInvalid), errors.Is(err, ErrAuthTokenInvalid):
+	case errors.Is(err, ErrRefreshTokenInvalid), errors.Is(err, ErrAuthTokenInvalid), errors.Is(err, ErrLoginSessionScope), errors.Is(err, core.ErrAuthScopeRejected):
 		return http.StatusUnauthorized, "AUTH_UNAUTHORIZED"
 	default:
 		return http.StatusInternalServerError, "AUTH_INTERNAL_ERROR"

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
@@ -22,7 +23,12 @@ func RefreshAuth(c *gin.Context) {
 		writeAuthSessionError(c, service.ErrRefreshTokenInvalid)
 		return
 	}
-	bundle, user, err := service.RefreshLoginSession(rawRefreshToken, c.GetHeader("X-Auth-Session"), c.ClientIP(), c.Request.UserAgent())
+	scope, err := model.RequestAuthScope(c.Request.Context())
+	if err != nil {
+		writeAuthSessionError(c, service.ErrLoginSessionScope)
+		return
+	}
+	bundle, user, err := service.RefreshLoginSessionScoped(scope, rawRefreshToken, c.GetHeader("X-Auth-Session"), c.ClientIP(), c.Request.UserAgent())
 	if err != nil {
 		if errors.Is(err, service.ErrRefreshTokenInvalid) || errors.Is(err, service.ErrLoginSessionRevoked) {
 			service.ClearRefreshCookie(c)
@@ -46,6 +52,13 @@ func RefreshAuth(c *gin.Context) {
 
 func AuthLogout(c *gin.Context) {
 	setAuthNoStore(c)
+	// H8: a credential of another site or browser must not revoke its session
+	// or clear a cookie, so the scope is resolved before anything else.
+	scope, scopeErr := model.RequestAuthScope(c.Request.Context())
+	if scopeErr != nil {
+		writeAuthSessionError(c, service.ErrLoginSessionScope)
+		return
+	}
 	expectedSID := strings.TrimSpace(c.GetHeader("X-Auth-Session"))
 	rawRefreshToken, cookieErr := c.Cookie(service.RefreshCookieName)
 	cookieSID, hasCookieSID := service.RefreshTokenSID(rawRefreshToken)
@@ -60,13 +73,17 @@ func AuthLogout(c *gin.Context) {
 				writeAuthSessionError(c, service.ErrLoginSessionMismatch)
 				return
 			}
+			if model.CheckAuthScope(scope, core.AuthBindingSession, identity.SessionID, identity.UserID) != nil {
+				writeAuthSessionError(c, service.ErrLoginSessionScope)
+				return
+			}
 			if _, err := model.RevokeUserSession(identity.UserID, identity.SessionID, "logout"); err != nil {
 				writeAuthSessionError(c, err)
 				return
 			}
 			cookieCleared := false
 			if cookieErr == nil && hasCookieSID && cookieSID == identity.SessionID {
-				if err := service.RevokeByRefreshToken(rawRefreshToken, identity.SessionID, "logout"); err != nil {
+				if err := service.RevokeByRefreshTokenScoped(scope, rawRefreshToken, identity.SessionID, "logout"); err != nil {
 					writeAuthSessionError(c, err)
 					return
 				}
@@ -86,7 +103,7 @@ func AuthLogout(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 		return
 	}
-	if err := service.RevokeByRefreshToken(rawRefreshToken, expectedSID, "logout"); err != nil {
+	if err := service.RevokeByRefreshTokenScoped(scope, rawRefreshToken, expectedSID, "logout"); err != nil {
 		writeAuthSessionError(c, err)
 		return
 	}
