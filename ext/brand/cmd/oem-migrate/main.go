@@ -62,7 +62,10 @@ func main() {
 	if err == nil && *revokeBrand {
 		// The official revoke reads model.DB; this process has no Redis, so a
 		// cached copy of a revoked session lives on until the cache TTL ends.
-		model.DB = db
+		// RedisEnabled defaults to true and is only cleared by InitRedisClient,
+		// which this command never calls: clear it here or the deny-fence write
+		// dereferences a nil client.
+		model.DB, common.RedisEnabled = db, false
 		var revoked int64
 		if revoked, err = brand.RevokeBrandSessions(db); err == nil {
 			fmt.Printf("brand sessions revoked: %d\n", revoked)
