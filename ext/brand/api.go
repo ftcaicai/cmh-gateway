@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/MoeForge/moego/ojson"
@@ -73,6 +74,15 @@ func oemResponse(c *gin.Context, data any, err error) {
 	c.JSON(status, gin.H{"success": false, "code": code})
 }
 
+// pageQuery reads ?offset=&limit= for the list endpoints. Absent or malformed
+// values fall back to the first page of the default size rather than failing,
+// so older console builds keep working.
+func pageQuery(c *gin.Context) Page {
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	return Page{Offset: offset, Limit: limit}
+}
+
 func (h siteHTTP) list(c *gin.Context) {
 	value, err := h.store().ReadableSites(c.Request.Context(), c.GetInt("id"))
 	oemResponse(c, value, err)
@@ -95,7 +105,7 @@ func (h siteHTTP) audits(c *gin.Context) {
 		oemResponse(c, nil, err)
 		return
 	}
-	value, err := store.Audits(c.Request.Context(), owner, c.Param("id"))
+	value, err := store.Audits(c.Request.Context(), owner, c.Param("id"), pageQuery(c))
 	oemResponse(c, value, err)
 }
 

@@ -116,6 +116,7 @@ print(reply.choices[0].message.content)</code></pre>
 <input id="username" name="username" type="text" autocomplete="username" maxlength="128" required>
 <label for="password">密码</label>
 <input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" required>
+{{if .TurnstileSiteKey}}<div id="turnstile" class="turnstile" data-sitekey="{{.TurnstileSiteKey}}"></div>{{end}}
 <button type="submit">登录</button>
 </form>
 <form id="verify-form" autocomplete="off" novalidate hidden>
@@ -138,5 +139,6 @@ print(reply.choices[0].message.content)</code></pre>
 {{end}}
 </main>
 <script src="/brand-assets/site.js"></script>
+{{if .TurnstileSiteKey}}<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=cmhTurnstileReady" async defer></script>{{end}}
 </body>
 </html>

@@ -12,6 +12,7 @@ import { CopyButton } from "@/components/copy-button";
 import { LoadingState } from "@/components/loading-state";
 import { BrandAppearance } from "~/features/brands/brand-appearance";
 import { BrandDomain } from "~/features/brands/brand-domain";
+import { usePagedList } from "~/lib/use-paged-list";
 import {
   api,
   ApiError,
@@ -28,6 +29,7 @@ const auditLabels: Record<string, string> = {
   "site.updated": "Profile updated",
   "site.domain_set": "Domain saved",
   "site.domain_verified": "Domain verified",
+  "site.domain_lapsed": "Domain CNAME no longer matches",
   "site.domain_cleared": "Domain removed",
   "site.appearance_updated": "Appearance updated",
   "site.logo_updated": "Logo updated",
@@ -75,12 +77,11 @@ function Brands() {
   });
   const form = useForm<BrandInput>({ resolver: zodResolver(schema), defaultValues: blank });
   const [notice, setNotice] = useState(false);
-  const audits = useQuery({
-    queryKey: ["oem-audits", selected?.id],
-    queryFn: () => api.brandAudits(selected!.id),
-    enabled: !!selected,
-    gcTime: 0,
-  });
+  const audits = usePagedList(
+    ["oem-audits", selected?.id],
+    (page) => api.brandAudits(selected!.id, page),
+    !!selected,
+  );
   const save = useMutation({
     mutationFn: (input: BrandInput) =>
       selected ? api.updateBrand(selected.id, selected.version, input) : api.createBrand(input),
@@ -291,17 +292,28 @@ function Brands() {
                     {t("Retry")}
                   </Button>
                 </div>
-              ) : audits.data.length === 0 ? (
+              ) : audits.items?.length === 0 ? (
                 <p>{t("No operation records.")}</p>
               ) : (
-                <ul>
-                  {audits.data.map((record) => (
-                    <li key={record.id}>
-                      {t(auditLabels[record.action] ?? "Profile updated")} · {t("Version")}{" "}
-                      {record.version}
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <ul>
+                    {audits.items?.map((record) => (
+                      <li key={record.id}>
+                        {t(auditLabels[record.action] ?? "Profile updated")} · {t("Version")}{" "}
+                        {record.version}
+                      </li>
+                    ))}
+                  </ul>
+                  {audits.hasMore && (
+                    <Button
+                      variant="outline"
+                      onClick={audits.loadMore}
+                      disabled={audits.isLoadingMore}
+                    >
+                      {t("Load more")}
+                    </Button>
+                  )}
+                </>
               )}
             </section>
           )}

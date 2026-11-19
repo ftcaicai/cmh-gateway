@@ -3,13 +3,15 @@ package brand
 import (
 	"bytes"
 	"context"
-	"errors"
 	"image"
 	"image/png"
+	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/ext/migrations"
 	"github.com/QuantumNous/new-api/model"
@@ -132,11 +134,15 @@ func TestSelfServiceDomain(t *testing.T) {
 		return domainSettings{root: "brands.platform.test", reserved: []string{"platform.test", "brands.platform.test"}}
 	}
 	records := map[string]string{}
+	resolverDown := false
 	lookupCNAME = func(_ context.Context, name string) (string, error) {
+		if resolverDown {
+			return "", &net.DNSError{Err: "timeout", IsTimeout: true}
+		}
 		if target, ok := records[name]; ok {
 			return target, nil
 		}
-		return "", errors.New("no such host")
+		return "", &net.DNSError{Err: "no such host", IsNotFound: true}
 	}
 	t.Cleanup(func() {
 		model.DB, domainConfig, lookupCNAME, hostMap = oldDB, oldConfig, oldLookup, oldHosts
@@ -205,17 +211,114 @@ func TestSelfServiceDomain(t *testing.T) {
 	assert.Equal(t, siteA.ID, BrandIDForHost("new.example.com"))
 	assert.Equal(t, siteB.ID, BrandIDForHost("shop.example.com"))
 
+	// Daily recheck of verified domains. A fresh verification is not due; an
+	// old one is looked up again. A resolver failure only moves the check
+	// time, a removed or redirected CNAME takes the domain out of service, and
+	// restoring the CNAME verifies it again without the owner's help.
+	lapsed, err := store.recheckVerifiedDomains(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, lapsed, "nothing is due yet")
+	stale := time.Now().Add(-2 * domainRecheckAfter).Unix()
+	require.NoError(t, db.Model(&migrations.OEMSiteDomainRecord{}).Where("site_id = ?", siteA.ID).Update("checked_at", stale).Error)
+	resolverDown = true
+	lapsed, err = store.recheckVerifiedDomains(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, lapsed)
+	assert.Equal(t, siteA.ID, BrandIDForHost("new.example.com"), "a resolver failure keeps the domain in service")
+	resolverDown = false
+	require.NoError(t, db.Model(&migrations.OEMSiteDomainRecord{}).Where("site_id = ?", siteA.ID).Update("checked_at", stale).Error)
+	delete(records, "new.example.com.")
+	lapsed, err = store.recheckVerifiedDomains(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, lapsed)
+	assert.Empty(t, BrandIDForHost("new.example.com"), "a removed CNAME takes the domain out of service")
+	current, err := store.Domain(ctx, 1, siteA.ID)
+	require.NoError(t, err)
+	assert.False(t, current.Verified)
+	assert.Equal(t, domainErrorMissing, current.LastError)
+	assert.Equal(t, moved.CNAMETarget, current.CNAMETarget, "the challenge is kept")
+	records["new.example.com."] = moved.CNAMETarget + "."
+	verified, err = store.verifyPendingDomains(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, verified)
+	assert.Equal(t, siteA.ID, BrandIDForHost("new.example.com"), "restoring the CNAME verifies it again")
+
 	cleared, err := store.SetDomain(ctx, 1, siteA.ID, "")
 	require.NoError(t, err)
 	assert.Empty(t, cleared.Host)
 	assert.Empty(t, BrandIDForHost("new.example.com"))
-	audits, err := store.Audits(ctx, 1, siteA.ID)
+	audits, err := store.Audits(ctx, 1, siteA.ID, Page{})
 	require.NoError(t, err)
 	actions := map[string]int{}
 	for _, audit := range audits {
 		actions[audit.Action]++
 	}
-	assert.Equal(t, map[string]int{"site.created": 1, "site.domain_set": 2, "site.domain_verified": 2, "site.domain_cleared": 1}, actions)
+	assert.Equal(t, map[string]int{"site.created": 1, "site.domain_set": 2, "site.domain_verified": 3, "site.domain_lapsed": 1, "site.domain_cleared": 1}, actions)
+}
+
+// TestAuthScopeMaintenance covers the fail-safe behind "turn H8 off only after
+// revoking brand sessions": expired bindings go away, and while H8 is off a
+// live brand-bound session is revoked while main-site sessions are kept.
+func TestAuthScopeMaintenance(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/maintenance.sqlite"), &gorm.Config{Logger: logger.Discard})
+	require.NoError(t, err)
+	connection, err := db.DB()
+	require.NoError(t, err)
+	oldDB, oldRedis := model.DB, common.RedisEnabled
+	model.DB, common.RedisEnabled = db, false
+	t.Cleanup(func() {
+		model.DB, common.RedisEnabled = oldDB, oldRedis
+		require.NoError(t, connection.Close())
+	})
+	ctx := context.Background()
+
+	result, err := maintainAuthScopes(ctx, db)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), result["skipped"], "a database without the extension tables is skipped")
+
+	require.NoError(t, migrations.MigrateOEM(db))
+	require.NoError(t, db.AutoMigrate(&model.UserSession{}))
+	now := time.Now().Unix()
+	session := func(sid string) model.UserSession {
+		return model.UserSession{SID: sid, UserID: 7, Version: 1, UserAuthVersion: 1, Status: model.UserSessionStatusActive, RefreshHash: strings.Repeat("a", 64), LoginMethod: "password", ExpiresAt: now + 3600, LastActiveAt: now}
+	}
+	for _, sid := range []string{"main-live", "brand-live", "brand-stale"} {
+		s := session(sid)
+		require.NoError(t, db.Create(&s).Error)
+	}
+	binding := func(kind core.AuthBindingKind, id, scope string, expiresAt int64) migrations.AuthScopeBindingRecord {
+		return migrations.AuthScopeBindingRecord{Kind: string(kind), RecordID: id, UserID: 7, Scope: scope, SiteID: strings.Repeat("0", 32), Origin: "https://shop.example", BrowserDigest: strings.Repeat("b", 64), ExpiresAt: expiresAt, CreatedAt: now}
+	}
+	for _, record := range []migrations.AuthScopeBindingRecord{
+		binding(core.AuthBindingSession, "main-live", "main", now+3600),
+		binding(core.AuthBindingSession, "brand-live", "brand", now+3600),
+		binding(core.AuthBindingSession, "brand-stale", "brand", now-1),
+		binding(core.AuthBindingFlow, strings.Repeat("c", 64), "main", now-1),
+	} {
+		require.NoError(t, db.Create(&record).Error)
+	}
+
+	require.False(t, authEnabled, "this test runs with H8 off")
+	result, err = maintainAuthScopes(ctx, db)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), result["expired_deleted"])
+	assert.Equal(t, int64(1), result["brand_sessions_revoked"])
+	var remaining int64
+	require.NoError(t, db.Model(&migrations.AuthScopeBindingRecord{}).Count(&remaining).Error)
+	assert.Equal(t, int64(2), remaining)
+	status := map[string]string{}
+	var sessions []model.UserSession
+	require.NoError(t, db.Find(&sessions).Error)
+	for _, s := range sessions {
+		status[s.SID] = s.Status + "/" + s.RevokedReason
+	}
+	assert.Equal(t, map[string]string{"main-live": "active/", "brand-live": "revoked/brand_auth_disabled", "brand-stale": "active/"}, status,
+		"only the live brand-bound session is revoked; the stale binding's session is left to expire on its own")
+
+	result, err = maintainAuthScopes(ctx, db)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), result["expired_deleted"])
+	assert.Equal(t, int64(0), result["brand_sessions_revoked"], "a second pass changes nothing")
 }
 
 func TestStorefrontAppearance(t *testing.T) {

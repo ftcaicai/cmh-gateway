@@ -141,12 +141,12 @@ func (s *SiteStore) TeamInvitations(ctx context.Context, owner int, siteID strin
 	}
 	return out, nil
 }
-func (s *SiteStore) TeamAudits(ctx context.Context, owner int, siteID string) ([]TeamAudit, error) {
+func (s *SiteStore) TeamAudits(ctx context.Context, owner int, siteID string, page Page) ([]TeamAudit, error) {
 	if _, err := s.Get(ctx, owner, siteID); err != nil {
 		return nil, err
 	}
 	var rows []migrations.OEMTeamAuditRecord
-	if err := s.db.WithContext(ctx).Where("site_id = ?", siteID).Order("created_at DESC, id DESC").Limit(100).Find(&rows).Error; err != nil {
+	if err := page.window(s.db.WithContext(ctx).Where("site_id = ?", siteID).Order("created_at DESC, id DESC")).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]TeamAudit, 0, len(rows))

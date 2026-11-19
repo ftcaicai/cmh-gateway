@@ -223,6 +223,35 @@ func runBrandLogin(t *testing.T, engineName string) {
 		assert.Contains(t, response.Header().Get("Content-Security-Policy"), "script-src 'self'")
 	})
 
+	t.Run("Turnstile appears on the sign-in page only while the main site requires it", func(t *testing.T) {
+		oldEnabled, oldKey := common.TurnstileCheckEnabled, common.TurnstileSiteKey
+		t.Cleanup(func() { common.TurnstileCheckEnabled, common.TurnstileSiteKey = oldEnabled, oldKey })
+		get := func(path string) *httptest.ResponseRecorder {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Host = hostA
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			return response
+		}
+		common.TurnstileCheckEnabled, common.TurnstileSiteKey = false, "1x00000000000000000000AA"
+		off := get("/login")
+		assert.NotContains(t, off.Body.String(), "challenges.cloudflare.com")
+		assert.NotContains(t, off.Header().Get("Content-Security-Policy"), "cloudflare")
+
+		common.TurnstileCheckEnabled = true
+		on := get("/login")
+		assert.Contains(t, on.Body.String(), `id="turnstile" class="turnstile" data-sitekey="1x00000000000000000000AA"`)
+		assert.Contains(t, on.Body.String(), `src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=cmhTurnstileReady"`)
+		csp := on.Header().Get("Content-Security-Policy")
+		assert.Contains(t, csp, "script-src 'self' https://challenges.cloudflare.com;")
+		assert.Contains(t, csp, "frame-src https://challenges.cloudflare.com;")
+		assert.Contains(t, csp, "connect-src 'self';", "the widget never widens connect-src")
+		// Other storefront pages keep the strict policy.
+		home := get("/")
+		assert.NotContains(t, home.Body.String(), "cloudflare")
+		assert.NotContains(t, home.Header().Get("Content-Security-Policy"), "cloudflare")
+	})
+
 	main, a, b := newClient(mainHost), newClient(hostA), newClient(hostB)
 
 	t.Run("main site keeps working with H8 on", func(t *testing.T) {

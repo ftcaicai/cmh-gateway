@@ -118,14 +118,21 @@ func serveBrandPage(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	view := loadStorefront(c.Request.Context(), id, page, path)
+	// The Turnstile widget is a script and an iframe from Cloudflare; nothing
+	// else on the storefront ever loads from a third party.
+	third := ""
+	if view.TurnstileSiteKey != "" {
+		third = turnstileSources
+	}
 	c.Header("X-CMH-Tenant", id)
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.Header("Referrer-Policy", "same-origin")
-	c.Header("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	c.Header("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'"+third+"; frame-src"+third+"; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	c.Status(http.StatusOK)
 	if c.Request.Method != http.MethodHead {
 		// Auth false renders the sign-in page as a notice without a form.
-		_ = brandPage.Execute(c.Writer, loadStorefront(c.Request.Context(), id, page, path))
+		_ = brandPage.Execute(c.Writer, view)
 	}
 	c.Abort()
 }

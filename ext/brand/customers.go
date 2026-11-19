@@ -136,12 +136,12 @@ type CustomerAudit struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
-func (s *SiteStore) CustomerAudits(ctx context.Context, owner int, siteID string) ([]CustomerAudit, error) {
+func (s *SiteStore) CustomerAudits(ctx context.Context, owner int, siteID string, page Page) ([]CustomerAudit, error) {
 	if _, err := s.Get(ctx, owner, siteID); err != nil {
 		return nil, err
 	}
 	var records []migrations.OEMCustomerAuditRecord
-	if err := s.db.WithContext(ctx).Where("site_id = ?", siteID).Order("created_at DESC, id DESC").Limit(100).Find(&records).Error; err != nil {
+	if err := page.window(s.db.WithContext(ctx).Where("site_id = ?", siteID).Order("created_at DESC, id DESC")).Find(&records).Error; err != nil {
 		return nil, err
 	}
 	out := make([]CustomerAudit, 0, len(records))
@@ -160,12 +160,12 @@ func ordinaryCustomer(id int) bool {
 	user, err := model.GetUserById(id, false)
 	return err == nil && user != nil && user.Role == common.RoleCommonUser && user.Status == common.UserStatusEnabled
 }
-func (s *SiteStore) Customers(ctx context.Context, owner int, siteID string) ([]Customer, error) {
+func (s *SiteStore) Customers(ctx context.Context, owner int, siteID string, page Page) ([]Customer, error) {
 	if _, err := s.Get(ctx, owner, siteID); err != nil {
 		return nil, err
 	}
 	var rows []migrations.OEMCustomerRecord
-	if err := s.db.WithContext(ctx).Where("site_id = ? AND owner_user_id = ?", siteID, owner).Order("joined_at DESC, user_id DESC").Limit(100).Find(&rows).Error; err != nil {
+	if err := page.window(s.db.WithContext(ctx).Where("site_id = ? AND owner_user_id = ?", siteID, owner).Order("joined_at DESC, user_id DESC")).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]Customer, 0, len(rows))

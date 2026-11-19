@@ -11,6 +11,7 @@ import { Field, FieldLabel, FieldError } from "@/components/ui/field";
 import { CopyButton } from "@/components/copy-button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { api, ApiError, ownsBrand, type Customer, type CustomerNote } from "~/lib/api";
+import { usePagedList } from "~/lib/use-paged-list";
 import {
   invitationSchema,
   acceptanceSchema,
@@ -262,12 +263,9 @@ function CustomerNoteEditor(props: {
 function MerchantCustomers(props: { site: string; owner: boolean }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  const customers = useQuery({
-    queryKey: ["oem-customers", props.site],
-    queryFn: () => api.customers(props.site),
-    retry: false,
-    gcTime: 0,
-  });
+  const customers = usePagedList(["oem-customers", props.site], (page) =>
+    api.customers(props.site, page),
+  );
   const invitations = useQuery({
     queryKey: ["oem-invitations", props.site],
     queryFn: () => api.invitations(props.site),
@@ -275,12 +273,9 @@ function MerchantCustomers(props: { site: string; owner: boolean }) {
     retry: false,
     gcTime: 0,
   });
-  const audits = useQuery({
-    queryKey: ["oem-customer-audits", props.site],
-    queryFn: () => api.customerAudits(props.site),
-    retry: false,
-    gcTime: 0,
-  });
+  const audits = usePagedList(["oem-customer-audits", props.site], (page) =>
+    api.customerAudits(props.site, page),
+  );
   const form = useForm<InvitationForm>({
     resolver: zodResolver(invitationSchema),
     defaultValues: { target_user_id: "" },
@@ -314,9 +309,9 @@ function MerchantCustomers(props: { site: string; owner: boolean }) {
       <h3>{t("Customer associations")}</h3>
       {customers.isPending && <p>{t("Loading...")}</p>}
       {customers.isError && <p role="alert">{t("Unable to load customer records.")}</p>}
-      {customers.data?.length === 0 && <p>{t("No customer associations.")}</p>}
+      {customers.items?.length === 0 && <p>{t("No customer associations.")}</p>}
       <ul>
-        {customers.data?.map((customer) => (
+        {customers.items?.map((customer) => (
           <li key={customer.user_id}>
             {t("User ID")}: {customer.user_id} ·{" "}
             {customer.active ? t("Active association") : t("Revoked association")}{" "}
@@ -337,6 +332,11 @@ function MerchantCustomers(props: { site: string; owner: boolean }) {
           </li>
         ))}
       </ul>
+      {customers.hasMore && (
+        <Button variant="outline" onClick={customers.loadMore} disabled={customers.isLoadingMore}>
+          {t("Load more")}
+        </Button>
+      )}
       {props.owner && noteUser !== null && (
         <CustomerNotes
           key={`${props.site}:${noteUser}`}
@@ -417,9 +417,9 @@ function MerchantCustomers(props: { site: string; owner: boolean }) {
       <h3>{t("Operation records")}</h3>
       {audits.isPending && <p>{t("Loading operation records...")}</p>}
       {audits.isError && <p role="alert">{t("Unable to load customer records.")}</p>}
-      {audits.data?.length === 0 && <p>{t("No operation records.")}</p>}
+      {audits.items?.length === 0 && <p>{t("No operation records.")}</p>}
       <ul>
-        {audits.data?.map((record) => {
+        {audits.items?.map((record) => {
           let action = "Operation records";
           if (record.action === "customer.invited") action = "Create invitation";
           if (record.action === "customer.accepted") action = "Accept invitation";
@@ -432,6 +432,11 @@ function MerchantCustomers(props: { site: string; owner: boolean }) {
           );
         })}
       </ul>
+      {audits.hasMore && (
+        <Button variant="outline" onClick={audits.loadMore} disabled={audits.isLoadingMore}>
+          {t("Load more")}
+        </Button>
+      )}
     </section>
   );
 }

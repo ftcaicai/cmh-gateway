@@ -135,7 +135,7 @@ func TestOEMTeamReadOnlyCollaboration(t *testing.T) {
 	assert.EqualValues(t, 1, members[0].Version)
 	_, err = store.AcceptTeamInvitation(ctx, member, invited.Token)
 	require.NoError(t, err)
-	audits, err := store.TeamAudits(ctx, owner, site.ID)
+	audits, err := store.TeamAudits(ctx, owner, site.ID, Page{})
 	require.NoError(t, err)
 	assert.Len(t, audits, 3)
 	for _, suffix := range []string{"", "/audits", "/customers", "/customer-audits"} {
@@ -319,12 +319,12 @@ func runOEMTeamDatabase(t *testing.T, engine string) {
 	var keptInvitation migrations.OEMCustomerInvitationRecord
 	require.NoError(t, reopened.First(&keptInvitation, "id = ?", legacyInvitation.ID).Error)
 	assert.Equal(t, legacyInvitation, keptInvitation)
-	customerHistory, err := NewSiteStore(reopened).CustomerAudits(ctx, 71001, legacy.ID)
+	customerHistory, err := NewSiteStore(reopened).CustomerAudits(ctx, 71001, legacy.ID, Page{})
 	require.NoError(t, err)
 	require.Len(t, customerHistory, 1)
 	assert.Equal(t, "customer.note_updated", customerHistory[0].Action)
 	require.Error(t, reopened.Create(&customer).Error)
-	history, err := store.Audits(ctx, 71001, legacy.ID)
+	history, err := store.Audits(ctx, 71001, legacy.ID, Page{})
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.CasbinRule{}, &model.AuthzRole{}))

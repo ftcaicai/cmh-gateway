@@ -179,13 +179,44 @@
   if (!loginForm) return;
   var flowToken = "";
 
+  // Cloudflare Turnstile, only when the main site requires it for sign-in.
+  // The official login middleware reads the token from the query string.
+  var turnstileBox = document.getElementById("turnstile");
+  var turnstileToken = "";
+  var turnstileWidget = null;
+  window.cmhTurnstileReady = function () {
+    if (!turnstileBox || !window.turnstile) return;
+    turnstileWidget = window.turnstile.render(turnstileBox, {
+      sitekey: turnstileBox.dataset.sitekey,
+      callback: function (token) {
+        turnstileToken = token;
+      },
+      "expired-callback": function () {
+        turnstileToken = "";
+      },
+      "error-callback": function () {
+        turnstileToken = "";
+      },
+    });
+  };
+  function loginPath() {
+    if (!turnstileBox) return "/api/user/login";
+    return "/api/user/login?turnstile=" + encodeURIComponent(turnstileToken);
+  }
+  function resetTurnstile() {
+    if (turnstileWidget === null || !window.turnstile) return;
+    turnstileToken = "";
+    window.turnstile.reset(turnstileWidget);
+  }
+
   refresh().then(function (session) {
     if (session) location.replace("/account");
   });
 
   function finish(result, failure) {
     if (!result.success || !result.data) {
-      show(failure);
+      // Only this script's own messages are shown; server text never is.
+      show(result.message === "请先完成人机验证。" ? result.message : failure);
       return;
     }
     if (result.data.require_verification) {
@@ -224,19 +255,29 @@
       var username = document.getElementById("username").value.trim();
       var password = document.getElementById("password").value;
       if (!username || !password) return Promise.resolve({ success: false });
-      return request("GET", "/api/user/login/encryption-key").then(function (key) {
-        if (!key.success || !key.data) return { success: false };
-        if (!key.data.enabled) {
-          return request("POST", "/api/user/login", { username: username, password: password });
-        }
-        return encryptPassword(password, key.data).then(function (encrypted) {
-          return request("POST", "/api/user/login", {
-            username: username,
-            password_encrypted: encrypted,
-            encryption_key_id: key.data.kid,
+      if (turnstileBox && !turnstileToken) {
+        return Promise.resolve({ success: false, message: "请先完成人机验证。" });
+      }
+      var path = loginPath();
+      return request("GET", "/api/user/login/encryption-key")
+        .then(function (key) {
+          if (!key.success || !key.data) return { success: false };
+          if (!key.data.enabled) {
+            return request("POST", path, { username: username, password: password });
+          }
+          return encryptPassword(password, key.data).then(function (encrypted) {
+            return request("POST", path, {
+              username: username,
+              password_encrypted: encrypted,
+              encryption_key_id: key.data.kid,
+            });
           });
+        })
+        .then(function (result) {
+          // A Turnstile token is single-use; a new attempt needs a new one.
+          resetTurnstile();
+          return result;
         });
-      });
     },
     "账号或密码不正确，或该账号暂时无法在本站登录。"
   );

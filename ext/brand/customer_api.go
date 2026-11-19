@@ -37,7 +37,7 @@ func (customerHTTP) audits(c *gin.Context) {
 		oemResponse(c, nil, err)
 		return
 	}
-	value, err := store.CustomerAudits(c.Request.Context(), owner, c.Param("id"))
+	value, err := store.CustomerAudits(c.Request.Context(), owner, c.Param("id"), pageQuery(c))
 	oemResponse(c, value, err)
 }
 func (customerHTTP) list(c *gin.Context) {
@@ -47,7 +47,7 @@ func (customerHTTP) list(c *gin.Context) {
 		oemResponse(c, nil, err)
 		return
 	}
-	value, err := store.Customers(c.Request.Context(), owner, c.Param("id"))
+	value, err := store.Customers(c.Request.Context(), owner, c.Param("id"), pageQuery(c))
 	oemResponse(c, value, err)
 }
 func (customerHTTP) invitations(c *gin.Context) {

@@ -10,6 +10,7 @@ import { Field, FieldLabel, FieldError } from "@/components/ui/field";
 import { CopyButton } from "@/components/copy-button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { api, ApiError, ownsBrand, type TeamMember } from "~/lib/api";
+import { usePagedList } from "~/lib/use-paged-list";
 import {
   acceptanceSchema,
   invitationSchema,
@@ -133,12 +134,9 @@ function OwnerTeam(props: { site: string }) {
     retry: false,
     gcTime: 0,
   });
-  const audits = useQuery({
-    queryKey: ["oem-team-audits", props.site],
-    queryFn: () => api.teamAudits(props.site),
-    retry: false,
-    gcTime: 0,
-  });
+  const audits = usePagedList(["oem-team-audits", props.site], (page) =>
+    api.teamAudits(props.site, page),
+  );
   const form = useForm<InvitationForm>({
     resolver: zodResolver(invitationSchema),
     defaultValues: { target_user_id: "" },
@@ -281,9 +279,9 @@ function OwnerTeam(props: { site: string }) {
       <h3>{t("Operation records")}</h3>
       {audits.isPending && <p>{t("Loading operation records...")}</p>}
       {audits.isError && <p role="alert">{t("Unable to load team records.")}</p>}
-      {audits.data?.length === 0 && <p>{t("No operation records.")}</p>}
+      {audits.items?.length === 0 && <p>{t("No operation records.")}</p>}
       <ul>
-        {audits.data?.map((record) => {
+        {audits.items?.map((record) => {
           let action = "Operation records";
           if (record.action === "team.invited") action = "Create team invitation";
           if (record.action === "team.accepted") action = "Accept team invitation";
@@ -295,6 +293,11 @@ function OwnerTeam(props: { site: string }) {
           );
         })}
       </ul>
+      {audits.hasMore && (
+        <Button variant="outline" onClick={audits.loadMore} disabled={audits.isLoadingMore}>
+          {t("Load more")}
+        </Button>
+      )}
     </section>
   );
 }

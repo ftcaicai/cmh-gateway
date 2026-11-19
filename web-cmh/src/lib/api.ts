@@ -163,6 +163,17 @@ export type TeamMember = Customer & { version: number };
 export type TeamInvitation = CustomerInvitation;
 export type TeamAudit = CustomerAudit;
 
+// Lists are newest first in windows of PAGE_SIZE; the server caps limit at 100.
+export const PAGE_SIZE = 50;
+export type Page = { offset?: number; limit?: number };
+function pageQuery(page: Page): string {
+  const params = new URLSearchParams();
+  if (page.offset) params.set("offset", String(page.offset));
+  if (page.limit) params.set("limit", String(page.limit));
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 export function ownsBrand(site: BrandSite | null | undefined): boolean {
   return site?.access === "owner";
 }
@@ -202,12 +213,12 @@ export const api = {
     request(`/api/ext/oem/sites/${encodeURIComponent(id)}/logo`),
   setBrandLogo: (id: string, image: string): Promise<BrandAppearance> =>
     request(`/api/ext/oem/sites/${encodeURIComponent(id)}/logo`, "PUT", { image }),
-  brandAudits: (id: string): Promise<BrandAudit[]> =>
-    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/audits`),
-  customerAudits: (site: string): Promise<CustomerAudit[]> =>
-    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customer-audits`),
-  customers: (site: string): Promise<Customer[]> =>
-    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customers`),
+  brandAudits: (id: string, page: Page = {}): Promise<BrandAudit[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/audits${pageQuery(page)}`),
+  customerAudits: (site: string, page: Page = {}): Promise<CustomerAudit[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customer-audits${pageQuery(page)}`),
+  customers: (site: string, page: Page = {}): Promise<Customer[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customers${pageQuery(page)}`),
   customerNote: (site: string, user: number): Promise<CustomerNote> =>
     request(`/api/ext/oem/sites/${encodeURIComponent(site)}/customers/${user}/notes`),
   updateCustomerNote: (
@@ -239,8 +250,8 @@ export const api = {
     request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team`),
   teamInvitations: (site: string): Promise<TeamInvitation[]> =>
     request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team-invitations`),
-  teamAudits: (site: string): Promise<TeamAudit[]> =>
-    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team-audits`),
+  teamAudits: (site: string, page: Page = {}): Promise<TeamAudit[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(site)}/team-audits${pageQuery(page)}`),
   inviteTeamMember: (
     site: string,
     user: number,

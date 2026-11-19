@@ -282,3 +282,21 @@ test("audit request uses selected profile and validates envelope", async (t) => 
     (error) => error instanceof ApiError && error.status === 502,
   );
 });
+
+test("paged lists send offset/limit only when set and keep the first page bare", async (t) => {
+  const seen = [];
+  t.mock.method(globalThis, "fetch", async (path) => {
+    seen.push(path);
+    return Response.json({ success: true, data: [] });
+  });
+  await api.brandAudits("site-1");
+  await api.brandAudits("site-1", { offset: 50, limit: 50 });
+  await api.customers("site-1", { offset: 100 });
+  await api.teamAudits("site-1", { limit: 20 });
+  assert.deepEqual(seen, [
+    "/api/ext/oem/sites/site-1/audits",
+    "/api/ext/oem/sites/site-1/audits?offset=50&limit=50",
+    "/api/ext/oem/sites/site-1/customers?offset=100",
+    "/api/ext/oem/sites/site-1/team-audits?limit=20",
+  ]);
+});

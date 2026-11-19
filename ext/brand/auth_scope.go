@@ -1,6 +1,7 @@
 package brand
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/ext/migrations"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -225,6 +227,63 @@ func RevokeBrandSessions(db *gorm.DB) (int64, error) {
 		}
 	}
 	return revoked, nil
+}
+
+// authScopeMaintenanceTask runs every minute on the node that claims it. It
+// drops bindings that can no longer be checked, and while H8 is off it revokes
+// every brand-bound session that is still alive: without the participant the
+// official code reads no binding, so such a session would pass as a main-site
+// one. The CLI step in the operator guide stays the recommended way to close
+// H8; this task is the fail-safe when that step was skipped or a node started
+// without the flag.
+type authScopeMaintenanceTask struct{}
+
+func (authScopeMaintenanceTask) Type() string            { return "cmh_auth_scope_maintenance" }
+func (authScopeMaintenanceTask) Enabled() bool           { return true }
+func (authScopeMaintenanceTask) Interval() time.Duration { return time.Minute }
+func (authScopeMaintenanceTask) NewPayload() any         { return nil }
+
+func (authScopeMaintenanceTask) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	result, err := maintainAuthScopes(ctx, model.DB)
+	status, message := model.SystemTaskStatusSucceeded, ""
+	if err != nil {
+		status, message = model.SystemTaskStatusFailed, err.Error()
+	}
+	if err := model.FinishSystemTask(task.TaskID, runnerID, status, result, message); err != nil {
+		common.SysLog(common.LogText("auth scope maintenance result not saved: %s", err.Error()))
+	}
+}
+
+// maintainAuthScopes is the body of the task. A database without the
+// extension tables is skipped, not failed: nothing is bound there.
+func maintainAuthScopes(ctx context.Context, db *gorm.DB) (map[string]int64, error) {
+	result := map[string]int64{"expired_deleted": 0, "brand_sessions_revoked": 0}
+	if db == nil {
+		return result, errors.New("database unavailable")
+	}
+	if !db.Migrator().HasTable(&migrations.AuthScopeBindingRecord{}) {
+		result["skipped"] = 1
+		return result, nil
+	}
+	deleted := db.WithContext(ctx).Where("expires_at <= ?", time.Now().Unix()).Delete(&migrations.AuthScopeBindingRecord{})
+	if deleted.Error != nil {
+		return result, deleted.Error
+	}
+	result["expired_deleted"] = deleted.RowsAffected
+	if authEnabled {
+		return result, nil
+	}
+	revoked, err := RevokeBrandSessions(db.WithContext(ctx))
+	result["brand_sessions_revoked"] = revoked
+	return result, err
+}
+
+// RegisterAuthScopeMaintenance wires the maintenance task. It is called once
+// from ext.Register, whether or not H8 is on.
+func RegisterAuthScopeMaintenance() {
+	service.RegisterSystemTaskHandler(authScopeMaintenanceTask{})
 }
 
 // brandAuthScope builds the request scope of a brand host, or reports false

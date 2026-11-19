@@ -29,7 +29,7 @@ func (teamHTTP) invitations(c *gin.Context) {
 	oemResponse(c, v, e)
 }
 func (teamHTTP) audits(c *gin.Context) {
-	v, e := NewSiteStore(model.DB).TeamAudits(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	v, e := NewSiteStore(model.DB).TeamAudits(c.Request.Context(), c.GetInt("id"), c.Param("id"), pageQuery(c))
 	oemResponse(c, v, e)
 }
 func (teamHTTP) invite(c *gin.Context) {

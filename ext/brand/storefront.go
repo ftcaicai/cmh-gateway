@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/ext/migrations"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
@@ -19,9 +20,17 @@ type storefrontView struct {
 	Canonical                    string
 	Auth, Logo, NoIndex          bool
 	LogoVersion                  int64
-	indexable                    bool   // the owner allows indexing at all
-	origin                       string // https://<verified domain>, or ""
+	// TurnstileSiteKey is set on the sign-in page while the main site requires
+	// the Cloudflare check on /api/user/login; the brand page then has to
+	// present the same token or the official middleware rejects the login.
+	TurnstileSiteKey string
+	indexable        bool   // the owner allows indexing at all
+	origin           string // https://<verified domain>, or ""
 }
+
+// turnstileSources is the only third-party origin the storefront ever allows,
+// and only on the sign-in page while the check is on.
+const turnstileSources = " https://challenges.cloudflare.com"
 
 // pageTitles are the inner pages; the home page uses the site title alone.
 var pageTitles = map[string]string{"pricing": "模型价格", "docs": "接入文档", "login": "登录", "account": "我的账号"}
@@ -32,6 +41,9 @@ var pageTitles = map[string]string{"pricing": "模型价格", "docs": "接入文
 // never from the request.
 func loadStorefront(ctx context.Context, siteID, page, path string) storefrontView {
 	view := storefrontView{Name: "品牌站", Page: page, Theme: brandThemes[0], Auth: authEnabled, indexable: true}
+	if page == "login" && authEnabled && common.TurnstileCheckEnabled {
+		view.TurnstileSiteKey = common.TurnstileSiteKey
+	}
 	if model.DB == nil {
 		view.Title = view.Name
 		return view

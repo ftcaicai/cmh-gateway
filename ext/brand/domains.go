@@ -292,6 +292,81 @@ func (s *SiteStore) verifyPendingDomains(ctx context.Context) (int, error) {
 	return verified, nil
 }
 
+// domainRecheckAfter is how long a verified domain is trusted before its CNAME
+// is looked up again.
+const domainRecheckAfter = 24 * time.Hour
+
+// recheckVerifiedDomains looks up the verified domains checked longest ago, a
+// bounded batch per run, and takes out of service those whose CNAME no longer
+// matches or no longer exists. A lookup that merely failed (timeout, resolver
+// down) only moves the check time: one DNS hiccup must not close a storefront.
+// A lapsed domain keeps its challenge, so restoring the CNAME verifies it
+// again on the next pending pass without the owner doing anything. It returns
+// how many domains lapsed.
+func (s *SiteStore) recheckVerifiedDomains(ctx context.Context) (int, error) {
+	root := domainConfig().root
+	if root == "" {
+		return 0, ErrOEMUnavailable
+	}
+	var verified []migrations.OEMSiteDomainRecord
+	if err := s.db.WithContext(ctx).Where("verified_host IS NOT NULL AND checked_at < ?", time.Now().Add(-domainRecheckAfter).Unix()).Order("checked_at").Limit(20).Find(&verified).Error; err != nil {
+		return 0, err
+	}
+	lapsed := 0
+	for _, record := range verified {
+		if ctx.Err() != nil {
+			break
+		}
+		lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		canonical, lookupErr := lookupCNAME(lookupCtx, record.Host+".")
+		cancel()
+		now := time.Now().Unix()
+		outcome := ""
+		var dnsErr *net.DNSError
+		switch {
+		case lookupErr == nil && hostName(canonical) != record.Challenge+"."+root:
+			outcome = domainErrorMismatch
+		case errors.As(lookupErr, &dnsErr) && dnsErr.IsNotFound:
+			outcome = domainErrorMissing
+		case lookupErr != nil:
+			// Transient: trust the previous result until the next pass.
+			s.db.WithContext(ctx).Model(&migrations.OEMSiteDomainRecord{}).Where("site_id = ? AND challenge = ?", record.SiteID, record.Challenge).Update("checked_at", now)
+			continue
+		}
+		if outcome == "" {
+			s.db.WithContext(ctx).Model(&migrations.OEMSiteDomainRecord{}).Where("site_id = ? AND challenge = ?", record.SiteID, record.Challenge).Update("checked_at", now)
+			continue
+		}
+		auditID, err := newOEMID()
+		if err != nil {
+			return lapsed, err
+		}
+		var site migrations.OEMSiteRecord
+		if err := s.db.WithContext(ctx).Select("version").Where("id = ?", record.SiteID).First(&site).Error; err != nil {
+			continue
+		}
+		err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			// The challenge and host in the WHERE clause skip a domain that was
+			// replaced while the lookup was running.
+			changed := tx.Model(&migrations.OEMSiteDomainRecord{}).Where("site_id = ? AND challenge = ? AND verified_host = ?", record.SiteID, record.Challenge, record.Host).
+				Updates(map[string]any{"verified_host": nil, "verified_at": 0, "checked_at": now, "last_error": outcome, "updated_at": now})
+			if changed.Error != nil {
+				return changed.Error
+			}
+			if changed.RowsAffected != 1 {
+				return ErrOEMConflict
+			}
+			return tx.Create(&migrations.OEMSiteAuditRecord{ID: auditID, SiteID: record.SiteID, ActorUserID: record.OwnerUserID, Action: "site.domain_lapsed", Version: site.Version, CreatedAt: now}).Error
+		})
+		if err != nil {
+			continue
+		}
+		lapsed++
+		publishBrandHosts(ctx)
+	}
+	return lapsed, nil
+}
+
 // verifiedHosts is the host → site ID map every request consults. It is loaded
 // on first use and replaced whenever the sync topic is bumped; the resolver
 // never queries the database itself.
@@ -342,7 +417,8 @@ func verifiedSiteForHost(host string) string {
 }
 
 // domainVerifyTask checks pending domains every minute on whichever node
-// claims the system task, so owners do not have to press "check now".
+// claims the system task, so owners do not have to press "check now", and
+// rechecks verified domains once a day.
 type domainVerifyTask struct{}
 
 func (domainVerifyTask) Type() string            { return "cmh_brand_domain_verify" }
@@ -353,12 +429,17 @@ func (domainVerifyTask) NewPayload() any         { return nil }
 func (domainVerifyTask) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	verified, err := NewSiteStore(model.DB).verifyPendingDomains(ctx)
+	store := NewSiteStore(model.DB)
+	verified, err := store.verifyPendingDomains(ctx)
+	lapsed := 0
+	if err == nil {
+		lapsed, err = store.recheckVerifiedDomains(ctx)
+	}
 	status, message := model.SystemTaskStatusSucceeded, ""
 	if err != nil {
 		status, message = model.SystemTaskStatusFailed, err.Error()
 	}
-	if err := model.FinishSystemTask(task.TaskID, runnerID, status, map[string]int{"verified": verified}, message); err != nil {
+	if err := model.FinishSystemTask(task.TaskID, runnerID, status, map[string]int{"verified": verified, "lapsed": lapsed}, message); err != nil {
 		common.SysLog(common.LogText("brand domain verification result not saved: %s", err.Error()))
 	}
 }

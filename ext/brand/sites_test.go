@@ -152,7 +152,7 @@ func TestOEMSiteHTTPUsesOfficialSessions(t *testing.T) {
 	unchangedAdmin, err := NewSiteStore(db).Get(t.Context(), admin.Id, adminSites[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, adminSites[0], unchangedAdmin)
-	adminAudits, err := NewSiteStore(db).Audits(t.Context(), admin.Id, adminSites[0].ID)
+	adminAudits, err := NewSiteStore(db).Audits(t.Context(), admin.Id, adminSites[0].ID, Page{})
 	require.NoError(t, err)
 	require.Len(t, adminAudits, 1)
 	invitePath := "/api/ext/oem/sites/" + adminSites[0].ID + "/customer-invitations"
@@ -300,6 +300,30 @@ func TestOEMSiteHTTPUsesOfficialSessions(t *testing.T) {
 	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &history))
 	require.Len(t, history.Data, 2)
 	assert.Equal(t, int64(2), history.Data[0].Version)
+	// Paging: a window past the first row, an oversized limit capped to the
+	// maximum, and junk values falling back to the first page.
+	for _, tc := range []struct {
+		query    string
+		versions []int64
+	}{
+		{"?offset=1&limit=1", []int64{1}},
+		{"?offset=0&limit=100000", []int64{2, 1}},
+		{"?offset=junk&limit=-5", []int64{2, 1}},
+		{"?offset=2", []int64{}},
+	} {
+		request = httptest.NewRequest(http.MethodGet, "/api/ext/oem/sites/"+owned[0].ID+"/audits"+tc.query, nil)
+		request.Header.Set("Authorization", "Bearer "+rootSession.AccessToken)
+		response = httptest.NewRecorder()
+		engine.ServeHTTP(response, request)
+		require.Equal(t, http.StatusOK, response.Code, tc.query)
+		history.Data = nil
+		require.NoError(t, common.Unmarshal(response.Body.Bytes(), &history))
+		versions := make([]int64, 0, len(history.Data))
+		for _, audit := range history.Data {
+			versions = append(versions, audit.Version)
+		}
+		assert.Equal(t, tc.versions, versions, tc.query)
+	}
 	foreign, err := NewSiteStore(db).List(t.Context(), customer.Id)
 	require.NoError(t, err)
 	assert.Empty(t, foreign)
@@ -399,11 +423,11 @@ func runOEMSitePersistence(t *testing.T, engine string) {
 	require.Len(t, audits, 2)
 	assert.Equal(t, "site.created", audits[0].Action)
 	assert.Equal(t, "site.updated", audits[1].Action)
-	visibleAudits, err := store.Audits(ctx, 11, site.ID)
+	visibleAudits, err := store.Audits(ctx, 11, site.ID, Page{})
 	require.NoError(t, err)
 	require.Len(t, visibleAudits, 2)
 	assert.Equal(t, int64(2), visibleAudits[0].Version)
-	_, err = store.Audits(ctx, 22, site.ID)
+	_, err = store.Audits(ctx, 22, site.ID, Page{})
 	require.ErrorIs(t, err, ErrOEMNotFound)
 	// An audit failure must roll back the profile, not leave an unaudited save.
 	require.NoError(t, db.Migrator().DropTable(&migrations.OEMSiteAuditRecord{}))

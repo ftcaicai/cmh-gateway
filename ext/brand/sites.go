@@ -28,6 +28,23 @@ type SiteStore struct{ db *gorm.DB }
 
 func NewSiteStore(db *gorm.DB) *SiteStore { return &SiteStore{db: db} }
 
+// Page is an offset window over a list ordered newest first. The zero value
+// is the first page of the default size; Limit is capped at pageMaxLimit.
+type Page struct {
+	Offset int
+	Limit  int
+}
+
+const pageMaxLimit = 100
+
+func (p Page) window(db *gorm.DB) *gorm.DB {
+	limit := p.Limit
+	if limit <= 0 || limit > pageMaxLimit {
+		limit = pageMaxLimit
+	}
+	return db.Offset(max(p.Offset, 0)).Limit(limit)
+}
+
 type SiteInput struct {
 	Name         string `json:"name"`
 	SupportEmail string `json:"support_email"`
@@ -151,12 +168,12 @@ type SiteAudit struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
-func (s *SiteStore) Audits(ctx context.Context, owner int, id string) ([]SiteAudit, error) {
+func (s *SiteStore) Audits(ctx context.Context, owner int, id string, page Page) ([]SiteAudit, error) {
 	if _, err := s.Get(ctx, owner, id); err != nil {
 		return nil, err
 	}
 	var records []migrations.OEMSiteAuditRecord
-	if err := s.db.WithContext(ctx).Where("site_id = ?", id).Order("version DESC").Limit(100).Find(&records).Error; err != nil {
+	if err := page.window(s.db.WithContext(ctx).Where("site_id = ?", id).Order("version DESC, id DESC")).Find(&records).Error; err != nil {
 		return nil, err
 	}
 	result := make([]SiteAudit, 0, len(records))

@@ -33,6 +33,7 @@ func Register() {
 	if os.Getenv("CMH_BRAND_AUTH") == "1" {
 		brand.EnableAuth()
 	}
+	brand.RegisterAuthScopeMaintenance() // expired bindings; brand sessions left over after H8 was turned off
 }
 
 // routes is the single H5 registrar; each module mounts itself here in order.
