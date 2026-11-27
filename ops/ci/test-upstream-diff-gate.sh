@@ -18,8 +18,9 @@ printf 'package main\n' > main.go
 mkdir -p middleware
 printf '' > middleware/task_plugin.go
 auth_files=(controller/user.go controller/login_verification.go controller/auth_session.go service/login_verification.go service/auth_session.go model/auth_flow.go model/login_verification.go model/user_session.go middleware/auth.go)
-for f in "${auth_files[@]}"; do mkdir -p "$(dirname "$f")"; printf '// baseline\n' > "$f"; done
-git add main.go middleware/task_plugin.go "${auth_files[@]}"
+nav_files=(web/src/hooks/use-sidebar-data.ts web/src/components/layout/components/nav-group.tsx)
+for f in "${auth_files[@]}" "${nav_files[@]}"; do mkdir -p "$(dirname "$f")"; printf '// baseline\n' > "$f"; done
+git add main.go middleware/task_plugin.go "${auth_files[@]}" "${nav_files[@]}"
 git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm baseline
 fixture_base=$(git rev-parse HEAD)
 git fetch -q --no-tags "$source_root" 17d70f116946f8099e977cfaa654d9590f96cc33
@@ -104,6 +105,18 @@ git restore controller/user.go
 for f in "${auth_files[@]}"; do printf '// auth change\n' >> "$f"; done
 check 0 'authentication files changed: 9 / 9'
 for f in "${auth_files[@]}"; do git restore "$f"; done
+# Sidebar entry files: registered by name and bounded on their own, outside H1.
+printf '// nav\n' >> "${nav_files[0]}"
+check 1 'NOT registered'
+for f in "${nav_files[@]}"; do
+  sed -i "/^middleware\\/task_plugin.go$/a $f" ext/docs/HOOKS.md
+done
+check 0 'navigation entry files changed: 1 / 2'
+for ((i=1; i<=19; i++)); do printf '// nav\n'; done >> "${nav_files[1]}"
+check 0 'navigation entry lines changed: 20 / 20'
+printf '// excess\n' >> "${nav_files[1]}"
+check 1 'navigation entry line budget exceeded: 21 > 20'
+for f in "${nav_files[@]}"; do git restore "$f"; done
 # Test missing fixed-base object in a separate repository without imported objects.
 missing="$fixture/ops/missing-base"
 mkdir -p "$missing/ops/ci" "$missing/ext/docs"
