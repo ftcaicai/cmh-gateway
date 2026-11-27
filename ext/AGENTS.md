@@ -1,4 +1,4 @@
-# AGENTS.md — 新仓库协作宪法（草案 v0.12，2026-11-27）
+# AGENTS.md — 新仓库协作宪法（草案 v0.13，2026-11-27）
 
 本文件是以官方 new-api 为基座、长期跟随官方更新的新仓库的根规则，存放于 `ext/AGENTS.md`（根目录 `AGENTS.md` 是官方的，只读）。所有人和所有 AI 助手在本仓库工作前必须先读本文件。本文件与官方 `AGENTS.md` 同时生效；两者冲突时，关于目录边界和同步的规则以本文件为准，关于代码风格以官方为准。
 
@@ -108,7 +108,7 @@
 
 **2026-11-17品牌直接登录独立专项**：负责人明确选择“批准有限认证专项（推荐）”。仅新增以下9个具名官方文件：`controller/user.go`、`controller/login_verification.go`、`controller/auth_session.go`、`service/login_verification.go`、`service/auth_session.go`、`model/auth_flow.go`、`model/login_verification.go`、`model/user_session.go`、`middleware/auth.go`。累计官方文件最多58个；本专项相对固定起点 `17d70f116946f8099e977cfaa654d9590f96cc33` 增删合计最多1800行，测试/注释同计。H1原49文件/6000行及命名单文件40行例外继续独立计量，不相互挪用；联合最大7800行，非完成保证。仅密码＋官方TOTP、刷新/登出和本人最小资料页；品牌Passkey/OAuth/注册/找回未开放，已有MFA不降级。必须独立rules PR正常CI通过并合入后才改官方实现；精确HOOKS登记、无业务core接口、同事务flow/session绑定、独立复核与真实三库/浏览器验收必须完成。超具名文件或专项行数先停止再审批，不压缩或弱化验证。详见 `ext/docs/rfc/2026-11-17-brand-direct-login-boundary.md`；不授权资金/H4/H6、生产、旧数据或新增角色。
 
-**2026-11-27侧边栏入口具名例外（R5）**：负责人明确批准。仅新增2个具名既有官方文件：`web/src/hooks/use-sidebar-data.ts`、`web/src/components/layout/components/nav-group.tsx`；两文件相对同步基线增删合计最多20行，独立计量，不使用也不让出H1/H8额度，累计官方文件最多60个。范围限于在 `admin` 分组追加一个指向 `/cmh/`、`requiredRole: ROLE.ADMIN` 的条目，以及让 `/cmh` 子树的侧边栏链接使用document navigation（复用R3的 `getAuthRedirectNavigation`）。菜单文案只用英文源文案，不改官方翻译文件；不新增官方文件/路由/依赖，不改鉴权，`/api/ext/oem` 仍由服务端 `cmh_oem` 权限强制。必须独立rules PR合入后才改官方实现。超具名文件或行数先停止再审批。详见 `ext/docs/rfc/2026-11-27-official-nav-cmh-entry.md`。
+**2026-11-27侧边栏入口具名例外（R5）**：负责人明确批准。仅新增3个具名既有官方文件：`web/src/hooks/use-sidebar-data.ts`、`web/src/components/layout/components/nav-group.tsx`、`web/src/components/command-menu.tsx`（第三个文件于同日追加批准：命令面板与侧边栏共用菜单数据，不改则该条目落到官方404）；三文件相对同步基线增删合计最多20行，独立计量，不使用也不让出H1/H8额度，累计官方文件最多61个。范围限于在 `admin` 分组追加一个指向 `/cmh/`、`requiredRole: ROLE.ADMIN` 的条目，以及让 `/cmh` 子树的侧边栏链接和命令面板跳转使用document navigation（复用R3的 `getAuthRedirectNavigation`）。菜单文案只用英文源文案，不改官方翻译文件；不新增官方文件/路由/依赖，不改鉴权，`/api/ext/oem` 仍由服务端 `cmh_oem` 权限强制。必须独立rules PR合入后才改官方实现。超具名文件或行数先停止再审批。详见 `ext/docs/rfc/2026-11-27-official-nav-cmh-entry.md`。
 
 ### 3.3 每个挂载点的要求
 
@@ -159,7 +159,7 @@
 
 - **6.1** 官方 `web/` 只读，构建产物直接使用官方构建链。官方前端用文件路由自动生成路由树，没有外部注入口，因此不向 `web/src/routes/` 加任何文件。**R3 最小桥接例外**（2026-11-13 负责人批准，RFC `ext/docs/rfc/2026-11-13-cross-app-login-return.md`）：仅可修改 HOOKS.md 登记的既有 auth redirect 工具、登录成功 hook、sign-in beforeLoad 与一个既有回归测试文件；沿用官方 sanitizer，仅其规范化结果为精确 `/cmh` 或 `/cmh/` 子树时设置 TanStack `reloadDocument: true`，其他官方路径维持 SPA 行为。不新增官方文件、不导入扩展区、不改变登录/MFA/会话/权限校验、不新增 UI/i18n 文案；全部官方实现和测试 diff 仍受 §3.2 预算与 §3.4 登记/同步验证约束。本项只豁免 §3/§3.3 对此桥接的接口变量/空实现形态要求，不授权其他官方逻辑改写。
 - **6.2** 我们的页面是独立应用 `web-cmh/`，自带构建配置，产物由 `ext` 在 `/cmh/*` 下提供；与官方同栈（React 19 + TanStack + Rsbuild）以便复用组件。
-- **6.3** 官方前端没有自定义导航入口（`HeaderNavModules` 只开关固定模块，前端不渲染未知键）。`web-cmh/` 自带完整导航，`/cmh/` 是运营与品牌主的直达入口；不改官方导航组件。要在官方界面放链接，走 §3.4 RFC。**R5 例外**（2026-11-27 负责人批准，见 §3.2）：官方侧边栏 `admin` 分组可有一个指向 `/cmh/` 的入口，仅限 §3.2 具名的两个文件与行数上限。
+- **6.3** 官方前端没有自定义导航入口（`HeaderNavModules` 只开关固定模块，前端不渲染未知键）。`web-cmh/` 自带完整导航，`/cmh/` 是运营与品牌主的直达入口；不改官方导航组件。要在官方界面放链接，走 §3.4 RFC。**R5 例外**（2026-11-27 负责人批准，见 §3.2）：官方侧边栏 `admin` 分组可有一个指向 `/cmh/` 的入口，仅限 §3.2 具名的三个文件与行数上限。
 - **6.4** 复用官方 `web/src/components/` 导出的组件，不复制改造；国际化文案放 `web-cmh/` 自己的翻译文件。
 - **6.5** `brandweb/` 保持 Go 模板静态站，由 `ext/brand` 渲染，不与任何 React 前端耦合。
 - **6.6** 对客文档（站内文档、OEM 文档、OpenAPI）与接口行为同次变更、同次发布，沿用现有"文档同步"永久规则。
@@ -238,3 +238,4 @@
 | 2026-11-14 | v0.10 | 负责人明确批准middleware/task_plugin.go唯一第49文件例外，仅提前预选generation与必要Pin复用，单文件≤40增删行、累计6000行不变；独立rules PR后实施，不含资金/生产/启用授权 |
 | 2026-11-17 | v0.11 | 批准H8品牌直接登录有限专项：9具名官方文件，相对固定17d70f116起点≤1800增删行；H1独立计量，联合≤58文件/7800行；独立rules PR合入后实施，保留同事务绑定、独立审查与真实三库/浏览器门槛，不含资金/生产/旧数据 |
 | 2026-11-27 | v0.12 | 批准R5官方侧边栏OEM控制台入口：2具名官方文件，相对同步基线≤20增删行，独立计量，累计≤60文件；管理员及以上可见，英文源文案不改官方翻译；独立rules PR合入后实施，不改鉴权 |
+| 2026-11-27 | v0.13 | R5追加第三个具名文件 `web/src/components/command-menu.tsx`（命令面板与侧边栏共用菜单数据）；行数上限20不变，累计≤61文件 |
