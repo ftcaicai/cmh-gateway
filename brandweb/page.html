@@ -147,7 +147,7 @@ print(reply.choices[0].message.content)</code></pre>
 {{end}}
 </main>
 <footer><span>© {{.Name}}</span><span class="powered">Powered by new-api · QuantumNous · AGPL-3.0</span></footer>
-{{if not .Preview}}
+{{if not .InlineCSS}}
 <script src="/brand-assets/site.js"></script>
 {{if .TurnstileSiteKey}}<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=cmhTurnstileReady" async defer></script>{{end}}
 {{end}}

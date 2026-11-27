@@ -1,12 +1,14 @@
 package brand
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/ext/migrations"
@@ -78,23 +80,25 @@ func publicAddress(addr netip.Addr) bool {
 // time of the first success in an unbroken run of successes.
 func (s *SiteStore) checkTLS(ctx context.Context, siteID, host string) error {
 	notAfter, probeErr := probeTLS(ctx, host)
+	return s.saveTLS(ctx, siteID, host, notAfter, probeErr)
+}
+
+// saveTLS stores the outcome of one probe.
+func (s *SiteStore) saveTLS(ctx context.Context, siteID, host string, notAfter time.Time, probeErr error) error {
 	now := time.Now().Unix()
-	var previous migrations.OEMSiteTLSRecord
-	err := s.db.WithContext(ctx).Where("site_id = ? AND host = ?", siteID, host).Take(&previous).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
 	record := migrations.OEMSiteTLSRecord{SiteID: siteID, Host: host, CheckedAt: now}
-	switch {
-	case probeErr != nil:
+	if probeErr != nil {
 		record.LastError = probeErr.Error()
 		if record.LastError != tlsErrorUntrusted && record.LastError != tlsErrorPrivate {
 			record.LastError = tlsErrorUnreachable
 		}
-	case previous.ReadyAt > 0:
-		record.ReadyAt, record.NotAfter = previous.ReadyAt, notAfter.Unix()
-	default:
-		record.ReadyAt, record.NotAfter = now, notAfter.Unix()
+	} else {
+		var previous migrations.OEMSiteTLSRecord
+		err := s.db.WithContext(ctx).Where("site_id = ? AND host = ?", siteID, host).Take(&previous).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		record.ReadyAt, record.NotAfter = cmp.Or(previous.ReadyAt, now), notAfter.Unix()
 	}
 	return s.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&record).Error
 }
@@ -115,24 +119,17 @@ func (s *SiteStore) checkDueTLS(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	checked := 0
-	for _, record := range due {
-		if ctx.Err() != nil {
-			break
-		}
-		if err := s.checkTLS(ctx, record.SiteID, *record.VerifiedHost); err != nil {
-			return checked, err
-		}
-		checked++
+	// Probe together so slow hosts share one timeout; store one at a time.
+	notAfter, probeErrs := make([]time.Time, len(due)), make([]error, len(due))
+	var probes sync.WaitGroup
+	for i, record := range due {
+		probes.Go(func() { notAfter[i], probeErrs[i] = probeTLS(ctx, *record.VerifiedHost) })
 	}
-	return checked, nil
-}
-
-// siteTLS reads the stored result for the host, if it is the current one.
-func siteTLS(ctx context.Context, db *gorm.DB, siteID, host string) (migrations.OEMSiteTLSRecord, bool) {
-	var record migrations.OEMSiteTLSRecord
-	if host == "" || db.WithContext(ctx).Where("site_id = ? AND host = ?", siteID, host).Take(&record).Error != nil {
-		return record, false
+	probes.Wait()
+	for i, record := range due {
+		if err := s.saveTLS(ctx, record.SiteID, *record.VerifiedHost, notAfter[i], probeErrs[i]); err != nil {
+			return i, err
+		}
 	}
-	return record, true
+	return len(due), nil
 }

@@ -6,12 +6,12 @@ import { formatTimestampToDate } from "@/lib/format";
 import { api, type BrandAppearance, type LogoHistoryEntry } from "~/lib/api";
 
 /** The last few replaced or removed logos, each restorable. Owner only. */
-export function BrandLogoHistory(props: { siteID: string; logoUpdatedAt: number }) {
+export function BrandLogoHistory(props: { siteID: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  // Any logo change moves an entry in or out, so key the list on it.
+  // Every logo change moves an entry in or out; those mutations invalidate this.
   const history = useQuery({
-    queryKey: ["oem-logo-history", props.siteID, props.logoUpdatedAt],
+    queryKey: ["oem-logo-history", props.siteID],
     queryFn: () => api.logoHistory(props.siteID),
     gcTime: 0,
   });
@@ -19,6 +19,7 @@ export function BrandLogoHistory(props: { siteID: string; logoUpdatedAt: number 
     mutationFn: (entry: string) => api.restoreLogo(props.siteID, entry),
     onSuccess: (next: BrandAppearance) => {
       client.setQueryData(["oem-appearance", props.siteID], next);
+      void client.invalidateQueries({ queryKey: ["oem-logo-history", props.siteID] });
       void client.invalidateQueries({ queryKey: ["oem-audits", props.siteID] });
     },
   });
@@ -52,7 +53,8 @@ function HistoryItem(props: {
   const image = useQuery({
     queryKey: ["oem-logo-history-image", props.siteID, props.entry.id],
     queryFn: () => api.historicLogo(props.siteID, props.entry.id),
-    gcTime: 0,
+    // An entry's bytes never change.
+    staleTime: Infinity,
   });
   return (
     <li className="flex items-center gap-3">

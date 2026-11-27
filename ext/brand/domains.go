@@ -73,12 +73,15 @@ type SiteDomain struct {
 	TLSError     string `json:"tls_error"`
 }
 
-// withTLS adds the stored HTTPS result of the record's verified host.
-func (s *SiteStore) withTLS(ctx context.Context, view SiteDomain, record migrations.OEMSiteDomainRecord) SiteDomain {
+// domainWithTLS is domainView plus the stored HTTPS result of the record's
+// verified host, if that result is for the current host.
+func (s *SiteStore) domainWithTLS(ctx context.Context, record migrations.OEMSiteDomainRecord) SiteDomain {
+	view := domainView(record)
 	if record.VerifiedHost == nil {
 		return view
 	}
-	if tlsRecord, ok := siteTLS(ctx, s.db, record.SiteID, *record.VerifiedHost); ok {
+	var tlsRecord migrations.OEMSiteTLSRecord
+	if s.db.WithContext(ctx).Where("site_id = ? AND host = ?", record.SiteID, *record.VerifiedHost).Take(&tlsRecord).Error == nil {
 		view.TLSReady, view.TLSNotAfter, view.TLSCheckedAt, view.TLSError = tlsRecord.ReadyAt > 0, tlsRecord.NotAfter, tlsRecord.CheckedAt, tlsRecord.LastError
 	}
 	return view
@@ -139,7 +142,7 @@ func (s *SiteStore) Domain(ctx context.Context, owner int, siteID string) (SiteD
 	if err != nil {
 		return SiteDomain{}, err
 	}
-	return s.withTLS(ctx, domainView(record), record), nil
+	return s.domainWithTLS(ctx, record), nil
 }
 
 // SetDomain saves, replaces or (with an empty host) removes the site's domain.
@@ -198,7 +201,7 @@ func (s *SiteStore) SetDomain(ctx context.Context, owner int, siteID, input stri
 		return SiteDomain{}, err
 	}
 	publishBrandHosts(ctx)
-	return domainView(record), nil
+	return s.domainWithTLS(ctx, record), nil
 }
 
 // VerifyDomain checks the site's domain now, for its owner.
@@ -224,7 +227,7 @@ func (s *SiteStore) VerifyDomain(ctx context.Context, owner int, siteID string) 
 			return domainView(checked), err
 		}
 	}
-	return s.withTLS(ctx, domainView(checked), checked), nil
+	return s.domainWithTLS(ctx, checked), nil
 }
 
 // lookupCNAME is the production resolver; tests replace it.

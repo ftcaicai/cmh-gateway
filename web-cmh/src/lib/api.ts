@@ -127,7 +127,6 @@ export type BrandPause = { paused: boolean; paused_at: number };
 export type LogoHistoryEntry = {
   id: string;
   content_type: string;
-  size: number;
   replaced_at: number;
 };
 export type PreviewPage = "home" | "docs" | "login";

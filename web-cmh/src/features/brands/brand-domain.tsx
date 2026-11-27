@@ -145,17 +145,6 @@ export function BrandDomain({ siteID }: { siteID: string }) {
                 )}
               </p>
               <HTTPSStatus domain={current} />
-              <Button
-                className="mt-3"
-                variant="outline"
-                disabled={busy || changed}
-                onClick={() => verify.mutate()}
-              >
-                {verify.isPending ? t("Checking...") : t("Check HTTPS now")}
-              </Button>
-              {verify.isError && (
-                <p role="alert">{t("Unable to check the domain. Try again later.")}</p>
-              )}
             </>
           ) : (
             <>
@@ -177,18 +166,20 @@ export function BrandDomain({ siteID }: { siteID: string }) {
                 )}
               </p>
               {failure && <p role="status">{t(failure)}</p>}
-              <Button
-                className="mt-3"
-                variant="outline"
-                disabled={busy || changed}
-                onClick={() => verify.mutate()}
-              >
-                {verify.isPending ? t("Checking...") : t("Check now")}
-              </Button>
-              {verify.isError && (
-                <p role="alert">{t("Unable to check the domain. Try again later.")}</p>
-              )}
             </>
+          )}
+          <Button
+            className="mt-3"
+            variant="outline"
+            disabled={busy || changed}
+            onClick={() => verify.mutate()}
+          >
+            {verify.isPending
+              ? t("Checking...")
+              : t(current.verified ? "Check HTTPS now" : "Check now")}
+          </Button>
+          {verify.isError && (
+            <p role="alert">{t("Unable to check the domain. Try again later.")}</p>
           )}
         </div>
       )}

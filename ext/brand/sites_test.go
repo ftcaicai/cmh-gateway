@@ -391,14 +391,15 @@ func runOEMSitePersistence(t *testing.T, engine string) {
 	require.NoError(t, db.Raw(query).Scan(&version).Error)
 	t.Logf("real OEM database: %s %s", engine, version)
 	// The explicit opt-in DSNs are isolated fixtures. Never touch official tables.
-	for _, table := range []any{&migrations.OEMSiteAuditRecord{}, &migrations.OEMSiteRecord{}, &migrations.OEMSitePauseRecord{}, &migrations.OEMSiteTLSRecord{}, &migrations.OEMSiteLogoRecord{}, &migrations.OEMSiteLogoHistoryRecord{}, &migrations.OEMSiteDomainRecord{}} {
+	tables := []any{&migrations.OEMSiteAuditRecord{}, &migrations.OEMSiteRecord{}, &migrations.OEMSitePauseRecord{}, &migrations.OEMSiteTLSRecord{}, &migrations.OEMSiteLogoRecord{}, &migrations.OEMSiteLogoHistoryRecord{}, &migrations.OEMSiteDomainRecord{}}
+	for _, table := range tables {
 		require.NoError(t, db.Migrator().DropTable(table))
 	}
 	connection, err := db.DB()
 	require.NoError(t, err)
 	defer connection.Close()
 	defer func() {
-		for _, table := range []any{&migrations.OEMSiteAuditRecord{}, &migrations.OEMSiteRecord{}, &migrations.OEMSitePauseRecord{}, &migrations.OEMSiteTLSRecord{}, &migrations.OEMSiteLogoRecord{}, &migrations.OEMSiteLogoHistoryRecord{}, &migrations.OEMSiteDomainRecord{}} {
+		for _, table := range tables {
 			require.NoError(t, db.Migrator().DropTable(table))
 		}
 	}()
@@ -487,9 +488,9 @@ func runOEMSitePersistence(t *testing.T, engine string) {
 	require.NoError(t, err)
 	assert.Zero(t, checked, "a ready host is not due again within a day")
 	require.NoError(t, store.checkTLS(ctx, site.ID, verifiedHost), "a second write for the same site is an update")
-	tlsRow, ok := siteTLS(ctx, db, site.ID, verifiedHost)
-	require.True(t, ok)
-	assert.Equal(t, int64(2000000000), tlsRow.NotAfter)
+	withTLS, err := store.Domain(ctx, 11, site.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2000000000), withTLS.TLSNotAfter)
 	probeTLS = oldProbe
 	model.DB = oldGlobal
 	// An audit failure must roll back the profile, not leave an unaudited save.

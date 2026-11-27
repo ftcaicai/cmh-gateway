@@ -33,9 +33,8 @@ type storefrontView struct {
 	// the Cloudflare check on /api/user/login; the brand page then has to
 	// present the same token or the official middleware rejects the login.
 	TurnstileSiteKey string
-	// Preview renders for the owner's console: no scripts, the stylesheet
-	// inlined as InlineCSS.
-	Preview   bool
+	// InlineCSS is set for the owner's console preview: the stylesheet is
+	// inlined and the page carries no scripts.
 	InlineCSS template.CSS
 	indexable bool   // the owner allows indexing at all
 	origin    string // https://<verified domain>, or ""
@@ -67,7 +66,7 @@ func (s *SiteStore) Preview(ctx context.Context, owner int, siteID, theme, page 
 		return "", err
 	}
 	view := loadStorefront(ctx, siteID, page, "/")
-	view.Preview, view.InlineCSS, view.TurnstileSiteKey = true, template.CSS(css), ""
+	view.InlineCSS, view.TurnstileSiteKey = template.CSS(css), ""
 	if theme != "" {
 		view.Theme = theme
 	}

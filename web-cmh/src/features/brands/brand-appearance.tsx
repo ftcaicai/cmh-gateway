@@ -197,7 +197,10 @@ function Logo({ siteID, current }: { siteID: string; current: Appearance }) {
   });
   const upload = useMutation({
     mutationFn: (image: string) => api.setBrandLogo(siteID, image),
-    onSuccess: (next: Appearance) => client.setQueryData(["oem-appearance", siteID], next),
+    onSuccess: (next: Appearance) => {
+      client.setQueryData(["oem-appearance", siteID], next);
+      void client.invalidateQueries({ queryKey: ["oem-logo-history", siteID] });
+    },
     onError: (error) =>
       setProblem(
         error instanceof ApiError && error.status === 400
@@ -273,7 +276,7 @@ function Logo({ siteID, current }: { siteID: string; current: Appearance }) {
         {t("Shown in the site header and as the browser icon. PNG, JPEG or WebP, up to 1 MB.")}
       </p>
       {problem && <p role="alert">{t(problem)}</p>}
-      <BrandLogoHistory siteID={siteID} logoUpdatedAt={current.logo_updated_at} />
+      <BrandLogoHistory siteID={siteID} />
     </div>
   );
 }

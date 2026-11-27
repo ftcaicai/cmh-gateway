@@ -230,16 +230,12 @@ func archiveLogo(tx *gorm.DB, siteID string, owner int, now int64) (bool, error)
 	if err := tx.Where("site_id = ?", siteID).Delete(&migrations.OEMSiteLogoRecord{}).Error; err != nil {
 		return false, err
 	}
-	var kept []migrations.OEMSiteLogoHistoryRecord
-	if err := tx.Select("id").Where("site_id = ?", siteID).Order("seq DESC").Find(&kept).Error; err != nil {
+	var ids []string
+	if err := tx.Model(&migrations.OEMSiteLogoHistoryRecord{}).Where("site_id = ?", siteID).Order("seq DESC").Pluck("id", &ids).Error; err != nil {
 		return false, err
 	}
-	if len(kept) > logoHistoryKeep {
-		stale := make([]string, 0, len(kept)-logoHistoryKeep)
-		for _, record := range kept[logoHistoryKeep:] {
-			stale = append(stale, record.ID)
-		}
-		if err := tx.Where("id IN ?", stale).Delete(&migrations.OEMSiteLogoHistoryRecord{}).Error; err != nil {
+	if len(ids) > logoHistoryKeep {
+		if err := tx.Where("id IN ?", ids[logoHistoryKeep:]).Delete(&migrations.OEMSiteLogoHistoryRecord{}).Error; err != nil {
 			return false, err
 		}
 	}
@@ -250,7 +246,6 @@ func archiveLogo(tx *gorm.DB, siteID string, owner int, now int64) (bool, error)
 type LogoHistoryEntry struct {
 	ID          string `json:"id"`
 	ContentType string `json:"content_type"`
-	Size        int    `json:"size"`
 	ReplacedAt  int64  `json:"replaced_at"`
 }
 
@@ -260,12 +255,12 @@ func (s *SiteStore) LogoHistory(ctx context.Context, owner int, siteID string) (
 		return nil, err
 	}
 	var records []migrations.OEMSiteLogoHistoryRecord
-	if err := s.db.WithContext(ctx).Where("site_id = ?", siteID).Order("seq DESC").Find(&records).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("id", "content_type", "replaced_at").Where("site_id = ?", siteID).Order("seq DESC").Find(&records).Error; err != nil {
 		return nil, err
 	}
 	entries := make([]LogoHistoryEntry, 0, len(records))
 	for _, record := range records {
-		entries = append(entries, LogoHistoryEntry{ID: record.ID, ContentType: record.ContentType, Size: len(record.Data), ReplacedAt: record.ReplacedAt})
+		entries = append(entries, LogoHistoryEntry{ID: record.ID, ContentType: record.ContentType, ReplacedAt: record.ReplacedAt})
 	}
 	return entries, nil
 }
