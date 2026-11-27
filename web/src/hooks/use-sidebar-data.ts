@@ -32,6 +32,7 @@ import {
   ServerCog,
   Settings,
   ShieldCheck,
+  Store,
   Ticket,
   User,
   Users,
@@ -157,6 +158,12 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Subscriptions'),
             url: '/subscriptions',
             icon: CreditCard,
+          },
+          {
+            title: t('OEM workspace'),
+            url: '/cmh/',
+            icon: Store,
+            requiredRole: ROLE.ADMIN,
           },
           {
             title: t('System Info'),

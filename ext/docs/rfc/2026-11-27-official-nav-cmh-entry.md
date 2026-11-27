@@ -64,3 +64,26 @@ OEM 控制台在 `/cmh/`（`web-cmh/`，自带导航，"品牌档案"在 `/cmh/b
 负责人在"追加第三个具名文件"与"接受为已知限制"之间选择了前者。例外范围改为 3 个具名文件，合计行数上限仍为 20：在 `command-menu.tsx` 的两处 `navigate` 调用上，对 `/cmh` 子树使用 document navigation，同样复用 `getAuthRedirectNavigation`，预计 3–4 行。
 
 追加的验收项：在命令面板中选中该条目后加载 OEM 控制台；选中其他条目仍为 SPA 跳转。
+
+## 实施与验收记录（2026-11-27）
+
+实际改动：三个具名文件相对基线 `v1.0.0-rc.51` 合计 19 增删行（上限 20）。`command-menu.tsx` 只改了顶层条目的一处 `navigate`，子菜单条目的那处未动（没有指向 `/cmh` 的子菜单）。路由把链接地址规范为 `/cmh`（无末尾斜杠），服务端照常提供控制台。
+
+本地检查（Bun 1.4.4，`web/` 目录）：
+
+- `bun run typecheck`：1,494 文件无类型错误。
+- `oxlint` 与 `oxfmt --check` 针对三个文件：均无问题。
+- `vitest run` 既有的 `sidebar-config.test.tsx` 与 `command-menu.test.tsx`：21 个用例通过。未新增官方测试，因为测试文件不在具名范围内。
+- `ops/ci/check-upstream-diff.sh`：导航 `3 / 3` 文件、`19 / 20` 行，通过。
+- `NODE_ENV=production bun run build` 成功。
+
+真实浏览器（Chrome 158 headless，本地临时 SQLite 实例，经官方登录表单登录）7 项通过：
+
+- 管理员登录后侧边栏出现 `OEM workspace`。
+- 点击其他侧边栏条目仍为 SPA 跳转（页面内存标记保留）。
+- 点击入口后整页加载，`/cmh/static/` 脚本加载，控制台渲染。
+- 命令面板选中其他条目仍为 SPA 跳转；选中 `OEM workspace` 后整页加载控制台。
+- 390 像素宽的移动端抽屉中入口可用。
+- 普通用户登录后侧边栏没有该入口。
+
+未验证：桌面端侧边栏折叠态未单独操作；普通用户访问 `/api/ext/oem` 被服务端拒绝这一项，页面内不带令牌的 `fetch` 只得到 401，不能作为权限拒绝的证据，本次未改动鉴权代码；官方前端全量测试与全量 lint 未跑。

@@ -33,6 +33,7 @@ import {
 } from '@/components/ui/command'
 import { useSearch } from '@/context/search-provider'
 import { useTheme } from '@/context/theme-provider'
+import { getAuthRedirectNavigation } from '@/features/auth/lib/auth-redirect'
 import { useSidebarView } from '@/hooks/use-sidebar-view'
 
 import { ScrollArea } from './ui/scroll-area'
@@ -65,12 +66,18 @@ export function CommandMenu() {
               <CommandGroup key={group.id || group.title} heading={group.title}>
                 {group.items.map((navItem) => {
                   if (navItem.url) {
+                    const { reloadDocument } = getAuthRedirectNavigation(
+                      navItem.url,
+                      window.location.origin
+                    )
                     return (
                       <CommandItem
                         key={`${navItem.title}-${navItem.url}`}
                         value={navItem.title}
                         onSelect={() => {
-                          runCommand(() => navigate({ to: navItem.url }))
+                          runCommand(() =>
+                            navigate({ to: navItem.url, reloadDocument })
+                          )
                         }}
                       >
                         <div className='flex size-4 items-center justify-center'>

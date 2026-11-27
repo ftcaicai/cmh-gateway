@@ -46,6 +46,7 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from '@/components/ui/sidebar'
+import { getAuthRedirectNavigation } from '@/features/auth/lib/auth-redirect'
 
 import { checkIsActive } from '../lib/url-utils'
 import type {
@@ -122,6 +123,7 @@ function NavBadge({ children }: { children: ReactNode }) {
  */
 function SidebarMenuLink({ item, href }: { item: NavLink; href: string }) {
   const { isMobile, setOpenMobile } = useSidebar()
+  const nav = getAuthRedirectNavigation(item.url, window.location.origin)
   return (
     <SidebarMenuItem>
       <SidebarMenuButton
@@ -130,6 +132,7 @@ function SidebarMenuLink({ item, href }: { item: NavLink; href: string }) {
         render={
           <Link
             to={item.url}
+            reloadDocument={nav.reloadDocument}
             preload={isMobile ? false : undefined}
             onClick={() => setOpenMobile(false)}
           />
