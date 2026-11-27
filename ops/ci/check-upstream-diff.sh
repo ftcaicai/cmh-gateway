@@ -75,10 +75,10 @@ if ! git rev-parse -q --verify "${auth_base}^{commit}" >/dev/null; then
 fi
 auth_count=0
 auth_lines=0
-# Sidebar entry to the OEM console (R5), approved 2026-11-27: two named
+# Sidebar entry to the OEM console (R5), approved 2026-11-27: three named
 # existing files measured against the sync baseline, outside H1 and H8.
 # Scope: ext/docs/rfc/2026-11-27-official-nav-cmh-entry.md.
-nav_files=$'web/src/hooks/use-sidebar-data.ts\nweb/src/components/layout/components/nav-group.tsx'
+nav_files=$'web/src/hooks/use-sidebar-data.ts\nweb/src/components/layout/components/nav-group.tsx\nweb/src/components/command-menu.tsx'
 nav_max_lines=20
 nav_count=0
 nav_lines=0
@@ -162,7 +162,7 @@ echo "H1 official-zone lines changed (whitelisted): $lines_count / $max_lines"
 echo "authentication files changed: $auth_count / 9"
 echo "authentication lines changed from $auth_base: $auth_lines / 1800"
 echo "combined official files changed: $((files_count + auth_count)) / 58"
-echo "navigation entry files changed: $nav_count / 2"
+echo "navigation entry files changed: $nav_count / 3"
 echo "navigation entry lines changed: $nav_lines / $nav_max_lines"
 
 status=0

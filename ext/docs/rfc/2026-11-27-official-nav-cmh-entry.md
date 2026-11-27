@@ -56,3 +56,11 @@ OEM 控制台在 `/cmh/`（`web-cmh/`，自带导航，"品牌档案"在 `/cmh/b
 1. 批准这 2 个具名官方文件的例外，行数上限 20。
 2. 菜单文案选 A：只用英文源文案（如 `OEM workspace`），不改官方翻译文件；中文等界面下该项显示英文。未选的 B 方案是给官方 7 个语言文件各加一条翻译。
 3. 可见范围为管理员及以上（`ROLE.ADMIN`）。
+
+## 追加：第三个具名文件（2026-11-27 同日批准）
+
+实现时发现本 RFC 漏了一处：官方命令面板 `web/src/components/command-menu.tsx` 通过 `useSidebarView()` 与侧边栏共用同一份菜单数据，新条目会同时出现在命令面板里；该处用 `navigate({ to })` 做 SPA 跳转，选中后落到官方 404。
+
+负责人在"追加第三个具名文件"与"接受为已知限制"之间选择了前者。例外范围改为 3 个具名文件，合计行数上限仍为 20：在 `command-menu.tsx` 的两处 `navigate` 调用上，对 `/cmh` 子树使用 document navigation，同样复用 `getAuthRedirectNavigation`，预计 3–4 行。
+
+追加的验收项：在命令面板中选中该条目后加载 OEM 控制台；选中其他条目仍为 SPA 跳转。
