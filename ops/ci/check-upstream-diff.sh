@@ -75,6 +75,13 @@ if ! git rev-parse -q --verify "${auth_base}^{commit}" >/dev/null; then
 fi
 auth_count=0
 auth_lines=0
+# Sidebar entry to the OEM console (R5), approved 2026-11-27: two named
+# existing files measured against the sync baseline, outside H1 and H8.
+# Scope: ext/docs/rfc/2026-11-27-official-nav-cmh-entry.md.
+nav_files=$'web/src/hooks/use-sidebar-data.ts\nweb/src/components/layout/components/nav-group.tsx'
+nav_max_lines=20
+nav_count=0
+nav_lines=0
 allowed_changed=$(grep -xF -f <(printf '%s\n' "$whitelist") <<<"$changed" || true)
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
@@ -91,9 +98,22 @@ while IFS= read -r f; do
     n=$(awk '{a+=$1; d+=$2} END {print a+d+0}' <<<"$stats")
     auth_count=$((auth_count + 1))
     auth_lines=$((auth_lines + n))
+  elif grep -qxF "$f" <<<"$nav_files"; then
+    if ! git cat-file -e "${baseline}:${f}" 2>/dev/null; then
+      echo "::error::navigation entry scope requires existing baseline file: $f"
+      exit 1
+    fi
+    stats=$(git diff --numstat "$baseline" -- "$f")
+    if ! awk '{if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/) exit 1}' <<<"$stats"; then
+      echo "::error::unmeasurable navigation entry diff: $f"
+      exit 1
+    fi
+    n=$(awk '{a+=$1; d+=$2} END {print a+d+0}' <<<"$stats")
+    nav_count=$((nav_count + 1))
+    nav_lines=$((nav_lines + n))
   fi
 done <<<"$allowed_changed"
-allowed_changed=$(grep -vxF -f <(printf '%s\n' "$auth_files") <<<"$allowed_changed" || true)
+allowed_changed=$(grep -vxF -f <(printf '%s\n%s\n' "$auth_files" "$nav_files") <<<"$allowed_changed" || true)
 files_count=$(sed '/^[[:space:]]*$/d' <<<"$allowed_changed" | wc -l | tr -d ' ')
 lines_count=0
 if [[ -n "$allowed_changed" ]]; then
@@ -142,8 +162,14 @@ echo "H1 official-zone lines changed (whitelisted): $lines_count / $max_lines"
 echo "authentication files changed: $auth_count / 9"
 echo "authentication lines changed from $auth_base: $auth_lines / 1800"
 echo "combined official files changed: $((files_count + auth_count)) / 58"
+echo "navigation entry files changed: $nav_count / 2"
+echo "navigation entry lines changed: $nav_lines / $nav_max_lines"
 
 status=0
+if (( nav_lines > nav_max_lines )); then
+  echo "::error::navigation entry line budget exceeded: $nav_lines > $nav_max_lines"
+  status=1
+fi
 if (( auth_count > 9 || auth_lines > 1800 || files_count + auth_count > 58 || lines_count + auth_lines > 7800 )); then
   echo '::error::authentication or combined hook budget exceeded'
   status=1
