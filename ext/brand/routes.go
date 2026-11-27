@@ -118,7 +118,12 @@ func serveBrandPage(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	view := loadStorefront(c.Request.Context(), id, page, path)
+	// Auth false renders the sign-in page as a notice without a form.
+	renderStorefront(c, id, http.StatusOK, loadStorefront(c.Request.Context(), id, page, path))
+}
+
+// renderStorefront writes one storefront page with its security headers.
+func renderStorefront(c *gin.Context, id string, status int, view storefrontView) {
 	// The Turnstile widget is a script and an iframe from Cloudflare; nothing
 	// else on the storefront ever loads from a third party.
 	third := ""
@@ -129,12 +134,24 @@ func serveBrandPage(c *gin.Context) {
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.Header("Referrer-Policy", "same-origin")
 	c.Header("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'"+third+"; frame-src"+third+"; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-	c.Status(http.StatusOK)
+	c.Status(status)
 	if c.Request.Method != http.MethodHead {
-		// Auth false renders the sign-in page as a notice without a form.
 		_ = brandPage.Execute(c.Writer, view)
 	}
 	c.Abort()
+}
+
+// servePausedSite answers every request on a paused site's hosts: a branded
+// notice for pages, a fixed JSON error for APIs. Nothing else is reachable.
+func servePausedSite(c *gin.Context, id string) {
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"success": false, "code": "brand_site_suspended", "message": "站点已暂停服务"})
+		return
+	}
+	view := loadStorefront(c.Request.Context(), id, "paused", c.Request.URL.Path)
+	renderStorefront(c, id, http.StatusForbidden, view)
 }
 
 // brandPages maps a storefront path to its section of page.html.

@@ -192,11 +192,50 @@ type OEMSiteLogoRecord struct {
 
 func (OEMSiteLogoRecord) TableName() string { return "cmh_oem_site_logos" }
 
+// OEMSitePauseRecord exists while the owner has taken the storefront offline.
+// Every page and API on the site's hosts answers 403 until the row is deleted.
+type OEMSitePauseRecord struct {
+	SiteID      string `gorm:"type:varchar(32);primaryKey"`
+	OwnerUserID int    `gorm:"not null"`
+	PausedAt    int64  `gorm:"not null"`
+}
+
+func (OEMSitePauseRecord) TableName() string { return "cmh_oem_site_pauses" }
+
+// OEMSiteTLSRecord is the latest HTTPS probe of a site's verified domain. It
+// is display only and never gates serving. Host ties the result to the domain
+// it was measured on; a row for another host is stale.
+type OEMSiteTLSRecord struct {
+	SiteID    string `gorm:"type:varchar(32);primaryKey"`
+	Host      string `gorm:"type:varchar(253);not null"`
+	ReadyAt   int64  `gorm:"not null"`
+	NotAfter  int64  `gorm:"not null"`
+	CheckedAt int64  `gorm:"not null;index"`
+	LastError string `gorm:"type:varchar(32);not null"`
+}
+
+func (OEMSiteTLSRecord) TableName() string { return "cmh_oem_site_tls" }
+
+// OEMSiteLogoHistoryRecord keeps the few logos most recently replaced or
+// removed, so an owner can restore one.
+type OEMSiteLogoHistoryRecord struct {
+	ID          string `gorm:"type:varchar(32);primaryKey"`
+	SiteID      string `gorm:"type:varchar(32);not null;index"`
+	OwnerUserID int    `gorm:"not null"`
+	ContentType string `gorm:"type:varchar(32);not null"`
+	Data        []byte `gorm:"not null"`
+	ReplacedAt  int64  `gorm:"not null"`
+	// Seq orders a site's entries; several replacements can share a second.
+	Seq int64 `gorm:"not null"`
+}
+
+func (OEMSiteLogoHistoryRecord) TableName() string { return "cmh_oem_site_logo_history" }
+
 // MigrateOEM is explicit: it is not registered as H6, run on requests, or
 // invoked by importing the extension. It never migrates official tables.
 func MigrateOEM(db *gorm.DB) error {
 	if db == nil {
 		return errors.New("OEM database unavailable")
 	}
-	return db.AutoMigrate(&OEMSiteRecord{}, &OEMSiteAuditRecord{}, &OEMCustomerInvitationRecord{}, &OEMCustomerRecord{}, &OEMCustomerAuditRecord{}, &OEMCustomerNoteRecord{}, &OEMTeamInvitationRecord{}, &OEMTeamMemberRecord{}, &OEMTeamAuditRecord{}, &AuthScopeBindingRecord{}, &OEMSiteDomainRecord{}, &OEMSiteAppearanceRecord{}, &OEMSiteLogoRecord{})
+	return db.AutoMigrate(&OEMSiteRecord{}, &OEMSiteAuditRecord{}, &OEMCustomerInvitationRecord{}, &OEMCustomerRecord{}, &OEMCustomerAuditRecord{}, &OEMCustomerNoteRecord{}, &OEMTeamInvitationRecord{}, &OEMTeamMemberRecord{}, &OEMTeamAuditRecord{}, &AuthScopeBindingRecord{}, &OEMSiteDomainRecord{}, &OEMSiteAppearanceRecord{}, &OEMSiteLogoRecord{}, &OEMSitePauseRecord{}, &OEMSiteTLSRecord{}, &OEMSiteLogoHistoryRecord{})
 }

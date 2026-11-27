@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/png"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -267,6 +270,13 @@ func TestOEMSiteHTTPUsesOfficialSessions(t *testing.T) {
 	response := httptest.NewRecorder()
 	engine.ServeHTTP(response, request)
 	require.Equal(t, 200, response.Code, response.Body.String())
+	// The console keeps the returned profile as the selected one and shows the
+	// owner panels only for access "owner", like the list and detail responses.
+	var created struct {
+		Data ReadableSite `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &created))
+	assert.Equal(t, "owner", created.Data.Access, "a created profile is the caller's own")
 	owned, err := NewSiteStore(db).List(t.Context(), root.Id)
 	require.NoError(t, err)
 	require.Len(t, owned, 1)
@@ -286,6 +296,13 @@ func TestOEMSiteHTTPUsesOfficialSessions(t *testing.T) {
 			rec := httptest.NewRecorder()
 			engine.ServeHTTP(rec, req)
 			assert.Equal(t, tc.status, rec.Code, rec.Body.String())
+			if tc.status == http.StatusOK {
+				var saved struct {
+					Data ReadableSite `json:"data"`
+				}
+				require.NoError(t, common.Unmarshal(rec.Body.Bytes(), &saved))
+				assert.Equal(t, "owner", saved.Data.Access, "a saved profile stays the caller's own")
+			}
 		})
 	}
 	request = httptest.NewRequest(http.MethodGet, "/api/ext/oem/sites/"+owned[0].ID+"/audits", nil)
@@ -374,14 +391,14 @@ func runOEMSitePersistence(t *testing.T, engine string) {
 	require.NoError(t, db.Raw(query).Scan(&version).Error)
 	t.Logf("real OEM database: %s %s", engine, version)
 	// The explicit opt-in DSNs are isolated fixtures. Never touch official tables.
-	for _, table := range []any{&migrations.OEMSiteAuditRecord{}, &migrations.OEMSiteRecord{}} {
+	for _, table := range []any{&migrations.OEMSiteAuditRecord{}, &migrations.OEMSiteRecord{}, &migrations.OEMSitePauseRecord{}, &migrations.OEMSiteTLSRecord{}, &migrations.OEMSiteLogoRecord{}, &migrations.OEMSiteLogoHistoryRecord{}, &migrations.OEMSiteDomainRecord{}} {
 		require.NoError(t, db.Migrator().DropTable(table))
 	}
 	connection, err := db.DB()
 	require.NoError(t, err)
 	defer connection.Close()
 	defer func() {
-		for _, table := range []any{&migrations.OEMSiteAuditRecord{}, &migrations.OEMSiteRecord{}} {
+		for _, table := range []any{&migrations.OEMSiteAuditRecord{}, &migrations.OEMSiteRecord{}, &migrations.OEMSitePauseRecord{}, &migrations.OEMSiteTLSRecord{}, &migrations.OEMSiteLogoRecord{}, &migrations.OEMSiteLogoHistoryRecord{}, &migrations.OEMSiteDomainRecord{}} {
 			require.NoError(t, db.Migrator().DropTable(table))
 		}
 	}()
@@ -429,6 +446,52 @@ func runOEMSitePersistence(t *testing.T, engine string) {
 	assert.Equal(t, int64(2), visibleAudits[0].Version)
 	_, err = store.Audits(ctx, 22, site.ID, Page{})
 	require.ErrorIs(t, err, ErrOEMNotFound)
+	// P2 tables on this engine: pause (insert-or-nothing), logo history
+	// (bytes, per-site order, pruning) and the HTTPS result (upsert and the
+	// due-check join). The global DB is set only for the host-map reload.
+	oldGlobal := model.DB
+	model.DB = db
+	paused, err := store.SetPaused(ctx, 11, site.ID, true)
+	require.NoError(t, err)
+	again, err := store.SetPaused(ctx, 11, site.ID, true)
+	require.NoError(t, err)
+	assert.Equal(t, paused.PausedAt, again.PausedAt)
+	resumed, err := store.SetPaused(ctx, 11, site.ID, false)
+	require.NoError(t, err)
+	assert.False(t, resumed.Paused)
+	logos := make([][]byte, 0, 5)
+	for size := range 5 {
+		var buffer bytes.Buffer
+		require.NoError(t, png.Encode(&buffer, image.NewRGBA(image.Rect(0, 0, size+1, size+1))))
+		logos = append(logos, buffer.Bytes())
+		_, err := store.SetLogo(ctx, 11, site.ID, buffer.Bytes())
+		require.NoError(t, err)
+	}
+	history, err := store.LogoHistory(ctx, 11, site.ID)
+	require.NoError(t, err)
+	require.Len(t, history, logoHistoryKeep)
+	newest, err := store.HistoricLogo(ctx, 11, site.ID, history[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, logos[3], newest.Data, "bytes survive the round trip and order is by sequence")
+	restored, err := store.RestoreLogo(ctx, 11, site.ID, history[2].ID)
+	require.NoError(t, err)
+	assert.True(t, restored.HasLogo)
+	verifiedHost := "shop.example.com"
+	require.NoError(t, db.Create(&migrations.OEMSiteDomainRecord{SiteID: site.ID, OwnerUserID: 11, Host: verifiedHost, Challenge: strings.Repeat("a", 32), VerifiedHost: &verifiedHost, VerifiedAt: 1}).Error)
+	oldProbe := probeTLS
+	probeTLS = func(context.Context, string) (time.Time, error) { return time.Unix(2000000000, 0), nil }
+	checked, err := store.checkDueTLS(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, checked)
+	checked, err = store.checkDueTLS(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, checked, "a ready host is not due again within a day")
+	require.NoError(t, store.checkTLS(ctx, site.ID, verifiedHost), "a second write for the same site is an update")
+	tlsRow, ok := siteTLS(ctx, db, site.ID, verifiedHost)
+	require.True(t, ok)
+	assert.Equal(t, int64(2000000000), tlsRow.NotAfter)
+	probeTLS = oldProbe
+	model.DB = oldGlobal
 	// An audit failure must roll back the profile, not leave an unaudited save.
 	require.NoError(t, db.Migrator().DropTable(&migrations.OEMSiteAuditRecord{}))
 	_, err = store.Update(ctx, 11, site.ID, 2, original)

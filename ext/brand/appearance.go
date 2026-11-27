@@ -183,18 +183,136 @@ func (s *SiteStore) SetLogo(ctx context.Context, owner int, siteID string, data 
 	}
 	now := time.Now().Unix()
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		removed := tx.Where("site_id = ?", siteID).Delete(&migrations.OEMSiteLogoRecord{})
-		if removed.Error != nil {
-			return removed.Error
+		archived, err := archiveLogo(tx, siteID, owner, now)
+		if err != nil {
+			return err
 		}
 		if len(data) == 0 {
-			if removed.RowsAffected == 0 {
+			if !archived {
 				return nil // Nothing to remove.
 			}
 		} else if err := tx.Create(&migrations.OEMSiteLogoRecord{SiteID: siteID, OwnerUserID: owner, ContentType: contentType, Data: data, UpdatedAt: now}).Error; err != nil {
 			return err
 		}
 		return tx.Create(&migrations.OEMSiteAuditRecord{ID: auditID, SiteID: siteID, ActorUserID: owner, Action: action, Version: site.Version, CreatedAt: now}).Error
+	})
+	if err != nil {
+		return SiteAppearance{}, err
+	}
+	return loadAppearance(ctx, s.db, siteID)
+}
+
+// logoHistoryKeep is how many replaced logos a site keeps for restoring.
+const logoHistoryKeep = 3
+
+// archiveLogo moves the current logo, if any, into the history and drops the
+// oldest entries beyond logoHistoryKeep. It reports whether there was one.
+func archiveLogo(tx *gorm.DB, siteID string, owner int, now int64) (bool, error) {
+	var current migrations.OEMSiteLogoRecord
+	err := tx.Where("site_id = ?", siteID).Take(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	id, err := newOEMID()
+	if err != nil {
+		return false, err
+	}
+	var last migrations.OEMSiteLogoHistoryRecord
+	if err := tx.Select("seq").Where("site_id = ?", siteID).Order("seq DESC").Limit(1).Find(&last).Error; err != nil {
+		return false, err
+	}
+	if err := tx.Create(&migrations.OEMSiteLogoHistoryRecord{ID: id, SiteID: siteID, OwnerUserID: owner, ContentType: current.ContentType, Data: current.Data, ReplacedAt: now, Seq: last.Seq + 1}).Error; err != nil {
+		return false, err
+	}
+	if err := tx.Where("site_id = ?", siteID).Delete(&migrations.OEMSiteLogoRecord{}).Error; err != nil {
+		return false, err
+	}
+	var kept []migrations.OEMSiteLogoHistoryRecord
+	if err := tx.Select("id").Where("site_id = ?", siteID).Order("seq DESC").Find(&kept).Error; err != nil {
+		return false, err
+	}
+	if len(kept) > logoHistoryKeep {
+		stale := make([]string, 0, len(kept)-logoHistoryKeep)
+		for _, record := range kept[logoHistoryKeep:] {
+			stale = append(stale, record.ID)
+		}
+		if err := tx.Where("id IN ?", stale).Delete(&migrations.OEMSiteLogoHistoryRecord{}).Error; err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// LogoHistoryEntry is one replaced logo, without its bytes.
+type LogoHistoryEntry struct {
+	ID          string `json:"id"`
+	ContentType string `json:"content_type"`
+	Size        int    `json:"size"`
+	ReplacedAt  int64  `json:"replaced_at"`
+}
+
+// LogoHistory lists the site's replaced logos, newest first.
+func (s *SiteStore) LogoHistory(ctx context.Context, owner int, siteID string) ([]LogoHistoryEntry, error) {
+	if _, err := s.Get(ctx, owner, siteID); err != nil {
+		return nil, err
+	}
+	var records []migrations.OEMSiteLogoHistoryRecord
+	if err := s.db.WithContext(ctx).Where("site_id = ?", siteID).Order("seq DESC").Find(&records).Error; err != nil {
+		return nil, err
+	}
+	entries := make([]LogoHistoryEntry, 0, len(records))
+	for _, record := range records {
+		entries = append(entries, LogoHistoryEntry{ID: record.ID, ContentType: record.ContentType, Size: len(record.Data), ReplacedAt: record.ReplacedAt})
+	}
+	return entries, nil
+}
+
+// HistoricLogo returns one replaced logo of the owner's site.
+func (s *SiteStore) HistoricLogo(ctx context.Context, owner int, siteID, id string) (migrations.OEMSiteLogoHistoryRecord, error) {
+	var record migrations.OEMSiteLogoHistoryRecord
+	if _, err := s.Get(ctx, owner, siteID); err != nil {
+		return record, err
+	}
+	err := s.db.WithContext(ctx).Where("id = ? AND site_id = ?", id, siteID).Take(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return record, ErrOEMNotFound
+	}
+	return record, err
+}
+
+// RestoreLogo makes a replaced logo current again; the logo it replaces goes
+// into the history in turn.
+func (s *SiteStore) RestoreLogo(ctx context.Context, owner int, siteID, id string) (SiteAppearance, error) {
+	site, err := s.Get(ctx, owner, siteID)
+	if err != nil {
+		return SiteAppearance{}, err
+	}
+	auditID, err := newOEMID()
+	if err != nil {
+		return SiteAppearance{}, err
+	}
+	now := time.Now().Unix()
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var entry migrations.OEMSiteLogoHistoryRecord
+		if err := tx.Where("id = ? AND site_id = ?", id, siteID).Take(&entry).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrOEMNotFound
+			}
+			return err
+		}
+		if err := tx.Where("id = ?", id).Delete(&migrations.OEMSiteLogoHistoryRecord{}).Error; err != nil {
+			return err
+		}
+		if _, err := archiveLogo(tx, siteID, owner, now); err != nil {
+			return err
+		}
+		if err := tx.Create(&migrations.OEMSiteLogoRecord{SiteID: siteID, OwnerUserID: owner, ContentType: entry.ContentType, Data: entry.Data, UpdatedAt: now}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&migrations.OEMSiteAuditRecord{ID: auditID, SiteID: siteID, ActorUserID: owner, Action: "site.logo_restored", Version: site.Version, CreatedAt: now}).Error
 	})
 	if err != nil {
 		return SiteAppearance{}, err

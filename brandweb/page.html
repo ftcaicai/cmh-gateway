@@ -10,18 +10,20 @@
 {{if .Canonical}}<link rel="canonical" href="{{.Canonical}}">{{end}}
 <meta property="og:title" content="{{.Title}}">
 {{if .Description}}<meta property="og:description" content="{{.Description}}">{{end}}
-{{if .Logo}}<link rel="icon" href="/brand-assets/logo?v={{.LogoVersion}}">{{end}}
-<link rel="stylesheet" href="/brand-assets/site.css">
+{{if .LogoSrc}}<link rel="icon" href="{{.LogoSrc}}">{{end}}
+{{if .InlineCSS}}<style>{{.InlineCSS}}</style>{{else}}<link rel="stylesheet" href="/brand-assets/site.css">{{end}}
 </head>
 <body data-page="{{.Page}}" data-theme="{{.Theme}}">
 <header>
-<a class="brand" href="/">{{if .Logo}}<img src="/brand-assets/logo?v={{.LogoVersion}}" alt="">{{end}}{{.Name}}</a>
+<a class="brand" href="/">{{if .LogoSrc}}<img src="{{.LogoSrc}}" alt="">{{end}}{{.Name}}</a>
+{{if ne .Page "paused"}}
 <nav aria-label="主导航">
 <a href="/"{{if eq .Page "home"}} aria-current="page"{{end}}>首页</a>
 <a href="/pricing"{{if eq .Page "pricing"}} aria-current="page"{{end}}>模型价格</a>
 <a href="/docs"{{if eq .Page "docs"}} aria-current="page"{{end}}>接入文档</a>
 </nav>
 {{if .Auth}}<a class="button small" id="nav-account" href="/login">登录</a>{{end}}
+{{end}}
 </header>
 <main>
 {{if eq .Page "home"}}
@@ -85,6 +87,12 @@ print(reply.choices[0].message.content)</code></pre>
 <dt>5xx</dt><dd>服务暂时不可用，建议使用指数退避重试。</dd>
 </dl>
 </section>
+{{else if eq .Page "paused"}}
+<section class="content paused">
+<p class="label">NOTICE</p>
+<h1>站点已暂停服务</h1>
+<p class="muted">{{.Name}} 暂时停止对外服务，请稍后再来，或通过原有渠道联系客服。</p>
+</section>
 {{else}}
 <div class="layout">
 <section class="hero">
@@ -138,7 +146,10 @@ print(reply.choices[0].message.content)</code></pre>
 </div>
 {{end}}
 </main>
+<footer><span>© {{.Name}}</span><span class="powered">Powered by new-api · QuantumNous · AGPL-3.0</span></footer>
+{{if not .Preview}}
 <script src="/brand-assets/site.js"></script>
 {{if .TurnstileSiteKey}}<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=cmhTurnstileReady" async defer></script>{{end}}
+{{end}}
 </body>
 </html>

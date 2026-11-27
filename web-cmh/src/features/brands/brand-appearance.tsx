@@ -9,6 +9,9 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, ApiError, type BrandAppearance as Appearance } from "~/lib/api";
 
+import { BrandLogoHistory } from "./brand-logo-history";
+import { BrandPreview } from "./brand-preview";
+
 const themes = [
   { id: "default", label: "Cloud-white business", swatch: "#285cf2", surface: "#f4f7fc" },
   { id: "technology", label: "Dark technology", swatch: "#6b96ff", surface: "#0b1120" },
@@ -156,9 +159,12 @@ function Settings({ siteID, saved }: { siteID: string; saved: Appearance }) {
           "Sign-in and account pages are never indexed. Limits: title 120, description 300, keywords 200 characters.",
         )}
       </p>
-      <Button type="submit" disabled={save.isPending || conflict}>
-        {save.isPending ? t("Saving...") : t("Save appearance")}
-      </Button>
+      <div className="flex flex-wrap gap-3">
+        <Button type="submit" disabled={save.isPending || conflict}>
+          {save.isPending ? t("Saving...") : t("Save appearance")}
+        </Button>
+        <BrandPreview siteID={siteID} theme={form.theme} disabled={save.isPending} />
+      </div>
       {notice && <p role="status">{t("Appearance saved.")}</p>}
       {save.isError && (
         <div role="alert">
@@ -267,6 +273,7 @@ function Logo({ siteID, current }: { siteID: string; current: Appearance }) {
         {t("Shown in the site header and as the browser icon. PNG, JPEG or WebP, up to 1 MB.")}
       </p>
       {problem && <p role="alert">{t(problem)}</p>}
+      <BrandLogoHistory siteID={siteID} logoUpdatedAt={current.logo_updated_at} />
     </div>
   );
 }

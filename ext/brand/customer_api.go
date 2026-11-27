@@ -77,9 +77,12 @@ func decodeCustomerInput(c *gin.Context, key string, target any) bool {
 	root.ForEach(func(name, value ojson.Result) bool {
 		count++
 		valid = valid && name.String() == key
-		if key == "token" || key == "host" {
+		switch key {
+		case "token", "host":
 			valid = valid && value.Type == ojson.String
-		} else {
+		case "paused":
+			valid = valid && (value.Type == ojson.True || value.Type == ojson.False)
+		default:
 			valid = valid && value.Type == ojson.Number
 		}
 		return valid

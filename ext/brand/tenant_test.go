@@ -3,18 +3,25 @@ package brand
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/png"
 	"net"
 	"net/http/httptest"
+	"net/netip"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/brandweb"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/ext/core"
 	"github.com/QuantumNous/new-api/ext/migrations"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -144,8 +151,22 @@ func TestSelfServiceDomain(t *testing.T) {
 		}
 		return "", &net.DNSError{Err: "no such host", IsNotFound: true}
 	}
+	// HTTPS probes never touch the network here: a host answers with the
+	// certificate expiry in tlsResults, or as unreachable.
+	oldProbe := probeTLS
+	tlsResults := map[string]error{}
+	certExpiry := time.Now().Add(60 * 24 * time.Hour).Truncate(time.Second)
+	probeTLS = func(_ context.Context, host string) (time.Time, error) {
+		if err, ok := tlsResults[host]; ok {
+			if err != nil {
+				return time.Time{}, err
+			}
+			return certExpiry, nil
+		}
+		return time.Time{}, errors.New(tlsErrorUnreachable)
+	}
 	t.Cleanup(func() {
-		model.DB, domainConfig, lookupCNAME, hostMap = oldDB, oldConfig, oldLookup, oldHosts
+		model.DB, domainConfig, lookupCNAME, hostMap, probeTLS = oldDB, oldConfig, oldLookup, oldHosts, oldProbe
 		verifiedHosts.Store(nil)
 		require.NoError(t, connection.Close())
 	})
@@ -211,6 +232,47 @@ func TestSelfServiceDomain(t *testing.T) {
 	assert.Equal(t, siteA.ID, BrandIDForHost("new.example.com"))
 	assert.Equal(t, siteB.ID, BrandIDForHost("shop.example.com"))
 
+	// HTTPS readiness: display only, probed for verified hosts. A failing host
+	// is retried after ten minutes, a ready one after a day; a failure after
+	// success clears readiness.
+	tlsResults["new.example.com"] = nil
+	tlsResults["shop.example.com"] = errors.New(tlsErrorUntrusted)
+	checkedTLS, err := store.checkDueTLS(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, checkedTLS)
+	viewA, err := store.Domain(ctx, 1, siteA.ID)
+	require.NoError(t, err)
+	assert.True(t, viewA.TLSReady)
+	assert.Equal(t, certExpiry.Unix(), viewA.TLSNotAfter)
+	viewB, err := store.Domain(ctx, 2, siteB.ID)
+	require.NoError(t, err)
+	assert.False(t, viewB.TLSReady)
+	assert.Equal(t, tlsErrorUntrusted, viewB.TLSError)
+	checkedTLS, err = store.checkDueTLS(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, checkedTLS, "nothing is due right after a check")
+	age := func(siteID string, by time.Duration) {
+		require.NoError(t, db.Model(&migrations.OEMSiteTLSRecord{}).Where("site_id = ?", siteID).Update("checked_at", time.Now().Add(-by).Unix()).Error)
+	}
+	age(siteB.ID, 11*time.Minute)
+	tlsResults["shop.example.com"] = nil
+	checkedTLS, err = store.checkDueTLS(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, checkedTLS, "only the failing host is due after ten minutes")
+	viewB, err = store.Domain(ctx, 2, siteB.ID)
+	require.NoError(t, err)
+	assert.True(t, viewB.TLSReady)
+	age(siteA.ID, 25*time.Hour)
+	tlsResults["new.example.com"] = errors.New(tlsErrorPrivate)
+	_, err = store.checkDueTLS(ctx)
+	require.NoError(t, err)
+	viewA, err = store.Domain(ctx, 1, siteA.ID)
+	require.NoError(t, err)
+	assert.False(t, viewA.TLSReady)
+	assert.Equal(t, tlsErrorPrivate, viewA.TLSError)
+	assert.Equal(t, siteA.ID, BrandIDForHost("new.example.com"), "HTTPS readiness never gates serving")
+	tlsResults["new.example.com"] = nil
+
 	// Daily recheck of verified domains. A fresh verification is not due; an
 	// old one is looked up again. A resolver failure only moves the check
 	// time, a removed or redirected CNAME takes the domain out of service, and
@@ -254,6 +316,19 @@ func TestSelfServiceDomain(t *testing.T) {
 		actions[audit.Action]++
 	}
 	assert.Equal(t, map[string]int{"site.created": 1, "site.domain_set": 2, "site.domain_verified": 3, "site.domain_lapsed": 1, "site.domain_cleared": 1}, actions)
+}
+
+// TestPublicAddress pins the guard that keeps the HTTPS probe off internal
+// networks.
+func TestPublicAddress(t *testing.T) {
+	for address, public := range map[string]bool{
+		"8.8.8.8": true, "2606:4700::1111": true,
+		"10.0.0.1": false, "172.16.0.1": false, "192.168.1.1": false, "127.0.0.1": false,
+		"169.254.169.254": false, "0.0.0.0": false, "::1": false, "fc00::1": false, "fe80::1": false,
+		"::ffff:10.0.0.1": false, "224.0.0.1": false,
+	} {
+		assert.Equal(t, public, publicAddress(netip.MustParseAddr(address)), address)
+	}
 }
 
 // TestAuthScopeMaintenance covers the fail-safe behind "turn H8 off only after
@@ -430,4 +505,235 @@ func TestStorefrontAppearance(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, removed.HasLogo)
 	assert.Equal(t, 404, get("/brand-assets/logo").Code)
+
+	// Logo history: a removed or replaced logo can be restored; only the last
+	// three are kept, newest first, and only the owner sees them.
+	history, err := store.LogoHistory(ctx, 1, site.ID)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	restored, err := store.RestoreLogo(ctx, 1, site.ID, history[0].ID)
+	require.NoError(t, err)
+	assert.True(t, restored.HasLogo)
+	assert.Equal(t, logo, get("/brand-assets/logo").Body.Bytes())
+	for _, size := range []int{9, 10, 11, 12} {
+		_, err = store.SetLogo(ctx, 1, site.ID, pngOf(size, size))
+		require.NoError(t, err)
+	}
+	history, err = store.LogoHistory(ctx, 1, site.ID)
+	require.NoError(t, err)
+	require.Len(t, history, logoHistoryKeep)
+	oldest, err := store.HistoricLogo(ctx, 1, site.ID, history[logoHistoryKeep-1].ID)
+	require.NoError(t, err)
+	assert.Equal(t, pngOf(9, 9), oldest.Data, "the 8px original and the first restore fell off the end")
+	_, err = store.LogoHistory(ctx, 2, site.ID)
+	assert.ErrorIs(t, err, ErrOEMNotFound)
+	_, err = store.RestoreLogo(ctx, 2, site.ID, history[0].ID)
+	assert.ErrorIs(t, err, ErrOEMNotFound)
+	_, err = store.RestoreLogo(ctx, 1, site.ID, "missing")
+	assert.ErrorIs(t, err, ErrOEMNotFound)
+
+	// Preview: self-contained, scriptless, with a theme tried before saving.
+	preview, err := store.Preview(ctx, 1, site.ID, "technology", "")
+	require.NoError(t, err)
+	assert.Contains(t, preview, `data-theme="technology"`)
+	assert.Contains(t, preview, `<img src="data:image/png;base64,`)
+	assert.Contains(t, preview, "<style>")
+	assert.NotContains(t, preview, "<script")
+	assert.NotContains(t, preview, "/brand-assets/")
+	saved2, err := store.Appearance(ctx, 1, site.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "business", saved2.Theme, "a preview never saves")
+	for name, args := range map[string][2]string{"unknown theme": {"neon", "home"}, "data page": {"", "pricing"}, "account page": {"", "account"}} {
+		_, err := store.Preview(ctx, 1, site.ID, args[0], args[1])
+		assert.ErrorIs(t, err, ErrOEMInvalid, name)
+	}
+	_, err = store.Preview(ctx, 2, site.ID, "", "home")
+	assert.ErrorIs(t, err, ErrOEMNotFound)
+
+	// Pause: every page answers 403 with a branded notice, APIs a fixed JSON
+	// error, assets stay reachable; resuming restores the storefront at once.
+	_, err = store.SetPaused(ctx, 2, site.ID, true)
+	assert.ErrorIs(t, err, ErrOEMNotFound, "another owner cannot pause")
+	paused, err := store.SetPaused(ctx, 1, site.ID, true)
+	require.NoError(t, err)
+	assert.True(t, paused.Paused)
+	again, err := store.SetPaused(ctx, 1, site.ID, true)
+	require.NoError(t, err)
+	assert.Equal(t, paused.PausedAt, again.PausedAt, "pausing twice keeps the first time")
+	for _, path := range []string{"/", "/pricing", "/login", "/robots.txt", "/nowhere"} {
+		response := get(path)
+		assert.Equal(t, 403, response.Code, path)
+		assert.Contains(t, response.Body.String(), "站点已暂停服务", path)
+		assert.Contains(t, response.Body.String(), `content="noindex,nofollow"`, path)
+		assert.NotContains(t, response.Body.String(), `href="/pricing"`, "no navigation into a paused site")
+	}
+	api := get("/api/ext/brand/pricing")
+	assert.Equal(t, 403, api.Code)
+	assert.JSONEq(t, `{"success":false,"code":"brand_site_suspended","message":"站点已暂停服务"}`, api.Body.String())
+	assert.Equal(t, 200, get("/brand-assets/site.css").Code)
+	assert.Equal(t, 200, get("/brand-assets/logo").Code)
+	resumed, err := store.SetPaused(ctx, 1, site.ID, false)
+	require.NoError(t, err)
+	assert.False(t, resumed.Paused)
+	assert.Equal(t, 200, get("/").Code)
+	audits, err := store.Audits(ctx, 1, site.ID, Page{})
+	require.NoError(t, err)
+	actions := map[string]int{}
+	for _, audit := range audits {
+		actions[audit.Action]++
+	}
+	assert.Equal(t, 1, actions["site.paused"], "a repeated pause writes no second record")
+	assert.Equal(t, 1, actions["site.resumed"])
+	assert.Equal(t, 1, actions["site.logo_restored"])
+}
+
+// TestStorefrontExposure is the G5 check carried over from the old storefront:
+// nothing a brand host serves may name an upstream vendor, the platform or its
+// domains. The AGPL attribution is the one deliberate exception and must stay
+// on every page.
+func TestStorefrontExposure(t *testing.T) {
+	engine := newEngine(t)
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/exposure.sqlite"), &gorm.Config{Logger: logger.Discard})
+	require.NoError(t, err)
+	connection, err := db.DB()
+	require.NoError(t, err)
+	require.NoError(t, migrations.MigrateOEM(db))
+	oldDB, oldAuth := model.DB, authEnabled
+	model.DB = db
+	t.Cleanup(func() {
+		model.DB, authEnabled = oldDB, oldAuth
+		verifiedHosts.Store(nil)
+		pausedSites.Store(nil)
+		require.NoError(t, connection.Close())
+	})
+	ctx, store := context.Background(), NewSiteStore(db)
+	site, err := store.Create(ctx, 1, SiteInput{Name: "Exposure Brand"})
+	require.NoError(t, err)
+	hostMap["demo.brand.test"] = site.ID
+	get := func(path string) string {
+		request := httptest.NewRequest("GET", path, nil)
+		request.Host = "demo.brand.test"
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, request)
+		return response.Body.String()
+	}
+	forbidden := []string{
+		// upstream vendors, products and model families
+		"火山", "方舟", "volcengine", "volces", "字节跳动", "doubao", "seedance", "seedream",
+		// platform identity, domains and support desk
+		"xinruan", "信软", "树数", "chinamodelhub", "antrouter", "蚂蚁", "quantumnous.com", "北京",
+		"平台", "主站", "举报", "投诉", "support@", "service@",
+	}
+	served := map[string]string{}
+	for _, theme := range brandThemes {
+		_, err := store.UpdateAppearance(ctx, 1, site.ID, SiteAppearanceInput{Theme: theme, AllowIndexing: true, Version: int64(slices.Index(brandThemes, theme))})
+		require.NoError(t, err)
+		for _, auth := range []bool{false, true} {
+			authEnabled = auth
+			for _, path := range []string{"/", "/pricing", "/docs", "/login"} {
+				served[theme+path] = get(path)
+			}
+		}
+		for _, page := range previewPages {
+			served["preview:"+theme+page], err = store.Preview(ctx, 1, site.ID, "", page)
+			require.NoError(t, err)
+		}
+	}
+	authEnabled = oldAuth
+	_, err = store.SetPaused(ctx, 1, site.ID, true)
+	require.NoError(t, err)
+	served["paused"] = get("/")
+	for _, asset := range []string{"site.js", "site.css"} {
+		content, err := brandweb.Assets.ReadFile(asset)
+		require.NoError(t, err)
+		served[asset] = string(content)
+	}
+	endpointID := regexp.MustCompile(`(?i)\bep-[a-z0-9]{4,}\b`)
+	for name, body := range served {
+		lower := strings.ToLower(body)
+		for _, word := range forbidden {
+			assert.NotContains(t, lower, strings.ToLower(word), "%s exposes %q", name, word)
+		}
+		assert.False(t, endpointID.MatchString(body), "%s exposes an upstream endpoint id", name)
+		if strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".css") {
+			continue
+		}
+		assert.Equal(t, 1, strings.Count(body, "Powered by new-api · QuantumNous · AGPL-3.0"), "%s keeps the AGPL attribution exactly once", name)
+	}
+}
+
+// TestStorefrontPricing checks the public price list against real published
+// models and ratios: only models enabled for the default group appear, and the
+// figures follow the main site's model square (ratio × 2 × group ratio per
+// million tokens, per-call price × group ratio, CNY at the configured rate).
+func TestStorefrontPricing(t *testing.T) {
+	engine := newEngine(t)
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/pricing.sqlite"), &gorm.Config{Logger: logger.Discard})
+	require.NoError(t, err)
+	connection, err := db.DB()
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.Model{}, &model.Vendor{}))
+	settings := operation_setting.GetGeneralSetting()
+	oldDB, oldRedis, oldDisplay, oldRate := model.DB, common.RedisEnabled, settings.QuotaDisplayType, operation_setting.USDExchangeRate
+	oldRatios := []string{ratio_setting.ModelRatio2JSONString(), ratio_setting.CompletionRatio2JSONString(), ratio_setting.ModelPrice2JSONString(), ratio_setting.GroupRatio2JSONString()}
+	model.DB, common.RedisEnabled = db, false
+	t.Cleanup(func() {
+		model.DB, common.RedisEnabled = oldDB, oldRedis
+		settings.QuotaDisplayType, operation_setting.USDExchangeRate = oldDisplay, oldRate
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(oldRatios[0]))
+		require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(oldRatios[1]))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(oldRatios[2]))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(oldRatios[3]))
+		model.InvalidatePricingCache()
+		require.NoError(t, connection.Close())
+	})
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"brand-token":1.5}`))
+	require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(`{"brand-token":4}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"brand-call":0.05}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":0.8,"vip":0.5}`))
+	require.NoError(t, db.Create(&[]model.Channel{
+		{Id: 1, Type: 1, Status: common.ChannelStatusEnabled, Models: "brand-token,brand-call", Group: "default"},
+		{Id: 2, Type: 1, Status: common.ChannelStatusEnabled, Models: "vip-only", Group: "vip"},
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "brand-token", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "brand-call", ChannelId: 1, Enabled: true},
+		{Group: "vip", Model: "vip-only", ChannelId: 2, Enabled: true},
+	}).Error)
+	model.InvalidatePricingCache()
+	hostMap["demo.brand.test"] = strings.Repeat("c", 32)
+
+	list := func() map[string]storefrontModel {
+		request := httptest.NewRequest("GET", "/api/ext/brand/pricing", nil)
+		request.Host = "demo.brand.test"
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, request)
+		require.Equal(t, 200, response.Code)
+		var body struct {
+			Data []storefrontModel `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
+		models := map[string]storefrontModel{}
+		for _, item := range body.Data {
+			models[item.Name] = item
+		}
+		return models
+	}
+
+	settings.QuotaDisplayType = operation_setting.QuotaDisplayTypeUSD
+	usd := list()
+	require.Len(t, usd, 2, "the vip-only model is not published to the default group")
+	assert.Equal(t, "token", usd["brand-token"].Billing)
+	assert.Equal(t, "$", usd["brand-token"].Currency)
+	assert.InDelta(t, 2.4, usd["brand-token"].Input, 1e-9, "1.5 × 2 × 0.8 per million input tokens")
+	assert.InDelta(t, 9.6, usd["brand-token"].Output, 1e-9, "input × completion ratio 4")
+	assert.Equal(t, "call", usd["brand-call"].Billing)
+	assert.InDelta(t, 0.04, usd["brand-call"].Call, 1e-9, "0.05 × 0.8 per call")
+
+	settings.QuotaDisplayType, operation_setting.USDExchangeRate = operation_setting.QuotaDisplayTypeCNY, 7.3
+	cny := list()
+	assert.Equal(t, "¥", cny["brand-token"].Currency)
+	assert.InDelta(t, 17.52, cny["brand-token"].Input, 1e-9)
+	assert.InDelta(t, 70.08, cny["brand-token"].Output, 1e-9)
+	assert.InDelta(t, 0.292, cny["brand-call"].Call, 1e-9)
 }

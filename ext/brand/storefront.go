@@ -1,11 +1,17 @@
 package brand
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/xml"
+	"html/template"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/QuantumNous/new-api/brandweb"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/ext/migrations"
 	"github.com/QuantumNous/new-api/model"
@@ -18,22 +24,66 @@ type storefrontView struct {
 	Name, Page, Theme            string
 	Title, Description, Keywords string
 	Canonical                    string
-	Auth, Logo, NoIndex          bool
-	LogoVersion                  int64
+	Auth, NoIndex                bool
+	// LogoSrc is the logo URL, empty without a logo. The storefront links
+	// /brand-assets/logo with the update time; the console preview inlines a
+	// data: URI because it renders outside any brand host.
+	LogoSrc template.URL
 	// TurnstileSiteKey is set on the sign-in page while the main site requires
 	// the Cloudflare check on /api/user/login; the brand page then has to
 	// present the same token or the official middleware rejects the login.
 	TurnstileSiteKey string
-	indexable        bool   // the owner allows indexing at all
-	origin           string // https://<verified domain>, or ""
+	// Preview renders for the owner's console: no scripts, the stylesheet
+	// inlined as InlineCSS.
+	Preview   bool
+	InlineCSS template.CSS
+	indexable bool   // the owner allows indexing at all
+	origin    string // https://<verified domain>, or ""
 }
 
 // turnstileSources is the only third-party origin the storefront ever allows,
 // and only on the sign-in page while the check is on.
 const turnstileSources = " https://challenges.cloudflare.com"
 
+// previewPages are the storefront pages a preview can render: their content
+// comes from the template alone, without scripts loading data.
+var previewPages = []string{"home", "docs", "login"}
+
+// Preview renders one storefront page for the owner's console with the saved
+// settings, or with another theme to try before saving. The page is
+// self-contained: stylesheet inlined, logo as a data: URI, no scripts.
+func (s *SiteStore) Preview(ctx context.Context, owner int, siteID, theme, page string) (string, error) {
+	if _, err := s.Get(ctx, owner, siteID); err != nil {
+		return "", err
+	}
+	if page == "" {
+		page = "home"
+	}
+	if !slices.Contains(previewPages, page) || (theme != "" && !slices.Contains(brandThemes, theme)) {
+		return "", ErrOEMInvalid
+	}
+	css, err := brandweb.Assets.ReadFile("site.css")
+	if err != nil {
+		return "", err
+	}
+	view := loadStorefront(ctx, siteID, page, "/")
+	view.Preview, view.InlineCSS, view.TurnstileSiteKey = true, template.CSS(css), ""
+	if theme != "" {
+		view.Theme = theme
+	}
+	view.LogoSrc = ""
+	if logo, err := siteLogo(ctx, s.db, siteID); err == nil {
+		view.LogoSrc = template.URL("data:" + logo.ContentType + ";base64," + base64.StdEncoding.EncodeToString(logo.Data))
+	}
+	var html bytes.Buffer
+	if err := brandPage.Execute(&html, view); err != nil {
+		return "", err
+	}
+	return html.String(), nil
+}
+
 // pageTitles are the inner pages; the home page uses the site title alone.
-var pageTitles = map[string]string{"pricing": "模型价格", "docs": "接入文档", "login": "登录", "account": "我的账号"}
+var pageTitles = map[string]string{"pricing": "模型价格", "docs": "接入文档", "login": "登录", "account": "我的账号", "paused": "暂停服务"}
 
 // loadStorefront builds the view of one page of a site. A site or setting that
 // cannot be read falls back to neutral defaults instead of the main site's
@@ -54,7 +104,9 @@ func loadStorefront(ctx context.Context, siteID, page, path string) storefrontVi
 	}
 	if appearance, err := loadAppearance(ctx, model.DB, siteID); err == nil {
 		view.Theme, view.Keywords, view.indexable = appearance.Theme, appearance.SEOKeywords, appearance.AllowIndexing
-		view.Logo, view.LogoVersion = appearance.HasLogo, appearance.LogoUpdatedAt
+		if appearance.HasLogo {
+			view.LogoSrc = template.URL("/brand-assets/logo?v=" + strconv.FormatInt(appearance.LogoUpdatedAt, 10))
+		}
 		view.Title = appearance.SEOTitle
 		if appearance.SEODescription != "" {
 			view.Description = appearance.SEODescription
@@ -71,7 +123,7 @@ func loadStorefront(ctx context.Context, siteID, page, path string) storefrontVi
 		view.origin = "https://" + *domain.VerifiedHost
 	}
 	// Sign-in and account pages are never indexed, whatever the owner chose.
-	view.NoIndex = !view.indexable || page == "login" || page == "account"
+	view.NoIndex = !view.indexable || page == "login" || page == "account" || page == "paused"
 	if !view.NoIndex && view.origin != "" {
 		view.Canonical = view.origin + path
 	}

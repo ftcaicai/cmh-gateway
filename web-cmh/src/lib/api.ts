@@ -117,7 +117,20 @@ export type BrandDomain = {
   verified_at: number;
   checked_at: number;
   last_error: string;
+  // HTTPS readiness of the verified host; all zero until first checked.
+  tls_ready: boolean;
+  tls_not_after: number;
+  tls_checked_at: number;
+  tls_error: string;
 };
+export type BrandPause = { paused: boolean; paused_at: number };
+export type LogoHistoryEntry = {
+  id: string;
+  content_type: string;
+  size: number;
+  replaced_at: number;
+};
+export type PreviewPage = "home" | "docs" | "login";
 export type BrandAppearanceInput = {
   theme: string;
   seo_title: string;
@@ -213,6 +226,26 @@ export const api = {
     request(`/api/ext/oem/sites/${encodeURIComponent(id)}/logo`),
   setBrandLogo: (id: string, image: string): Promise<BrandAppearance> =>
     request(`/api/ext/oem/sites/${encodeURIComponent(id)}/logo`, "PUT", { image }),
+  logoHistory: (id: string): Promise<LogoHistoryEntry[]> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/logo-history`),
+  historicLogo: (id: string, entry: string): Promise<{ content_type: string; image: string }> =>
+    request(
+      `/api/ext/oem/sites/${encodeURIComponent(id)}/logo-history/${encodeURIComponent(entry)}`,
+    ),
+  restoreLogo: (id: string, entry: string): Promise<BrandAppearance> =>
+    request(
+      `/api/ext/oem/sites/${encodeURIComponent(id)}/logo-history/${encodeURIComponent(entry)}/restore`,
+      "POST",
+      {},
+    ),
+  brandPreview: (id: string, theme: string, page: PreviewPage): Promise<{ html: string }> =>
+    request(
+      `/api/ext/oem/sites/${encodeURIComponent(id)}/preview?${new URLSearchParams({ theme, page })}`,
+    ),
+  brandPause: (id: string): Promise<BrandPause> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/pause`),
+  setBrandPause: (id: string, paused: boolean): Promise<BrandPause> =>
+    request(`/api/ext/oem/sites/${encodeURIComponent(id)}/pause`, "PUT", { paused }),
   brandAudits: (id: string, page: Page = {}): Promise<BrandAudit[]> =>
     request(`/api/ext/oem/sites/${encodeURIComponent(id)}/audits${pageQuery(page)}`),
   customerAudits: (site: string, page: Page = {}): Promise<CustomerAudit[]> =>

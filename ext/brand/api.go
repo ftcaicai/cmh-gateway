@@ -1,6 +1,7 @@
 package brand
 
 import (
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
@@ -53,6 +54,12 @@ func MountOEM(engine *gin.Engine) {
 	group.GET("/sites/:id/domain", middleware.RequirePermission(OEMRead), handler.domain)
 	group.PUT("/sites/:id/domain", middleware.RequirePermission(OEMWrite), middleware.UserCriticalRateLimit("cmh-oem-domain"), handler.setDomain)
 	group.POST("/sites/:id/domain/verify", middleware.RequirePermission(OEMWrite), middleware.UserCriticalRateLimit("cmh-oem-domain"), handler.verifyDomain)
+	group.GET("/sites/:id/pause", middleware.RequirePermission(OEMRead), handler.pause)
+	group.PUT("/sites/:id/pause", middleware.RequirePermission(OEMWrite), middleware.UserCriticalRateLimit("cmh-oem-pause"), handler.setPause)
+	group.GET("/sites/:id/logo-history", middleware.RequirePermission(OEMRead), handler.logoHistory)
+	group.GET("/sites/:id/logo-history/:entry", middleware.RequirePermission(OEMRead), handler.historicLogo)
+	group.POST("/sites/:id/logo-history/:entry/restore", middleware.RequirePermission(OEMWrite), middleware.UserCriticalRateLimit("cmh-oem-logo"), handler.restoreLogo)
+	group.GET("/sites/:id/preview", middleware.RequirePermission(OEMRead), handler.preview)
 }
 
 type siteHTTP struct{ store func() *SiteStore }
@@ -150,7 +157,9 @@ func (h siteHTTP) create(c *gin.Context) {
 		return
 	}
 	value, err := h.store().Create(c.Request.Context(), c.GetInt("id"), input)
-	oemResponse(c, value, err)
+	// Create and update act only on the caller's own profiles, so the result
+	// carries the same access hint as the list and detail responses.
+	oemResponse(c, ReadableSite{Site: value, Access: "owner"}, err)
 }
 func (h siteHTTP) update(c *gin.Context) {
 	var input struct {
@@ -161,7 +170,7 @@ func (h siteHTTP) update(c *gin.Context) {
 		return
 	}
 	value, err := h.store().Update(c.Request.Context(), c.GetInt("id"), c.Param("id"), input.Version, input.SiteInput)
-	oemResponse(c, value, err)
+	oemResponse(c, ReadableSite{Site: value, Access: "owner"}, err)
 }
 
 // The domain endpoints are owner-only: a shared read-only collaborator cannot
@@ -185,4 +194,48 @@ func (h siteHTTP) setDomain(c *gin.Context) {
 func (h siteHTTP) verifyDomain(c *gin.Context) {
 	value, err := h.store().VerifyDomain(c.Request.Context(), c.GetInt("id"), c.Param("id"))
 	oemResponse(c, value, err)
+}
+
+// The pause, logo history and preview endpoints are owner-only, like the
+// rest of the appearance and domain settings.
+func (h siteHTTP) pause(c *gin.Context) {
+	value, err := h.store().Pause(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	oemResponse(c, value, err)
+}
+
+func (h siteHTTP) setPause(c *gin.Context) {
+	var input struct {
+		Paused bool `json:"paused"`
+	}
+	if !decodeCustomerInput(c, "paused", &input) {
+		return
+	}
+	value, err := h.store().SetPaused(c.Request.Context(), c.GetInt("id"), c.Param("id"), input.Paused)
+	oemResponse(c, value, err)
+}
+
+func (h siteHTTP) logoHistory(c *gin.Context) {
+	value, err := h.store().LogoHistory(c.Request.Context(), c.GetInt("id"), c.Param("id"))
+	oemResponse(c, value, err)
+}
+
+func (h siteHTTP) historicLogo(c *gin.Context) {
+	record, err := h.store().HistoricLogo(c.Request.Context(), c.GetInt("id"), c.Param("id"), c.Param("entry"))
+	if err != nil {
+		oemResponse(c, nil, err)
+		return
+	}
+	oemResponse(c, gin.H{"content_type": record.ContentType, "image": base64.StdEncoding.EncodeToString(record.Data)}, nil)
+}
+
+func (h siteHTTP) restoreLogo(c *gin.Context) {
+	value, err := h.store().RestoreLogo(c.Request.Context(), c.GetInt("id"), c.Param("id"), c.Param("entry"))
+	oemResponse(c, value, err)
+}
+
+// preview returns the rendered page as a string for a sandboxed frame in the
+// console; it is never served as a document of the gateway's own origin.
+func (h siteHTTP) preview(c *gin.Context) {
+	html, err := h.store().Preview(c.Request.Context(), c.GetInt("id"), c.Param("id"), c.Query("theme"), c.Query("page"))
+	oemResponse(c, gin.H{"html": html}, err)
 }

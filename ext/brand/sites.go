@@ -173,7 +173,7 @@ func (s *SiteStore) Audits(ctx context.Context, owner int, id string, page Page)
 		return nil, err
 	}
 	var records []migrations.OEMSiteAuditRecord
-	if err := page.window(s.db.WithContext(ctx).Where("site_id = ?", id).Order("version DESC, id DESC")).Find(&records).Error; err != nil {
+	if err := page.window(s.db.WithContext(ctx).Where("site_id = ?", id).Order("created_at DESC, version DESC, id DESC")).Find(&records).Error; err != nil {
 		return nil, err
 	}
 	result := make([]SiteAudit, 0, len(records))

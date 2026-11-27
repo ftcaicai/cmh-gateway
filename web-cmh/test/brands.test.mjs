@@ -300,3 +300,19 @@ test("paged lists send offset/limit only when set and keep the first page bare",
     "/api/ext/oem/sites/site-1/team-audits?limit=20",
   ]);
 });
+
+test("storefront pause sends only the boolean and preview encodes theme and page", async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (path, init) => {
+    calls.push([path, init.method, init.body]);
+    return Response.json({ success: true, data: { paused: true, paused_at: 1, html: "<p>x</p>" } });
+  });
+  await api.setBrandPause("site 1", true);
+  await api.brandPreview("site-1", "technology", "docs");
+  await api.restoreLogo("site-1", "entry/1");
+  assert.deepEqual(calls, [
+    ["/api/ext/oem/sites/site%201/pause", "PUT", JSON.stringify({ paused: true })],
+    ["/api/ext/oem/sites/site-1/preview?theme=technology&page=docs", "GET", undefined],
+    ["/api/ext/oem/sites/site-1/logo-history/entry%2F1/restore", "POST", "{}"],
+  ]);
+});

@@ -66,6 +66,22 @@ type SiteDomain struct {
 	VerifiedAt  int64  `json:"verified_at"`
 	CheckedAt   int64  `json:"checked_at"`
 	LastError   string `json:"last_error"`
+	// HTTPS readiness of the verified host (tls.go); all zero until checked.
+	TLSReady     bool   `json:"tls_ready"`
+	TLSNotAfter  int64  `json:"tls_not_after"`
+	TLSCheckedAt int64  `json:"tls_checked_at"`
+	TLSError     string `json:"tls_error"`
+}
+
+// withTLS adds the stored HTTPS result of the record's verified host.
+func (s *SiteStore) withTLS(ctx context.Context, view SiteDomain, record migrations.OEMSiteDomainRecord) SiteDomain {
+	if record.VerifiedHost == nil {
+		return view
+	}
+	if tlsRecord, ok := siteTLS(ctx, s.db, record.SiteID, *record.VerifiedHost); ok {
+		view.TLSReady, view.TLSNotAfter, view.TLSCheckedAt, view.TLSError = tlsRecord.ReadyAt > 0, tlsRecord.NotAfter, tlsRecord.CheckedAt, tlsRecord.LastError
+	}
+	return view
 }
 
 func domainView(record migrations.OEMSiteDomainRecord) SiteDomain {
@@ -120,7 +136,10 @@ func (s *SiteStore) Domain(ctx context.Context, owner int, siteID string) (SiteD
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domainView(migrations.OEMSiteDomainRecord{}), nil
 	}
-	return domainView(record), err
+	if err != nil {
+		return SiteDomain{}, err
+	}
+	return s.withTLS(ctx, domainView(record), record), nil
 }
 
 // SetDomain saves, replaces or (with an empty host) removes the site's domain.
@@ -196,7 +215,16 @@ func (s *SiteStore) VerifyDomain(ctx context.Context, owner int, siteID string) 
 		return SiteDomain{}, err
 	}
 	checked, err := s.checkDomain(ctx, record, site.Version, lookupCNAME)
-	return domainView(checked), err
+	if err != nil {
+		return domainView(checked), err
+	}
+	// "Check now" also answers whether HTTPS already works.
+	if checked.VerifiedHost != nil {
+		if err := s.checkTLS(ctx, siteID, *checked.VerifiedHost); err != nil {
+			return domainView(checked), err
+		}
+	}
+	return s.withTLS(ctx, domainView(checked), checked), nil
 }
 
 // lookupCNAME is the production resolver; tests replace it.
@@ -375,7 +403,8 @@ var (
 	verifiedHostsOnce sync.Once
 )
 
-// ReloadBrandHosts replaces the verified host map from the database.
+// ReloadBrandHosts replaces the verified host map and the paused site set
+// from the database.
 func ReloadBrandHosts(ctx context.Context) error {
 	if model.DB == nil {
 		return ErrOEMUnavailable
@@ -389,7 +418,17 @@ func ReloadBrandHosts(ctx context.Context) error {
 		hosts[*record.VerifiedHost] = record.SiteID
 	}
 	verifiedHosts.Store(&hosts)
-	return nil
+	return loadPausedSites(ctx, model.DB)
+}
+
+// loadBrandHostsOnStart is the first, lazy load of the host map and paused
+// set on this node.
+func loadBrandHostsOnStart() {
+	if err := ReloadBrandHosts(context.Background()); err != nil {
+		// Typically the extension tables are not migrated yet: no custom
+		// domain is served until a domain change or sync reloads the map.
+		common.SysLog(common.LogText("brand domains not loaded: %s", err.Error()))
+	}
 }
 
 // publishBrandHosts applies a domain change on this node now and tells the
@@ -402,13 +441,7 @@ func publishBrandHosts(ctx context.Context) {
 }
 
 func verifiedSiteForHost(host string) string {
-	verifiedHostsOnce.Do(func() {
-		if err := ReloadBrandHosts(context.Background()); err != nil {
-			// Typically the extension tables are not migrated yet: no custom
-			// domain is served until a domain change or sync reloads the map.
-			common.SysLog(common.LogText("brand domains not loaded: %s", err.Error()))
-		}
-	})
+	verifiedHostsOnce.Do(loadBrandHostsOnStart)
 	hosts := verifiedHosts.Load()
 	if hosts == nil {
 		return ""
@@ -431,15 +464,18 @@ func (domainVerifyTask) Run(ctx context.Context, task *model.SystemTask, runnerI
 	defer cancel()
 	store := NewSiteStore(model.DB)
 	verified, err := store.verifyPendingDomains(ctx)
-	lapsed := 0
+	lapsed, tlsChecked := 0, 0
 	if err == nil {
 		lapsed, err = store.recheckVerifiedDomains(ctx)
+	}
+	if err == nil {
+		tlsChecked, err = store.checkDueTLS(ctx)
 	}
 	status, message := model.SystemTaskStatusSucceeded, ""
 	if err != nil {
 		status, message = model.SystemTaskStatusFailed, err.Error()
 	}
-	if err := model.FinishSystemTask(task.TaskID, runnerID, status, map[string]int{"verified": verified, "lapsed": lapsed}, message); err != nil {
+	if err := model.FinishSystemTask(task.TaskID, runnerID, status, map[string]int{"verified": verified, "lapsed": lapsed, "tls_checked": tlsChecked}, message); err != nil {
 		common.SysLog(common.LogText("brand domain verification result not saved: %s", err.Error()))
 	}
 }

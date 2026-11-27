@@ -12,6 +12,7 @@ import { CopyButton } from "@/components/copy-button";
 import { LoadingState } from "@/components/loading-state";
 import { BrandAppearance } from "~/features/brands/brand-appearance";
 import { BrandDomain } from "~/features/brands/brand-domain";
+import { BrandStatus } from "~/features/brands/brand-status";
 import { usePagedList } from "~/lib/use-paged-list";
 import {
   api,
@@ -30,6 +31,9 @@ const auditLabels: Record<string, string> = {
   "site.domain_set": "Domain saved",
   "site.domain_verified": "Domain verified",
   "site.domain_lapsed": "Domain CNAME no longer matches",
+  "site.paused": "Storefront paused",
+  "site.resumed": "Storefront resumed",
+  "site.logo_restored": "Logo restored",
   "site.domain_cleared": "Domain removed",
   "site.appearance_updated": "Appearance updated",
   "site.logo_updated": "Logo updated",
@@ -139,7 +143,7 @@ function Brands() {
           {t("Create profile")}
         </Button>
       </header>
-      <p>{t("The latest 100 profiles and audit records are shown.")}</p>
+      <p>{t("The latest 100 profiles are shown; operation records load 50 at a time.")}</p>
       {list.data.length === 0 ? (
         <p>{t("No brand profiles yet. Create your first profile.")}</p>
       ) : (
@@ -278,6 +282,12 @@ function Brands() {
             <section aria-label={t("Custom domain")}>
               <h3>{t("Custom domain")}</h3>
               <BrandDomain key={selected.id} siteID={selected.id} />
+            </section>
+          )}
+          {selected && ownsBrand(selected) && (
+            <section aria-label={t("Storefront status")}>
+              <h3>{t("Storefront status")}</h3>
+              <BrandStatus key={selected.id} siteID={selected.id} />
             </section>
           )}
           {selected && (

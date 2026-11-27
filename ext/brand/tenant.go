@@ -89,6 +89,11 @@ func (Resolver) Resolve(c *gin.Context) {
 		return
 	}
 	c.Set(ContextKey, id)
+	if sitePaused(id) && !strings.HasPrefix(c.Request.URL.Path, "/brand-assets/") {
+		// Assets stay reachable so the notice itself is styled and branded.
+		servePausedSite(c, id)
+		return
+	}
 	if !allowedOnBrandHost(c.Request.Method, c.Request.URL.Path) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
