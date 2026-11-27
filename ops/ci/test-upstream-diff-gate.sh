@@ -18,7 +18,7 @@ printf 'package main\n' > main.go
 mkdir -p middleware
 printf '' > middleware/task_plugin.go
 auth_files=(controller/user.go controller/login_verification.go controller/auth_session.go service/login_verification.go service/auth_session.go model/auth_flow.go model/login_verification.go model/user_session.go middleware/auth.go)
-nav_files=(web/src/hooks/use-sidebar-data.ts web/src/components/layout/components/nav-group.tsx)
+nav_files=(web/src/hooks/use-sidebar-data.ts web/src/components/layout/components/nav-group.tsx web/src/components/command-menu.tsx)
 for f in "${auth_files[@]}" "${nav_files[@]}"; do mkdir -p "$(dirname "$f")"; printf '// baseline\n' > "$f"; done
 git add main.go middleware/task_plugin.go "${auth_files[@]}" "${nav_files[@]}"
 git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm baseline
@@ -111,7 +111,7 @@ check 1 'NOT registered'
 for f in "${nav_files[@]}"; do
   sed -i "/^middleware\\/task_plugin.go$/a $f" ext/docs/HOOKS.md
 done
-check 0 'navigation entry files changed: 1 / 2'
+check 0 'navigation entry files changed: 1 / 3'
 for ((i=1; i<=19; i++)); do printf '// nav\n'; done >> "${nav_files[1]}"
 check 0 'navigation entry lines changed: 20 / 20'
 printf '// excess\n' >> "${nav_files[1]}"
